@@ -95,7 +95,7 @@ enable_error_code = ["redundant-expr", "truthy-bool", "ignore-without-code"]
 files = ["src/mlx_quant_fidelity"]
 
 [[tool.mypy.overrides]]
-module = ["mlx.*", "mlx_lm.*"]
+module = ["mlx.*", "mlx_lm.*", "pyarrow.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
