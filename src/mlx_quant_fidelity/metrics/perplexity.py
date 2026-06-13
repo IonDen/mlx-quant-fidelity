@@ -8,7 +8,7 @@ import mlx.nn as nn
 
 def token_nll(logits: mx.array, target_ids: mx.array) -> mx.array:
     """Per-position negative log-likelihood -log softmax(logits)[target]. fp32. Output [positions]."""
-    log_probs = nn.log_softmax(logits.astype(mx.float32), axis=-1)
+    log_probs = nn.log_softmax(logits.astype(mx.float32), axis=-1)  # type: ignore[attr-defined]
     chosen = mx.take_along_axis(log_probs, target_ids[:, None], axis=-1).squeeze(-1)
     return -chosen
 
