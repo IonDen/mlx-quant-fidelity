@@ -1,0 +1,21 @@
+name: CI
+on:
+  push:
+    branches: [main, "feature/**"]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # hatch-vcs needs tags/history
+      - uses: astral-sh/setup-uv@v5
+      - run: uv sync --group dev
+      - run: uv run python -c "import mlx.core, mlx_lm; print('mlx import OK')"
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+      - run: uv run mypy
+      - run: uv run pytest --cov=mlx_quant_fidelity --cov-report=term-missing --cov-fail-under=85

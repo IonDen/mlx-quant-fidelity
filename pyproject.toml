@@ -1,0 +1,126 @@
+[build-system]
+requires = ["hatchling>=1.27", "hatch-vcs>=0.4"]
+build-backend = "hatchling.build"
+
+[project]
+name = "mlx-quant-fidelity"
+description = "Measure MLX quantization quality loss — KL divergence, perplexity, top-token agreement for KV cache and weights"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
+authors = [{ name = "Denis Ineshin", email = "denis.ineshin@gmail.com" }]
+keywords = ["quantization", "quality", "kl-divergence", "perplexity", "kv-cache", "eval", "mlx", "apple-silicon"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "Intended Audience :: Science/Research",
+  "License :: OSI Approved :: Apache Software License",
+  "Operating System :: MacOS :: MacOS X",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+  "Typing :: Typed",
+]
+dynamic = ["version"]
+dependencies = [
+  "mlx>=0.21",
+  "mlx-lm>=0.31.3",
+  "numpy>=1.26",
+  "huggingface-hub>=0.24",
+  "pyarrow>=14",
+]
+
+[project.scripts]
+mlx-quant-fidelity = "mlx_quant_fidelity.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/IonDen/mlx-quant-fidelity"
+Source = "https://github.com/IonDen/mlx-quant-fidelity"
+Issues = "https://github.com/IonDen/mlx-quant-fidelity/issues"
+Changelog = "https://github.com/IonDen/mlx-quant-fidelity/blob/main/CHANGELOG.md"
+Roadmap = "https://github.com/IonDen/mlx-quant-fidelity/blob/main/ROADMAP.md"
+
+[dependency-groups]
+test = ["pytest>=8.3", "pytest-cov>=5.0", "hypothesis>=6.130"]
+typecheck = ["mypy>=1.13"]
+lint = ["ruff>=0.7"]
+dev = [
+  { include-group = "test" },
+  { include-group = "typecheck" },
+  { include-group = "lint" },
+]
+
+[tool.hatch.version]
+source = "vcs"
+
+[tool.hatch.build.hooks.vcs]
+version-file = "src/mlx_quant_fidelity/_version.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mlx_quant_fidelity"]
+
+[tool.hatch.build.targets.sdist]
+exclude = [".codegraph/", ".hypothesis/", ".coverage", "docs/superpowers/", "docs/backlog/"]
+
+[tool.ruff]
+src = ["src"]
+line-length = 100
+target-version = "py311"
+extend-exclude = ["src/mlx_quant_fidelity/_version.py"]
+
+[tool.ruff.lint]
+select = [
+  "E", "W", "F", "I", "B", "UP", "RUF", "SIM", "C4", "PIE", "PT", "RET",
+  "PTH", "TID", "TCH", "N", "D", "ANN", "PYI", "PERF", "FURB",
+]
+ignore = ["ANN401", "E501"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = ["D", "ANN", "S101"]
+
+[tool.ruff.format]
+docstring-code-format = true
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_unreachable = true
+enable_error_code = ["redundant-expr", "truthy-bool", "ignore-without-code"]
+files = ["src/mlx_quant_fidelity"]
+
+[[tool.mypy.overrides]]
+module = ["mlx.*", "mlx_lm.*"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+addopts = "-ra --strict-markers --strict-config"
+testpaths = ["tests"]
+pythonpath = ["."]
+xfail_strict = true
+filterwarnings = [
+  "error",
+  'ignore::DeprecationWarning:mlx\..*',
+  'ignore::DeprecationWarning:mlx_lm\..*',
+]
+markers = [
+  "slow: real-model probe integration test (opt in with --run-slow)",
+  "network: test requires network access (opt in with --run-network)",
+]
+
+[tool.coverage.run]
+branch = true
+source = ["mlx_quant_fidelity"]
+parallel = true
+omit = ["src/mlx_quant_fidelity/_version.py"]
+
+[tool.coverage.report]
+exclude_lines = ["pragma: no cover", "if TYPE_CHECKING:", "@overload", "raise NotImplementedError"]
+show_missing = true
+fail_under = 85

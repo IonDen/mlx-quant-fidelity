@@ -1,0 +1,16 @@
+.codegraph/
+.hypothesis/
+docs/superpowers/
+docs/backlog/
+/CLAUDE.md
+/_spike/
+.coverage
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.venv/
+__pycache__/
+build/
+dist/
+*.egg-info/
+src/mlx_quant_fidelity/_version.py
