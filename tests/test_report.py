@@ -45,4 +45,5 @@ def test_render_markdown_qualifies_by_corpus_and_length():
     assert "wikitext-2-raw" in md  # never a bare fidelity number
     assert "512" in md
     assert "stress" in md
-    assert "0.98" not in md  # no bare fidelity score
+    assert "0.0300" in md  # flip rate is rendered (corpus-qualified, not a bare score)
+    assert "bundles quantized-SDPA numerics" in md  # warnings are rendered

@@ -22,7 +22,7 @@ _WIKITEXT2_REPO = "Salesforce/wikitext"
 _WIKITEXT2_FILE = "wikitext-2-raw-v1/test-00000-of-00001.parquet"
 
 
-class _TokenizerProtocol(Protocol):
+class _TokenizerProtocol(Protocol):  # pragma: no cover - structural type, never instantiated
     """Minimal protocol for tokenizers accepted by :func:`load_wikitext2`."""
 
     def encode(self, text: str) -> list[int]:

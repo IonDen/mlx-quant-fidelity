@@ -131,3 +131,33 @@ def test_capability_gate_unsupported_bits():
     # bits=5 is not in (2,3,4,6,8) -> CacheNotQuantizableError naming kv_bits=5
     with pytest.raises(CacheNotQuantizableError, match="kv_bits=5"):
         _cache_is_quantizable([_OkCache()], group_size=64, bits=5)
+
+
+# ---------------------------------------------------------------------------
+# Task 4.5 — memory cap is installed BEFORE the model load (safety ordering)
+# ---------------------------------------------------------------------------
+
+
+def test_measure_installs_caps_before_model_load(monkeypatch):
+    # Patch the cap installer and mlx_lm.load to record order; bail at load so no model
+    # is fetched. A regression that drops or reorders the cap install goes red here.
+    import mlx_lm
+
+    from mlx_quant_fidelity.probes import kv as kv_mod
+
+    calls: list[str] = []
+
+    class _LoadStopError(Exception):
+        pass
+
+    monkeypatch.setattr(kv_mod, "install_memory_caps", lambda: calls.append("caps") or (0, 0))
+
+    def _fake_load(*_a, **_k):
+        calls.append("load")
+        raise _LoadStopError
+
+    monkeypatch.setattr(mlx_lm, "load", _fake_load)
+
+    with pytest.raises(_LoadStopError):
+        measure_kv_fidelity("any-model", quantize_start=0)
+    assert calls == ["caps", "load"]  # caps installed BEFORE the model load
