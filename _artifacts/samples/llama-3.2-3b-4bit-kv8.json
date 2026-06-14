@@ -1,0 +1,37 @@
+{
+  "cache_supported": true,
+  "corpus": {
+    "bos_policy": "none",
+    "chunk_length": 512,
+    "final_chunk_policy": "drop",
+    "n_tokens": 51200,
+    "name": "wikitext-2-raw",
+    "normalization": "raw",
+    "split": "test",
+    "stride": 512,
+    "tokenizer_id": "mlx-community/Llama-3.2-3B-Instruct-4bit"
+  },
+  "flip_rate": 0.006536203522504893,
+  "kl": {
+    "max": 0.11285734921693802,
+    "mean": 0.0001994278695706312,
+    "median": 9.906222112476826e-05,
+    "p99": 0.0014603575225919496
+  },
+  "kv_bits": 8,
+  "kv_group_size": 64,
+  "mlx_lm_version": "0.31.3",
+  "mlx_version": "0.31.2",
+  "model_id": "mlx-community/Llama-3.2-3B-Instruct-4bit",
+  "model_revision": "7f0dc925e0d0afb0322d96f9255cfddf2ba5636e",
+  "n_chunks": 100,
+  "n_positions": 51100,
+  "peak_memory_bytes": 3602307297,
+  "perplexity_delta": 0.005430383355655266,
+  "perplexity_quant": 17.727757065853268,
+  "perplexity_ref": 17.722326682497613,
+  "quantize_mode": "stress",
+  "quantize_start": 0,
+  "verdict": "good",
+  "warnings": []
+}
