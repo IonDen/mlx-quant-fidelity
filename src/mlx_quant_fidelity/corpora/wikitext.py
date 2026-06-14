@@ -70,6 +70,7 @@ def load_wikitext2(  # pragma: no cover
     chunk_length: int = 512,
     drop_final_partial: bool = True,
     max_chunks: int | None = None,
+    tokenizer_id: str | None = None,
 ) -> Corpus:
     """Load WikiText-2 test split, tokenize, and chunk.
 
@@ -85,6 +86,9 @@ def load_wikitext2(  # pragma: no cover
             ``chunk_length``. Default True (0.1.0 comparability stance).
         max_chunks: If set, keep only the first ``max_chunks`` chunks. The
             ``n_tokens`` in the provenance is computed from the capped set.
+        tokenizer_id: Identifier recorded in provenance. Defaults to
+            ``tokenizer.name_or_path``, which for an mlx-lm tokenizer is a local
+            cache path — pass the model repo id to keep reports portable.
 
     Returns:
         A :class:`Corpus` with provenance recording the exact tokenization +
@@ -106,7 +110,7 @@ def load_wikitext2(  # pragma: no cover
     provenance = CorpusProvenance(
         name="wikitext-2-raw",
         split="test",
-        tokenizer_id=tokenizer.name_or_path,
+        tokenizer_id=tokenizer_id if tokenizer_id is not None else tokenizer.name_or_path,
         chunk_length=chunk_length,
         stride=chunk_length,
         bos_policy="none",

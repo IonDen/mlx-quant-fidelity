@@ -167,7 +167,7 @@ def measure_kv_fidelity(
     if corpus is None:  # pragma: no cover
         from mlx_quant_fidelity.corpora.wikitext import load_wikitext2
 
-        corpus = load_wikitext2(tokenizer, max_chunks=max_chunks)
+        corpus = load_wikitext2(tokenizer, max_chunks=max_chunks, tokenizer_id=model_id)
 
     probe_cache = make_prompt_cache(model)  # pragma: no cover
     n_layers = len(probe_cache)  # pragma: no cover
