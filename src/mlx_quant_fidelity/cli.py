@@ -52,15 +52,22 @@ def _console_entry() -> None:  # pragma: no cover - process-exit wrapper
 
     Runs :func:`main`, flushes output, then hard-exits via ``os._exit`` to skip MLX's
     Metal backend C++ destructor, which segfaults at interpreter shutdown on Apple
-    Silicon ("Python quit unexpectedly"). The work and output are already complete.
+    Silicon ("Python quit unexpectedly"). The ``finally`` guarantees the hard exit on
+    every path — including an unexpected error from ``main`` — so the teardown segfault
+    cannot leak through on an error.
     """
+    code = 1
     try:
         code = main()
     except SystemExit as exc:  # argparse usage errors, etc.
         code = exc.code if isinstance(exc.code, int) else 1
-    sys.stdout.flush()
-    sys.stderr.flush()
-    os._exit(code)
+    except Exception as exc:  # last resort: still hard-exit rather than crash in teardown
+        print(f"internal error: {exc}", file=sys.stderr)
+        code = 1
+    finally:
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os._exit(code)
 
 
 if __name__ == "__main__":  # pragma: no cover
