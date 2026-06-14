@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import os
+import sys
+
 import pytest
 
 from mlx_quant_fidelity._memory_caps import install_memory_caps
@@ -40,3 +43,23 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
         for item in items:
             if marker in item.keywords:
                 item.add_marker(skip)
+
+
+@pytest.hookimpl(wrapper=True, trylast=True)
+def pytest_sessionfinish(session: pytest.Session, exitstatus: int):
+    """Hard-exit past MLX's Metal teardown segfault.
+
+    Once GPU compute has run, MLX's Metal backend segfaults in its C++ destructor at
+    interpreter shutdown on Apple Silicon ("Python quit unexpectedly"). As a wrapper hook
+    we ``yield`` first, so every other sessionfinish hook — coverage data, the terminal
+    summary, and ``--cov-fail-under`` gating — completes and ``session.exitstatus`` is
+    final. Then we flush and ``os._exit`` with that exact status, skipping the buggy
+    teardown. CI (no Metal device) is unaffected: it just gets a clean exit with the
+    same code.
+    """
+    try:
+        return (yield)
+    finally:
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os._exit(int(session.exitstatus))
