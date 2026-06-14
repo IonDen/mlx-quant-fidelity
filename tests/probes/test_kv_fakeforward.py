@@ -5,7 +5,12 @@ import math
 import mlx.core as mx
 import pytest
 
-from mlx_quant_fidelity.errors import CacheNotQuantizableError, ExactZeroError, QuantFidelityError
+from mlx_quant_fidelity.errors import (
+    CacheNotQuantizableError,
+    CorpusError,
+    ExactZeroError,
+    QuantFidelityError,
+)
 from mlx_quant_fidelity.probes.kv import (
     _aggregate_chunks,
     _cache_is_quantizable,
@@ -161,3 +166,29 @@ def test_measure_installs_caps_before_model_load(monkeypatch):
     with pytest.raises(_LoadStopError):
         measure_kv_fidelity("any-model", quantize_start=0)
     assert calls == ["caps", "load"]  # caps installed BEFORE the model load
+
+
+# ---------------------------------------------------------------------------
+# Task 4.6 — empty-corpus / bad max_chunks raise a clean CorpusError before load
+# ---------------------------------------------------------------------------
+
+
+def test_max_chunks_zero_raises_clean_error():
+    with pytest.raises(CorpusError, match="max_chunks"):
+        measure_kv_fidelity("any-model", max_chunks=0)
+
+
+def test_max_chunks_negative_raises_clean_error():
+    with pytest.raises(CorpusError, match="max_chunks"):
+        measure_kv_fidelity("any-model", max_chunks=-1)
+
+
+def test_empty_corpus_raises_clean_error():
+    from mlx_quant_fidelity.corpora.provenance import Corpus, CorpusProvenance
+
+    empty = Corpus(
+        chunks=(),
+        provenance=CorpusProvenance("x", "test", "t", 512, 512, "none", "drop", "raw", 0),
+    )
+    with pytest.raises(CorpusError, match="no chunks"):
+        measure_kv_fidelity("any-model", corpus=empty)

@@ -10,7 +10,12 @@ import mlx.core as mx
 import numpy as np
 
 from mlx_quant_fidelity._memory_caps import install_memory_caps
-from mlx_quant_fidelity.errors import CacheNotQuantizableError, ExactZeroError, QuantFidelityError
+from mlx_quant_fidelity.errors import (
+    CacheNotQuantizableError,
+    CorpusError,
+    ExactZeroError,
+    QuantFidelityError,
+)
 from mlx_quant_fidelity.metrics import ScalarSummary, perplexity, summarize
 from mlx_quant_fidelity.metrics.flip import top_token_flips
 from mlx_quant_fidelity.metrics.kl import kl_divergence
@@ -160,6 +165,10 @@ def measure_kv_fidelity(
             "deployment mode (quantize_start > 0) is not implemented in 0.1.0; "
             "0.1.0 measures stress mode only (quantize_start=0)."
         )
+    if max_chunks is not None and max_chunks < 1:
+        raise CorpusError(f"max_chunks must be >= 1 (got {max_chunks}).")
+    if corpus is not None and len(corpus.chunks) == 0:
+        raise CorpusError("the provided corpus has no chunks; at least one is required.")
     install_memory_caps()  # must precede model load
     _loaded = load(model_id, revision=model_revision)  # pragma: no cover
     model, tokenizer = _loaded[0], _loaded[1]  # pragma: no cover
@@ -168,6 +177,8 @@ def measure_kv_fidelity(
         from mlx_quant_fidelity.corpora.wikitext import load_wikitext2
 
         corpus = load_wikitext2(tokenizer, max_chunks=max_chunks, tokenizer_id=model_id)
+        if len(corpus.chunks) == 0:
+            raise CorpusError("the evaluation corpus yielded no chunks; at least one is required.")
 
     probe_cache = make_prompt_cache(model)  # pragma: no cover
     n_layers = len(probe_cache)  # pragma: no cover
