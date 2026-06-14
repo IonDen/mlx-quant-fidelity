@@ -34,7 +34,7 @@ dependencies = [
 ]
 
 [project.scripts]
-mlx-quant-fidelity = "mlx_quant_fidelity.cli:main"
+mlx-quant-fidelity = "mlx_quant_fidelity.cli:_console_entry"
 
 [project.urls]
 Homepage = "https://github.com/IonDen/mlx-quant-fidelity"

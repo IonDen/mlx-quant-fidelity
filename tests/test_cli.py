@@ -4,6 +4,7 @@ import pytest
 
 from mlx_quant_fidelity import cli
 from mlx_quant_fidelity.corpora.provenance import CorpusProvenance
+from mlx_quant_fidelity.errors import QuantFidelityError
 from mlx_quant_fidelity.metrics import ScalarSummary
 from mlx_quant_fidelity.report import FidelityReport
 
@@ -48,3 +49,15 @@ def test_cli_installs_caps_before_measure(monkeypatch: pytest.MonkeyPatch) -> No
     )
     cli.main(["kv", "mlx-community/x"])
     assert calls == ["caps", "measure"]  # caps FIRST
+
+
+def test_cli_reports_domain_error(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def _raise(*_a: object, **_k: object) -> FidelityReport:
+        raise QuantFidelityError("deployment mode not supported")
+
+    monkeypatch.setattr(cli, "measure_kv_fidelity", _raise)
+    rc = cli.main(["kv", "m"])
+    assert rc == 2
+    assert "deployment mode not supported" in capsys.readouterr().err
