@@ -5,7 +5,9 @@ on:
 
 jobs:
   build-and-publish:
-    runs-on: macos-15
+    # ubuntu, not macOS: pypa/gh-action-pypi-publish is Linux-only, and the package is a
+    # pure-Python (py3-none-any) wheel, so the build is platform-independent.
+    runs-on: ubuntu-latest
     environment: pypi
     permissions:
       id-token: write  # PyPI Trusted Publishing
