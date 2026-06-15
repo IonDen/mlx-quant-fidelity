@@ -9,7 +9,8 @@ import sys
 from mlx_quant_fidelity._memory_caps import install_memory_caps
 from mlx_quant_fidelity.errors import QuantFidelityError
 from mlx_quant_fidelity.probes.kv import measure_kv_fidelity
-from mlx_quant_fidelity.report import render_json, render_markdown
+from mlx_quant_fidelity.probes.weights import measure_weight_fidelity
+from mlx_quant_fidelity.report import render_json, render_markdown, render_weight_markdown
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -30,19 +31,33 @@ def main(argv: list[str] | None = None) -> int:
     kv.add_argument("--max-chunks", type=int, default=None)
     kv.add_argument("--format", choices=["json", "md"], default="md")
 
+    weights = sub.add_parser("weights", help="measure weight-quantization fidelity")
+    weights.add_argument("quant_model")
+    weights.add_argument("--reference", required=True)
+    weights.add_argument("--max-chunks", type=int, default=None)
+    weights.add_argument("--format", choices=["json", "md"], default="md")
+
     args = parser.parse_args(argv)
     try:
-        report = measure_kv_fidelity(
-            args.model,
-            kv_bits=args.kv_bits,
-            kv_group_size=args.kv_group_size,
-            quantize_start=args.quantize_start,
-            max_chunks=args.max_chunks,
-        )
+        if args.command == "kv":
+            report = measure_kv_fidelity(
+                args.model,
+                kv_bits=args.kv_bits,
+                kv_group_size=args.kv_group_size,
+                quantize_start=args.quantize_start,
+                max_chunks=args.max_chunks,
+            )
+            out = render_json(report) if args.format == "json" else render_markdown(report)
+        else:  # "weights"
+            wreport = measure_weight_fidelity(
+                args.quant_model,
+                args.reference,
+                max_chunks=args.max_chunks,
+            )
+            out = render_json(wreport) if args.format == "json" else render_weight_markdown(wreport)
     except QuantFidelityError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
-    out = render_json(report) if args.format == "json" else render_markdown(report)
     print(out)
     return 0
 
