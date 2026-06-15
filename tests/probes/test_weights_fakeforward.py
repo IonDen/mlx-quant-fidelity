@@ -3,8 +3,17 @@
 import math
 
 import mlx.core as mx
+import pytest
 
-from mlx_quant_fidelity.probes.weights import QuantMeta, _score_weight_chunk, extract_quant_meta
+from mlx_quant_fidelity.errors import ModelMismatchError
+from mlx_quant_fidelity.probes.weights import (
+    TOKENIZER_ASSUMPTION_WARNING,
+    QuantMeta,
+    _gate_configs,
+    _score_weight_chunk,
+    _tokenizer_warnings,
+    extract_quant_meta,
+)
 
 
 def test_extract_native_quantization():
@@ -87,3 +96,59 @@ def test_score_weight_chunk_identical_is_zero():
     kl, _flips, _r, _q = _score_weight_chunk(_FakeWeightModel(0), _FakeWeightModel(0), ids)
     mx.eval(kl)
     assert float(kl.mean()) == 0.0
+
+
+_Q_NATIVE = {
+    "model_type": "llama",
+    "vocab_size": 128,
+    "quantization": {"bits": 4, "group_size": 64},
+}
+_REF_FP = {"model_type": "llama", "vocab_size": 128}
+
+
+def test_gate_passes_and_records_reference_bits_when_reference_quantized():
+    ref_q8 = {
+        "model_type": "llama",
+        "vocab_size": 128,
+        "quantization": {"bits": 8, "group_size": 64},
+    }
+    meta, reference_bits = _gate_configs(quant_config=_Q_NATIVE, reference_config=ref_q8)
+    assert meta.bits == 4
+    assert reference_bits == 8
+
+
+def test_gate_passes_for_full_precision_reference():
+    meta, reference_bits = _gate_configs(quant_config=_Q_NATIVE, reference_config=_REF_FP)
+    assert meta.bits == 4
+    assert reference_bits is None
+
+
+def test_gate_rejects_unquantized_quant_repo():
+    with pytest.raises(ModelMismatchError, match="no quantization"):
+        _gate_configs(quant_config=_REF_FP, reference_config=_REF_FP)
+
+
+def test_gate_rejects_model_type_mismatch():
+    bad = {"model_type": "qwen2", "vocab_size": 128}
+    with pytest.raises(ModelMismatchError, match="model_type"):
+        _gate_configs(quant_config=_Q_NATIVE, reference_config=bad)
+
+
+def test_gate_rejects_vocab_size_mismatch():
+    bad = {"model_type": "llama", "vocab_size": 99}
+    with pytest.raises(ModelMismatchError, match="vocab_size"):
+        _gate_configs(quant_config=_Q_NATIVE, reference_config=bad)
+
+
+class _Tok:
+    def __init__(self, bos, eos):
+        self.bos_token_id = bos
+        self.eos_token_id = eos
+
+
+def test_tokenizer_warnings_standing_plus_mismatch():
+    same = _tokenizer_warnings(_Tok(1, 2), _Tok(1, 2))
+    assert same == [TOKENIZER_ASSUMPTION_WARNING]
+    diff = _tokenizer_warnings(_Tok(1, 2), _Tok(1, 9))
+    assert len(diff) == 2
+    assert any("eos" in w for w in diff)
