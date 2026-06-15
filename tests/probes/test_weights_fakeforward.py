@@ -188,9 +188,11 @@ def test_gate_rejects_unknown_bits():
 
 
 def test_resolve_weight_bytes_local_dir(tmp_path):
-    (tmp_path / "model-00001.safetensors").write_bytes(b"x" * 2048)
+    # standard HF sharded naming, summed across shards
+    (tmp_path / "model-00001-of-00002.safetensors").write_bytes(b"x" * 2048)
+    (tmp_path / "model-00002-of-00002.safetensors").write_bytes(b"x" * 1024)
     (tmp_path / "tokenizer.json").write_bytes(b"y" * 10)  # not summed (only model*.safetensors)
-    assert _resolve_weight_bytes(str(tmp_path), None) == 2048
+    assert _resolve_weight_bytes(str(tmp_path), None) == 3072
 
 
 def test_resolve_weight_bytes_none_when_no_weights(tmp_path):
