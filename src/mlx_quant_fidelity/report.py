@@ -75,9 +75,10 @@ def render_json(report: FidelityReport | WeightFidelityReport) -> str:
 
 def render_weight_markdown(report: WeightFidelityReport) -> str:
     """Human-readable weight-fidelity report. Always qualifies by corpus + context length."""
+    bits = report.quant_bits if report.quant_bits is not None else "unknown"
     c = report.corpus
     lines = [
-        f"# Weight-fidelity: `{report.quant_model_id}` @ {report.quant_bits}-bit "
+        f"# Weight-fidelity: `{report.quant_model_id}` @ {bits}-bit "
         f"(group {report.quant_group_size}) vs `{report.reference_model_id}`",
         "",
         f"**Verdict:** {report.verdict} (provisional tiers — WikiText-2, "

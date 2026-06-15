@@ -115,6 +115,11 @@ def _gate_configs(
     if qv is None or rv is None or qv != rv:
         raise ModelMismatchError(f"vocab_size mismatch: quant={qv} vs reference={rv}.")
     reference_meta = extract_quant_meta(reference_config)
+    if reference_meta is not None and reference_meta.bits is None:
+        raise ModelMismatchError(
+            "reference repo declares quantization but no readable 'bits'; cannot tell whether "
+            "it is full precision."
+        )
     reference_bits = reference_meta.bits if reference_meta is not None else None
     return quant_meta, reference_bits
 
