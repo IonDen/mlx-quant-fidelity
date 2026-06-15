@@ -5,7 +5,13 @@ import math
 import mlx.core as mx
 import pytest
 
-from mlx_quant_fidelity.errors import InsufficientMemoryError, ModelMismatchError
+from mlx_quant_fidelity.corpora.provenance import Corpus, CorpusProvenance
+from mlx_quant_fidelity.errors import (
+    CorpusError,
+    ExactZeroError,
+    InsufficientMemoryError,
+    ModelMismatchError,
+)
 from mlx_quant_fidelity.probes.weights import (
     TOKENIZER_ASSUMPTION_WARNING,
     QuantMeta,
@@ -15,6 +21,7 @@ from mlx_quant_fidelity.probes.weights import (
     _score_weight_chunk,
     _tokenizer_warnings,
     extract_quant_meta,
+    measure_weight_fidelity,
 )
 
 
@@ -223,3 +230,86 @@ def test_preflight_skips_when_size_unknown(monkeypatch):
 
     monkeypatch.setattr(w.mx, "device_info", lambda: {"max_recommended_working_set_size": 1})
     _preflight_memory(quant_bytes=None, reference_bytes=14 * 1024**3)  # no raise (can't pre-flight)
+
+
+# ---------------------------------------------------------------------------
+# Orchestration tests (measure_weight_fidelity)
+# ---------------------------------------------------------------------------
+
+
+def _corpus(n_chunks: int, chunk_len: int = 4) -> Corpus:
+    chunks = tuple(mx.arange(chunk_len) for _ in range(n_chunks))
+    prov = CorpusProvenance(
+        "x", "test", "org/m-bf16", chunk_len, chunk_len, "none", "drop", "raw", chunk_len * n_chunks
+    )
+    return Corpus(chunks=chunks, provenance=prov)
+
+
+def _patch_loads(monkeypatch, ref_peak, quant_peak, *, calls, ref_quantized=False):
+    """Patch weights.* so two fake models load with known configs; record call order."""
+    import mlx_lm
+
+    from mlx_quant_fidelity.probes import weights as w
+
+    monkeypatch.setattr(w, "install_memory_caps", lambda: calls.append("caps") or (0, 0))
+    monkeypatch.setattr(w, "_resolve_weight_bytes", lambda *a, **k: None)  # skip pre-flight
+    ref_cfg = {"model_type": "llama", "vocab_size": 3}
+    if ref_quantized:
+        ref_cfg = {**ref_cfg, "quantization": {"bits": 8, "group_size": 64}}
+    cfgs = {
+        "ref": ref_cfg,
+        "quant": {
+            "model_type": "llama",
+            "vocab_size": 3,
+            "quantization": {"bits": 4, "group_size": 64},
+        },
+    }
+    toks = type("T", (), {"bos_token_id": 1, "eos_token_id": 2})()
+
+    def fake_load(repo, **kw):
+        if repo == "ref":
+            calls.append("load_ref")
+            return _FakeWeightModel(ref_peak), toks, cfgs["ref"]
+        calls.append("load_quant")
+        return _FakeWeightModel(quant_peak), toks, cfgs["quant"]
+
+    monkeypatch.setattr(mlx_lm, "load", fake_load)
+
+
+def test_measure_weight_caps_before_both_loads(monkeypatch):
+    calls: list[str] = []
+    _patch_loads(monkeypatch, ref_peak=0, quant_peak=1, calls=calls)
+    report = measure_weight_fidelity("quant", "ref", corpus=_corpus(2))
+    assert calls == ["caps", "load_ref", "load_quant"]
+    assert report.n_chunks == 2
+    assert report.n_positions == 6  # 2 chunks x (4-1) positions, pooled
+    assert report.kl.mean > 0.1
+    assert report.reference_bits is None
+
+
+def test_measure_weight_records_quantized_reference_bits(monkeypatch):
+    calls: list[str] = []
+    _patch_loads(monkeypatch, ref_peak=0, quant_peak=1, calls=calls, ref_quantized=True)
+    report = measure_weight_fidelity("quant", "ref", corpus=_corpus(1))
+    assert report.reference_bits == 8
+    assert any("not full precision" in w for w in report.warnings)
+
+
+def test_measure_weight_exact_zero_when_identical(monkeypatch):
+    calls: list[str] = []
+    _patch_loads(monkeypatch, ref_peak=0, quant_peak=0, calls=calls)  # identical models
+    with pytest.raises(ExactZeroError, match="identical"):
+        measure_weight_fidelity("quant", "ref", corpus=_corpus(1))
+
+
+def test_measure_weight_rejects_bad_max_chunks():
+    with pytest.raises(CorpusError, match="max_chunks"):
+        measure_weight_fidelity("quant", "ref", max_chunks=0)
+
+
+def test_measure_weight_rejects_empty_corpus():
+    empty = Corpus(
+        chunks=(), provenance=CorpusProvenance("x", "t", "t", 4, 4, "none", "drop", "raw", 0)
+    )
+    with pytest.raises(CorpusError, match="no chunks"):
+        measure_weight_fidelity("quant", "ref", corpus=empty)
