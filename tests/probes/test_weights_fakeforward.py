@@ -57,8 +57,8 @@ def test_extract_rejects_bool_bits():
 
 def test_extract_empty_native_block_is_quantized_with_unknown_bits():
     # {"quantization": {}} declares quantization (key present) but carries no params:
-    # returns a non-None QuantMeta with bits=None. The Task 8 gate treats key-present as
-    # "quantized"; an actually-unquantized model would trip the exact-zero guard downstream.
+    # returns a non-None QuantMeta with bits=None. The gate rejects bits=None with
+    # ModelMismatchError; see test_gate_rejects_unknown_bits.
     meta = extract_quant_meta({"quantization": {}})
     assert meta is not None
     assert meta.bits is None
@@ -149,6 +149,37 @@ class _Tok:
 def test_tokenizer_warnings_standing_plus_mismatch():
     same = _tokenizer_warnings(_Tok(1, 2), _Tok(1, 2))
     assert same == [TOKENIZER_ASSUMPTION_WARNING]
-    diff = _tokenizer_warnings(_Tok(1, 2), _Tok(1, 9))
-    assert len(diff) == 2
-    assert any("eos" in w for w in diff)
+    # eos mismatch
+    diff_eos = _tokenizer_warnings(_Tok(1, 2), _Tok(1, 9))
+    assert len(diff_eos) == 2
+    assert any("eos" in w for w in diff_eos)
+    # bos mismatch (independent check — a misspelled attr in the comprehension would pass eos but fail here)
+    diff_bos = _tokenizer_warnings(_Tok(9, 2), _Tok(1, 2))
+    assert len(diff_bos) == 2
+    assert any("bos" in w for w in diff_bos)
+    # both mismatch
+    diff_both = _tokenizer_warnings(_Tok(9, 9), _Tok(1, 2))
+    assert len(diff_both) == 3
+
+
+def test_gate_rejects_both_none_model_type():
+    """Two configs that both omit model_type must not silently pass as 'matched'."""
+    quant_no_type = {"vocab_size": 128, "quantization": {"bits": 4, "group_size": 64}}
+    ref_no_type = {"vocab_size": 128}
+    with pytest.raises(ModelMismatchError, match="model_type"):
+        _gate_configs(quant_config=quant_no_type, reference_config=ref_no_type)
+
+
+def test_gate_rejects_both_none_vocab_size():
+    """Two configs that both omit vocab_size must not silently pass as 'matched'."""
+    quant_no_vocab = {"model_type": "llama", "quantization": {"bits": 4, "group_size": 64}}
+    ref_no_vocab = {"model_type": "llama"}
+    with pytest.raises(ModelMismatchError, match="vocab_size"):
+        _gate_configs(quant_config=quant_no_vocab, reference_config=ref_no_vocab)
+
+
+def test_gate_rejects_unknown_bits():
+    """A quantization block with no 'bits' key must be rejected at the gate, not passed through."""
+    quant_no_bits = {"model_type": "llama", "vocab_size": 128, "quantization": {}}
+    with pytest.raises(ModelMismatchError, match="bits"):
+        _gate_configs(quant_config=quant_no_bits, reference_config=_REF_FP)
