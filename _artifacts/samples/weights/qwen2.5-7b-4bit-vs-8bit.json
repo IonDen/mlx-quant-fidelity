@@ -1,0 +1,44 @@
+{
+  "corpus": {
+    "bos_policy": "none",
+    "chunk_length": 512,
+    "final_chunk_policy": "drop",
+    "n_tokens": 51200,
+    "name": "wikitext-2-raw",
+    "normalization": "raw",
+    "split": "test",
+    "stride": 512,
+    "tokenizer_id": "mlx-community/Qwen2.5-7B-Instruct-8bit"
+  },
+  "flip_rate": 0.1639334637964775,
+  "kl": {
+    "max": 6.358877182006836,
+    "mean": 0.10891550713513094,
+    "median": 0.07111239805817604,
+    "p99": 0.8204935282468798
+  },
+  "mlx_lm_version": "0.31.3",
+  "mlx_version": "0.31.2",
+  "n_chunks": 100,
+  "n_positions": 51100,
+  "peak_memory_bytes": 14403887369,
+  "per_layer": false,
+  "perplexity_delta": 0.9011362364514834,
+  "perplexity_quant": 10.792949932845536,
+  "perplexity_ref": 9.891813696394053,
+  "quant_bits": 4,
+  "quant_group_size": 64,
+  "quant_mode": "affine",
+  "quant_model_bytes": 4284346255,
+  "quant_model_id": "mlx-community/Qwen2.5-7B-Instruct-4bit",
+  "quant_revision": null,
+  "reference_bits": 8,
+  "reference_model_bytes": 8091987725,
+  "reference_model_id": "mlx-community/Qwen2.5-7B-Instruct-8bit",
+  "reference_revision": null,
+  "verdict": "marginal",
+  "warnings": [
+    "Assumes both repos share a tokenizer; only vocab_size (and bos/eos ids) were checked \u2014 a divergent token map would be measured as quant drift.",
+    "reference is itself 8-bit, not full precision; drift is relative to it."
+  ]
+}

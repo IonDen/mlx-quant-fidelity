@@ -1,0 +1,43 @@
+{
+  "corpus": {
+    "bos_policy": "none",
+    "chunk_length": 512,
+    "final_chunk_policy": "drop",
+    "n_tokens": 51200,
+    "name": "wikitext-2-raw",
+    "normalization": "raw",
+    "split": "test",
+    "stride": 512,
+    "tokenizer_id": "mlx-community/Llama-3.2-3B-Instruct-bf16"
+  },
+  "flip_rate": 0.15056751467710372,
+  "kl": {
+    "max": 6.32819938659668,
+    "mean": 0.08507367285769946,
+    "median": 0.05673649348318577,
+    "p99": 0.5623907643556599
+  },
+  "mlx_lm_version": "0.31.3",
+  "mlx_version": "0.31.2",
+  "n_chunks": 100,
+  "n_positions": 51100,
+  "peak_memory_bytes": 10068836829,
+  "per_layer": false,
+  "perplexity_delta": 1.4479322111887107,
+  "perplexity_quant": 17.722326682497613,
+  "perplexity_ref": 16.274394471308902,
+  "quant_bits": 4,
+  "quant_group_size": 64,
+  "quant_mode": "affine",
+  "quant_model_bytes": 1807496278,
+  "quant_model_id": "mlx-community/Llama-3.2-3B-Instruct-4bit",
+  "quant_revision": null,
+  "reference_bits": null,
+  "reference_model_bytes": 6425528971,
+  "reference_model_id": "mlx-community/Llama-3.2-3B-Instruct-bf16",
+  "reference_revision": null,
+  "verdict": "marginal",
+  "warnings": [
+    "Assumes both repos share a tokenizer; only vocab_size (and bos/eos ids) were checked \u2014 a divergent token map would be measured as quant drift."
+  ]
+}

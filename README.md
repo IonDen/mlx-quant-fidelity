@@ -1,10 +1,8 @@
 # mlx-quant-fidelity
 
-Measure how much quality a quantization costs on Apple Silicon. `mlx-quant-fidelity` scores a quantized KV cache against full precision on the same model and reports the drift as numbers you can act on: KL divergence, top-token flip rate, perplexity delta. No more choosing a bit-width by file size.
+Measure how much quality a quantization costs on Apple Silicon. `mlx-quant-fidelity` scores a quantized model against a higher-precision reference on the same corpus and reports the drift as numbers you can act on: KL divergence, top-token flip rate, perplexity delta. It measures both **KV-cache quantization** and **weight quantization**. No more choosing a bit-width by file size.
 
 The CUDA/GGUF world has had this for years: llama.cpp's `--kl-divergence-base`, EleutherAI's `lm-evaluation-harness`. MLX had nothing. This is the MLX version, and it covers the KV-cache and attention angle those tools skip.
-
-Version 0.1.0 measures **KV-cache quantization**. Weight-quantization fidelity is next; see the [roadmap](ROADMAP.md).
 
 ## Install
 
@@ -26,6 +24,22 @@ Prints a Markdown report. Add `--format json` for JSON, `--kv-bits 4`, `--kv-gro
 from mlx_quant_fidelity import measure_kv_fidelity
 
 report = measure_kv_fidelity("mlx-community/Llama-3.2-3B-Instruct-4bit", kv_bits=8)
+print(report.kl.mean, report.flip_rate, report.verdict)
+```
+
+Or measure **weight** quantization — a quantized repo against a higher-precision reference:
+
+```bash
+mlx-quant-fidelity weights mlx-community/Llama-3.2-3B-Instruct-4bit --reference mlx-community/Llama-3.2-3B-Instruct-bf16
+```
+
+```python
+from mlx_quant_fidelity import measure_weight_fidelity
+
+report = measure_weight_fidelity(
+    "mlx-community/Llama-3.2-3B-Instruct-4bit",
+    "mlx-community/Llama-3.2-3B-Instruct-bf16",
+)
 print(report.kl.mean, report.flip_rate, report.verdict)
 ```
 
@@ -63,6 +77,22 @@ M1 Max, WikiText-2 test (100 chunks of 512 tokens), stress mode (quantize from t
 
 8-bit KV is near-lossless on all three models. 4-bit is another matter, and Qwen2.5-7B at 4-bit in stress mode falls apart: nearly every token flips. That is the attention sink at work: stress mode quantizes the cache from token 0, including the first tokens attention leans on most, and Qwen2.5 does not tolerate it. mlx-lm's own default keeps the first 5000 tokens full-precision for exactly this reason. The point of the tool is that you can see this for your model before you pick a bit-width.
 
+## How much does weight quantization cost?
+
+Same corpus and recipe, but the comparison is now a quantized model repo against a higher-precision reference repo. Reproduce any row with `mlx-quant-fidelity weights <quant> --reference <reference> --max-chunks 100`; the committed reports are under [`_artifacts/samples/weights/`](_artifacts/samples/weights).
+
+| Model | quant | reference | KL mean (nats) | flip rate | perplexity Δ | verdict |
+|---|---|---|---|---|---|---|
+| Llama-3.2-1B | 4-bit | bf16 | 0.158 | 0.21 | +3.5 | marginal |
+| Llama-3.2-1B | 8-bit | bf16 | 0.001 | 0.023 | −0.01 | good |
+| Llama-3.2-3B | 4-bit | bf16 | 0.085 | 0.15 | +1.4 | marginal |
+| Llama-3.2-3B | 8-bit | bf16 | 0.0009 | 0.021 | 0.00 | good |
+| Qwen2.5-7B | 4-bit | 8-bit | 0.109 | 0.16 | +0.9 | marginal |
+
+8-bit weights are near-lossless: about 2% of top tokens flip and perplexity barely moves. 4-bit is a real trade — 15 to 21% of top tokens flip and perplexity climbs a point or more, worst on the small 1B model. The Qwen row compares 4-bit against 8-bit rather than bf16, so its drift is relative to an already-quantized reference, not full precision; the report records that the reference is 8-bit and says so in plain text. The verdict tiers are provisional, anchored to these q8 and q4 reference points on short prose rather than to downstream task accuracy.
+
+Unlike the KV probe, both runs use standard attention, so the drift is the deployed quantized model's weight-quant cost with no quantized-attention kernel folded in. It does still include the quantized-matmul kernel's numerics, which is exactly what you run when you load the model.
+
 ## How it works
 
 Teacher-forced scoring, not generation. For each fixed-length corpus chunk the model runs twice on the *same* tokens — once with a full-precision KV cache, once with a quantized one — and the two next-token distributions are compared position by position. Generation would let the runs diverge in their own inputs the moment quantization changed a sampled token, turning the measurement into trajectory drift instead of cache cost. Logits collapse to per-position scalars inside the chunk loop and are released before the next chunk, so a long corpus never holds full distributions in memory.
@@ -70,9 +100,11 @@ Teacher-forced scoring, not generation. For each fixed-length corpus chunk the m
 Two modes:
 
 - **stress** (`--quantize-start 0`, the default): quantize from token 0. The harsh, apples-to-apples quantizer test.
-- **deployment** (`quantize_start > 0`): what mlx-lm users actually run, with the first N tokens kept full-precision. Planned for 0.2.0.
+- **deployment** (`quantize_start > 0`): what mlx-lm users actually run, with the first N tokens kept full-precision. Still on the [roadmap](ROADMAP.md).
 
 A run that returns exactly zero drift raises instead of reporting a silent "perfect fidelity." That almost always means quantization never engaged, not that it was free.
+
+The weight probe works the same way with two models instead of two caches: a quantized repo and a reference repo, scored on the same corpus tokens. A compatibility gate refuses a mismatched pair before loading, and a memory pre-flight refuses a pair too large for the device rather than risking a kernel panic.
 
 ## What the numbers don't say
 
@@ -82,7 +114,7 @@ A run that returns exactly zero drift raises instead of reporting a silent "perf
 
 ## Status
 
-0.1.0, released on PyPI as `mlx-quant-fidelity` — the KV-cache fidelity probe (CLI + Python API, JSON and Markdown reports). Weight-quantization fidelity, downstream-task accuracy, and memory-normalized method ranking are on the [roadmap](ROADMAP.md).
+0.2.0, released on PyPI as `mlx-quant-fidelity` — KV-cache and weight-quantization fidelity probes (CLI + Python API, JSON and Markdown reports). Downstream-task accuracy, deployment mode, and memory-normalized method ranking are on the [roadmap](ROADMAP.md).
 
 ## License
 
