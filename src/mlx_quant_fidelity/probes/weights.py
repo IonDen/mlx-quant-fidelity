@@ -219,6 +219,10 @@ def measure_weight_fidelity(
         raise CorpusError(f"max_chunks must be >= 1 (got {max_chunks}).")
     if corpus is not None and len(corpus.chunks) == 0:
         raise CorpusError("the provided corpus has no chunks; at least one is required.")
+    if corpus is not None and any(c.shape[0] < 2 for c in corpus.chunks):
+        raise CorpusError(
+            "every corpus chunk must have at least 2 tokens (one teacher-forced position)."
+        )
     install_memory_caps()  # before any model load
 
     reference_bytes = _resolve_weight_bytes(reference_model_id, reference_revision)

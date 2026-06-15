@@ -32,3 +32,16 @@ def test_weight_good_requires_all_three_axes():
         verdict_for(kl_mean=0.005, kl_p99=2.0, flip_rate=0.003, thresholds=_WEIGHT_TIERS_v0_2_0)
         == "marginal"
     )
+
+
+def test_weight_good_requires_kl_mean_and_flip_axes():
+    # kl_mean alone over the good ceiling -> not good
+    assert (
+        verdict_for(kl_mean=0.10, kl_p99=0.05, flip_rate=0.003, thresholds=_WEIGHT_TIERS_v0_2_0)
+        == "marginal"
+    )
+    # flip_rate alone over the good ceiling -> not good
+    assert (
+        verdict_for(kl_mean=0.005, kl_p99=0.05, flip_rate=0.05, thresholds=_WEIGHT_TIERS_v0_2_0)
+        == "marginal"
+    )

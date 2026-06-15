@@ -112,6 +112,7 @@ def test_weights_subcommand_dispatches_and_renders_json(
     assert isinstance(args, tuple)
     assert args[0] == "org/m-4bit"
     assert args[1] == "org/m-bf16"
+    assert captured["args"][2]["max_chunks"] is None
 
 
 def test_weights_subcommand_reports_domain_error(
@@ -126,3 +127,16 @@ def test_weights_subcommand_reports_domain_error(
     rc = cli.main(["weights", "q", "--reference", "r"])
     assert rc == 2
     assert "vocab_size mismatch" in capsys.readouterr().err
+
+
+def test_weights_subcommand_forwards_max_chunks(monkeypatch, capsys):
+    captured = {}
+
+    def fake_measure(quant, reference, **kw):
+        captured["kw"] = kw
+        return _weight_report()
+
+    monkeypatch.setattr(cli, "measure_weight_fidelity", fake_measure)
+    rc = cli.main(["weights", "q", "--reference", "r", "--max-chunks", "3"])
+    assert rc == 0
+    assert captured["kw"]["max_chunks"] == 3
