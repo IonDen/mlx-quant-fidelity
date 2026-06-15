@@ -404,3 +404,9 @@ def test_measure_weight_rejects_single_token_chunk():
     )
     with pytest.raises(CorpusError, match="at least 2 tokens"):
         measure_weight_fidelity("quant", "ref", corpus=bad)
+
+
+def test_gate_rejects_reference_quantized_without_bits():
+    ref_bad = {"model_type": "llama", "vocab_size": 128, "quantization": {"group_size": 64}}
+    with pytest.raises(ModelMismatchError, match="readable 'bits'"):
+        _gate_configs(quant_config=_Q_NATIVE, reference_config=ref_bad)

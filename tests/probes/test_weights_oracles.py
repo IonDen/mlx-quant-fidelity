@@ -1,7 +1,10 @@
-"""Real-model oracle tests for the weight-quant probe (--run-slow, MAIN thread only).
+"""Real-model oracle tests for the weight-quant probe (--run-slow + --run-network, MAIN thread only).
 
-Requires a real model load (mlx-community Llama-3.2-1B). Skipped by default; run with
---run-slow on the main thread. DO NOT run in CI or in a subagent.
+Requires a real model load (mlx-community Llama-3.2-1B). Skipped by default. The corpus is
+built in-memory (no WikiText download), but the MODEL must be downloaded from the Hub on a cold
+machine, so a cold run requires both --run-slow and --run-network. A warm/cached run where the
+model snapshot is already on disk effectively only needs --run-slow. DO NOT run in CI or in a
+subagent.
 """
 
 import mlx.core as mx
@@ -35,9 +38,15 @@ def _tiny_corpus(tok, *, chunk_length: int = 64, n_chunks: int = 2) -> Corpus:
 
 
 @pytest.mark.slow
+@pytest.mark.network
 def test_real_pair_produces_plausible_drift_and_pins_shape():
     """4-bit vs bf16 on a real 1B model: plausible drift, the [0] batch-of-1 shape contract,
-    correct bits, and peak memory under the device working-set cap."""
+    correct bits, and peak memory under the device working-set cap.
+
+    The corpus is built in-memory (no WikiText download needed), but loading the model repos
+    from the Hub on a cold machine requires network access. A warm/cached run (snapshots already
+    on disk) effectively only needs --run-slow.
+    """
     from mlx_lm import load  # type: ignore[import]
 
     ref_model, tok = load(REF)  # type: ignore[misc]

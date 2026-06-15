@@ -1,3 +1,4 @@
+import dataclasses
 import json
 
 from mlx_quant_fidelity.corpora.provenance import CorpusProvenance
@@ -57,3 +58,9 @@ def test_render_weight_markdown_qualifies_and_banners_quantized_reference():
 def test_render_weight_markdown_no_banner_for_full_precision_reference():
     md = render_weight_markdown(_report(reference_bits=None))
     assert "not full precision" not in md
+
+
+def test_render_weight_markdown_handles_unknown_bits():
+    md = render_weight_markdown(dataclasses.replace(_report(), quant_bits=None))
+    assert "None-bit" not in md
+    assert "unknown-bit" in md

@@ -46,3 +46,11 @@ def test_weight_good_requires_kl_mean_and_flip_axes():
         verdict_for(kl_mean=0.005, kl_p99=0.05, flip_rate=0.15, thresholds=_WEIGHT_TIERS_v0_2_0)
         == "marginal"
     )
+
+
+def test_weight_marginal_boundary_is_inclusive():
+    # exactly at each marginal ceiling stays marginal (<=)
+    assert (
+        verdict_for(kl_mean=0.20, kl_p99=1.50, flip_rate=0.25, thresholds=_WEIGHT_TIERS_v0_2_0)
+        == "marginal"
+    )

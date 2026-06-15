@@ -140,3 +140,14 @@ def test_weights_subcommand_forwards_max_chunks(monkeypatch, capsys):
     rc = cli.main(["weights", "q", "--reference", "r", "--max-chunks", "3"])
     assert rc == 0
     assert captured["kw"]["max_chunks"] == 3
+
+
+def test_cli_weights_installs_caps_before_measure(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[str] = []
+    monkeypatch.setattr(cli, "install_memory_caps", lambda: calls.append("caps") or (20, 22))
+    monkeypatch.setattr(
+        cli, "measure_weight_fidelity", lambda *a, **k: calls.append("measure") or _weight_report()
+    )
+    rc = cli.main(["weights", "q", "--reference", "r"])
+    assert calls == ["caps", "measure"]
+    assert rc == 0
