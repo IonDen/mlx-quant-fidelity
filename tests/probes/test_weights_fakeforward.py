@@ -33,3 +33,20 @@ def test_extract_nested_text_config():
 
 def test_extract_returns_none_when_not_quantized():
     assert extract_quant_meta({"model_type": "llama", "vocab_size": 128256}) is None
+
+
+def test_extract_rejects_bool_bits():
+    # bool is a subclass of int but is not a valid bits value -> treated as unknown
+    meta = extract_quant_meta({"quantization": {"bits": True, "group_size": 64}})
+    assert meta is not None
+    assert meta.bits is None
+
+
+def test_extract_empty_native_block_is_quantized_with_unknown_bits():
+    # {"quantization": {}} declares quantization (key present) but carries no params:
+    # returns a non-None QuantMeta with bits=None. The Task 8 gate treats key-present as
+    # "quantized"; an actually-unquantized model would trip the exact-zero guard downstream.
+    meta = extract_quant_meta({"quantization": {}})
+    assert meta is not None
+    assert meta.bits is None
+    assert meta.per_layer is False
