@@ -2,14 +2,26 @@
 
 from __future__ import annotations
 
+import importlib.metadata
 from dataclasses import dataclass
 from pathlib import Path
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 import mlx.core as mx
 
-from mlx_quant_fidelity.errors import InsufficientMemoryError, ModelMismatchError
-from mlx_quant_fidelity.probes._paired import _reduce_pair
+from mlx_quant_fidelity._memory_caps import install_memory_caps
+from mlx_quant_fidelity.errors import (
+    CorpusError,
+    ExactZeroError,  # noqa: F401 — re-exported for callers
+    InsufficientMemoryError,
+    ModelMismatchError,
+)
+from mlx_quant_fidelity.policy import _WEIGHT_TIERS_v0_2_0, verdict_for
+from mlx_quant_fidelity.probes._paired import _aggregate_chunks, _check_exact_zero, _reduce_pair
+from mlx_quant_fidelity.report import WeightFidelityReport
+
+if TYPE_CHECKING:
+    from mlx_quant_fidelity.corpora.provenance import Corpus
 
 TOKENIZER_ASSUMPTION_WARNING = (
     "Assumes both repos share a tokenizer; only vocab_size (and bos/eos ids) were checked — "
@@ -174,3 +186,110 @@ def _score_weight_chunk(
     ref_logits = ref_model(inp)[0].astype(mx.float32)  # type: ignore[operator]
     quant_logits = quant_model(inp)[0].astype(mx.float32)  # type: ignore[operator]
     return _reduce_pair(ref_logits, quant_logits, targets)
+
+
+def measure_weight_fidelity(
+    quant_model_id: str,
+    reference_model_id: str,
+    *,
+    corpus: Corpus | None = None,
+    max_chunks: int | None = None,
+    quant_revision: str | None = None,
+    reference_revision: str | None = None,
+) -> WeightFidelityReport:
+    """Measure how much weight quantization costs: a quantized repo vs a reference repo.
+
+    Both models are scored teacher-forced on identical corpus tokens (no KV cache). The drift
+    bundles quantized-matmul kernel numerics (the deployed model's real cost), with no
+    quantized-attention confound. Raises ModelMismatchError (incomparable pair),
+    InsufficientMemoryError (pair too large for the device), ExactZeroError (identical repos).
+    """
+    from mlx_lm import load
+
+    if max_chunks is not None and max_chunks < 1:
+        raise CorpusError(f"max_chunks must be >= 1 (got {max_chunks}).")
+    if corpus is not None and len(corpus.chunks) == 0:
+        raise CorpusError("the provided corpus has no chunks; at least one is required.")
+    install_memory_caps()  # before any model load
+
+    reference_bytes = _resolve_weight_bytes(reference_model_id, reference_revision)
+    quant_bytes = _resolve_weight_bytes(quant_model_id, quant_revision)
+    _preflight_memory(quant_bytes=quant_bytes, reference_bytes=reference_bytes)
+
+    ref_model, tokenizer, reference_config = load(  # type: ignore[misc]
+        reference_model_id, revision=reference_revision, return_config=True
+    )
+    quant_model, quant_tok, quant_config = load(  # type: ignore[misc]
+        quant_model_id, revision=quant_revision, return_config=True
+    )
+    quant_meta, reference_bits = _gate_configs(
+        quant_config=quant_config, reference_config=reference_config
+    )
+    warnings = [*_tokenizer_warnings(tokenizer, quant_tok)]
+    if reference_bits is not None:
+        warnings.append(
+            f"reference is itself {reference_bits}-bit, not full precision; drift is relative to it."
+        )
+    # re-resolve now that snapshots are cached, for the report (pre-flight may have seen None)
+    quant_bytes = quant_bytes or _resolve_weight_bytes(quant_model_id, quant_revision)
+    reference_bytes = reference_bytes or _resolve_weight_bytes(
+        reference_model_id, reference_revision
+    )
+
+    if corpus is None:  # pragma: no cover - real-corpus/network path, covered by --run-slow
+        from mlx_quant_fidelity.corpora.wikitext import load_wikitext2
+
+        corpus = load_wikitext2(tokenizer, max_chunks=max_chunks, tokenizer_id=reference_model_id)
+        if len(corpus.chunks) == 0:
+            raise CorpusError("the evaluation corpus yielded no chunks; at least one is required.")
+
+    kls: list[mx.array] = []
+    flips: list[mx.array] = []
+    ref_nlls: list[mx.array] = []
+    quant_nlls: list[mx.array] = []
+    for ids in corpus.chunks:
+        kl, flip, ref_nll, quant_nll = _score_weight_chunk(ref_model, quant_model, ids)
+        mx.eval(kl, flip, ref_nll, quant_nll)
+        kls.append(kl)
+        flips.append(flip)
+        ref_nlls.append(ref_nll)
+        quant_nlls.append(quant_nll)
+        mx.clear_cache()
+
+    agg = _aggregate_chunks(kls, flips, ref_nlls, quant_nlls)
+    _check_exact_zero(
+        kl_mean=agg.kl.mean,
+        flip_rate=agg.flip_rate,
+        context=(
+            "identical distributions — the two repos are numerically identical "
+            "(reference == quant, or the same artifact twice); nothing to measure"
+        ),
+    )
+    return WeightFidelityReport(
+        quant_model_id=quant_model_id,
+        quant_revision=quant_revision,
+        reference_model_id=reference_model_id,
+        reference_revision=reference_revision,
+        quant_bits=quant_meta.bits,
+        quant_group_size=quant_meta.group_size,
+        quant_mode=quant_meta.mode,
+        per_layer=quant_meta.per_layer,
+        reference_bits=reference_bits,
+        kl=agg.kl,
+        flip_rate=agg.flip_rate,
+        perplexity_ref=agg.perplexity_ref,
+        perplexity_quant=agg.perplexity_quant,
+        perplexity_delta=agg.perplexity_quant - agg.perplexity_ref,
+        n_positions=agg.n_positions,
+        n_chunks=len(corpus.chunks),
+        corpus=corpus.provenance,
+        mlx_version=importlib.metadata.version("mlx"),
+        mlx_lm_version=importlib.metadata.version("mlx-lm"),
+        peak_memory_bytes=int(mx.get_peak_memory()),
+        quant_model_bytes=quant_bytes,
+        reference_model_bytes=reference_bytes,
+        verdict=verdict_for(
+            agg.kl.mean, agg.kl.p99, agg.flip_rate, thresholds=_WEIGHT_TIERS_v0_2_0
+        ),
+        warnings=tuple(warnings),
+    )
