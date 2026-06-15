@@ -3,39 +3,22 @@
 from __future__ import annotations
 
 import importlib.metadata
-from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import mlx.core as mx
-import numpy as np
 
 from mlx_quant_fidelity._memory_caps import install_memory_caps
 from mlx_quant_fidelity.errors import (
     CacheNotQuantizableError,
     CorpusError,
-    ExactZeroError,
     QuantFidelityError,
 )
-from mlx_quant_fidelity.metrics import ScalarSummary, perplexity, summarize
-from mlx_quant_fidelity.metrics.flip import top_token_flips
-from mlx_quant_fidelity.metrics.kl import kl_divergence
-from mlx_quant_fidelity.metrics.perplexity import token_nll
 from mlx_quant_fidelity.policy import verdict_for
+from mlx_quant_fidelity.probes._paired import _aggregate_chunks, _check_exact_zero, _reduce_pair
 from mlx_quant_fidelity.report import FidelityReport
 
 if TYPE_CHECKING:
     from mlx_quant_fidelity.corpora.provenance import Corpus
-
-
-@dataclass(frozen=True, slots=True)
-class _Aggregate:
-    """Reduced result across all scored chunks."""
-
-    kl: ScalarSummary
-    flip_rate: float
-    perplexity_ref: float
-    perplexity_quant: float
-    n_positions: int
 
 
 def _kv_head_dim(model: object) -> int | None:
@@ -106,36 +89,6 @@ def _cache_is_quantizable(cache: list[object], *, group_size: int, bits: int) ->
     return True
 
 
-def _check_exact_zero(*, kl_mean: float, flip_rate: float, quantize_start: int) -> None:
-    """Raise if KLD and flip are exactly 0 where quantization was expected to engage."""
-    if kl_mean == 0.0 and flip_rate == 0.0:
-        raise ExactZeroError(
-            "KLD and flip were exactly 0 — quantization did not engage "
-            f"(quantize_start={quantize_start}; chunk may be shorter than the keep-first-N boundary, "
-            "or the quantized cache was bypassed). This is never a silent 'perfect fidelity'."
-        )
-
-
-def _aggregate_chunks(
-    kls: list[mx.array],
-    flips: list[mx.array],
-    ref_nlls: list[mx.array],
-    quant_nlls: list[mx.array],
-) -> _Aggregate:
-    """Concatenate per-chunk per-position scalars and reduce (host-side numpy)."""
-    kl_all = np.concatenate([np.asarray(k, dtype=np.float64) for k in kls])
-    flip_all = np.concatenate([np.asarray(f.astype(mx.float32), dtype=np.float64) for f in flips])
-    ref_all = mx.concatenate(ref_nlls)
-    quant_all = mx.concatenate(quant_nlls)
-    return _Aggregate(
-        kl=summarize(kl_all),
-        flip_rate=float(flip_all.mean()),
-        perplexity_ref=perplexity(ref_all),
-        perplexity_quant=perplexity(quant_all),
-        n_positions=int(kl_all.size),
-    )
-
-
 def _score_chunk(
     model: object,
     ids: mx.array,
@@ -152,11 +105,7 @@ def _score_chunk(
     targets = ids[1:]
     ref_logits = model(inp, cache=ref_cache)[0].astype(mx.float32)  # type: ignore[operator]
     quant_logits = model(inp, cache=quant_cache)[0].astype(mx.float32)  # type: ignore[operator]
-    kl = kl_divergence(ref_logits, quant_logits)
-    flips = top_token_flips(ref_logits, quant_logits)
-    ref_nll = token_nll(ref_logits, targets)
-    quant_nll = token_nll(quant_logits, targets)
-    return kl, flips, ref_nll, quant_nll
+    return _reduce_pair(ref_logits, quant_logits, targets)
 
 
 def measure_kv_fidelity(
@@ -248,7 +197,10 @@ def measure_kv_fidelity(
     _check_exact_zero(  # pragma: no cover
         kl_mean=agg.kl.mean,
         flip_rate=agg.flip_rate,
-        quantize_start=quantize_start,
+        context=(
+            f"quantization did not engage (quantize_start={quantize_start}; chunk may be "
+            "shorter than the keep-first-N boundary, or the quantized cache was bypassed)"
+        ),
     )
 
     return FidelityReport(  # pragma: no cover

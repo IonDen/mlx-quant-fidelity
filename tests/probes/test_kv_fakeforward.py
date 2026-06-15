@@ -43,11 +43,11 @@ class _OkCache:
 def test_exact_zero_guard_raises_on_identical():
     # (a) identical => guard RAISES, never a silent pass
     with pytest.raises(ExactZeroError):
-        _check_exact_zero(kl_mean=0.0, flip_rate=0.0, quantize_start=0)
+        _check_exact_zero(kl_mean=0.0, flip_rate=0.0, context="quantization did not engage")
 
 
 def test_exact_zero_guard_silent_when_nonzero():
-    _check_exact_zero(kl_mean=0.3, flip_rate=0.1, quantize_start=0)  # no raise
+    _check_exact_zero(kl_mean=0.3, flip_rate=0.1, context="quantization did not engage")  # no raise
 
 
 def test_capability_gate_flags_unsupported():
