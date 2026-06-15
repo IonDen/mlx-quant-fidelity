@@ -20,12 +20,13 @@ _KV_TIERS = Tiers(
     marginal={"kl_mean": 0.10, "kl_p99": 1.00, "flip_rate": 0.05},
 )
 
-# Weight tiers: PROVISIONAL (WikiText-2, not validated against downstream accuracy).
-# Calibrated from a handful of reference quants during 0.2.0 release prep; weight quant
-# drifts more than KV, so the ceilings are looser.
+# Weight tiers: PROVISIONAL (WikiText-2 short prose, not validated against downstream accuracy).
+# Calibrated from the 0.2.0 sample reports (Llama-3.2-1B/3B 4bit+8bit vs bf16, Qwen2.5-7B q4-vs-q8):
+# q8 lands "good" (kl_mean ~1e-3, ~2% flips), q4 "marginal" (kl_mean ~0.08-0.15, 15-21% flips),
+# lower bit-widths "bad". Weight quant drifts more than KV, so the ceilings are looser.
 _WEIGHT_TIERS_v0_2_0 = Tiers(
-    good={"kl_mean": 0.05, "kl_p99": 0.50, "flip_rate": 0.02},
-    marginal={"kl_mean": 0.50, "kl_p99": 3.00, "flip_rate": 0.10},
+    good={"kl_mean": 0.01, "kl_p99": 0.10, "flip_rate": 0.05},
+    marginal={"kl_mean": 0.20, "kl_p99": 1.50, "flip_rate": 0.25},
 )
 
 
