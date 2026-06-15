@@ -233,9 +233,10 @@ def test_head_dim_gate_warns_when_unknown():
 
 
 def test_measure_kv_rejects_incompatible_group_size_before_scoring(monkeypatch):
-    """A kv_group_size that doesn't divide head_dim raises CacheNotQuantizableError after load,
-    before any scoring (monkeypatched load returns a stub with known args)."""
+    """An incompatible kv_group_size raises CacheNotQuantizableError after load but BEFORE
+    make_prompt_cache / any scoring (monkeypatched load + make_prompt_cache record order)."""
     import mlx_lm
+    import mlx_lm.models.cache as cache_mod
 
     from mlx_quant_fidelity.corpora.provenance import Corpus, CorpusProvenance
     from mlx_quant_fidelity.probes import kv as kv_mod
@@ -243,9 +244,22 @@ def test_measure_kv_rejects_incompatible_group_size_before_scoring(monkeypatch):
     monkeypatch.setattr(kv_mod, "install_memory_caps", lambda: (0, 0))
     stub = _ModelWithArgs(_Args(head_dim=48, model_type="llama"))
     monkeypatch.setattr(mlx_lm, "load", lambda *a, **k: (stub, object()))
+    cache_calls: list[str] = []
+    monkeypatch.setattr(
+        cache_mod, "make_prompt_cache", lambda *a, **k: cache_calls.append("cache") or []
+    )
     corpus = Corpus(
         chunks=(mx.array([0, 1, 2, 3]),),
         provenance=CorpusProvenance("x", "test", "t", 4, 4, "none", "drop", "raw", 4),
     )
     with pytest.raises(CacheNotQuantizableError, match="head_dim=48"):
         measure_kv_fidelity("any-model", kv_bits=4, kv_group_size=64, corpus=corpus)
+    assert cache_calls == []  # gate fired BEFORE make_prompt_cache / scoring
+
+
+def test_kv_head_dim_zero_falls_back_to_derived():
+    # head_dim=0 is falsy -> falls back to hidden//heads (documented "truthy" contract)
+    assert (
+        _kv_head_dim(_ModelWithArgs(_Args(head_dim=0, hidden_size=4096, num_attention_heads=32)))
+        == 128
+    )
