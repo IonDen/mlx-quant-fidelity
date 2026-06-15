@@ -5,6 +5,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import cast
 
+import mlx.core as mx
+
+from mlx_quant_fidelity.probes._paired import _reduce_pair
+
 
 @dataclass(frozen=True, slots=True)
 class QuantMeta:
@@ -58,3 +62,18 @@ def extract_quant_meta(config: dict[str, object]) -> QuantMeta | None:
     if isinstance(text, dict):
         return extract_quant_meta(cast("dict[str, object]", text))
     return None
+
+
+def _score_weight_chunk(
+    ref_model: object, quant_model: object, ids: mx.array
+) -> tuple[mx.array, mx.array, mx.array, mx.array]:
+    """One teacher-forced chunk: forward BOTH models on identical tokens (no cache), reduce.
+
+    Returns (kl, flips, ref_nll, quant_nll). The `[0]` strips the batch-of-1 axis: an mlx-lm
+    model returns a single [1, L-1, vocab] array (NOT a tuple, and NOT eval_ppl's batched shape).
+    """
+    inp = ids[None, :-1]
+    targets = ids[1:]
+    ref_logits = ref_model(inp)[0].astype(mx.float32)  # type: ignore[operator]
+    quant_logits = quant_model(inp)[0].astype(mx.float32)  # type: ignore[operator]
+    return _reduce_pair(ref_logits, quant_logits, targets)
