@@ -205,11 +205,9 @@ def measure_kv_fidelity(
     install_memory_caps()  # must precede model load
     _loaded = load(model_id, revision=model_revision)  # pragma: no cover
     model, tokenizer = _loaded[0], _loaded[1]  # pragma: no cover
-    probe_warnings: list[str] = []  # pragma: no cover
-    model_type = str(
-        getattr(getattr(model, "args", None), "model_type", "unknown")
-    )  # pragma: no cover
-    head_dim_warning = _head_dim_gate(  # pragma: no cover
+    probe_warnings: list[str] = []
+    model_type = str(getattr(getattr(model, "args", None), "model_type", "unknown"))
+    head_dim_warning = _head_dim_gate(
         head_dim=_kv_head_dim(model), kv_group_size=kv_group_size, model_type=model_type
     )
     if head_dim_warning is not None:  # pragma: no cover
