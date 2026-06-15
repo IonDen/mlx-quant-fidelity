@@ -38,17 +38,50 @@ class _Aggregate:
     n_positions: int
 
 
+def _kv_head_dim(model: object) -> int | None:
+    """Best-effort per-head KV dim for the group-size gate. None if not derivable.
+
+    ``ModelArgs.head_dim`` is frequently None (llama populates the real value as an
+    Attention-layer local, not on args), so the hidden//heads fallback is the primary
+    path. Field names are llama-family-specific; unusual archs return None.
+    """
+    args = getattr(model, "args", None)
+    head_dim = getattr(args, "head_dim", None)
+    if head_dim:
+        return int(head_dim)
+    hidden = getattr(args, "hidden_size", None)
+    heads = getattr(args, "num_attention_heads", None)
+    if hidden and heads:
+        return int(hidden) // int(heads)
+    return None
+
+
+def _head_dim_gate(*, head_dim: int | None, kv_group_size: int, model_type: str) -> str | None:
+    """Validate kv_group_size divides the per-head KV dim. Raise if it doesn't; warn if unknown.
+
+    The quantity is the per-head head_dim (QuantizedKVCache quantizes the per-head last axis;
+    mlx_lm/models/cache.py). Returns a warning string when head_dim can't be derived (do not
+    silently pass on odd architectures), else None.
+    """
+    if head_dim is None:
+        return (
+            f"head_dim/kv_group_size compatibility unverified for '{model_type}'; "
+            "relying on MLX to surface a mismatch at first use."
+        )
+    if head_dim % kv_group_size != 0:
+        raise CacheNotQuantizableError(
+            f"kv_group_size={kv_group_size} does not divide the model's KV head_dim={head_dim}; "
+            f"choose a group size that divides {head_dim} (e.g. 32 or 64)."
+        )
+    return None
+
+
 def _cache_is_quantizable(cache: list[object], *, group_size: int, bits: int) -> bool:
     """Return True if every layer cache has a NON-RAISING to_quantized; else raise, naming the type.
 
     Validates ``bits`` up front (MLX only supports 2/3/4/6/8). An attribute check alone is
     insufficient: RotatingKVCache / BatchRotatingKVCache (sliding-window) HAVE to_quantized but
     raise NotImplementedError. So probe by actually calling it on the (empty, cheap) cache.
-
-    Note on group_size: ``to_quantized`` on an EMPTY cache short-circuits and does NOT run the
-    group_size divisibility check, so an incompatible group_size (head_dim % group_size != 0)
-    cannot be caught here on an empty cache — it will surface as an MLX ValueError at first use.
-    The caller is responsible for ensuring group_size divides the model's KV head dimension.
     """
     if bits not in (2, 3, 4, 6, 8):
         raise CacheNotQuantizableError(f"unsupported kv_bits={bits}; MLX supports 2/3/4/6/8.")
@@ -172,6 +205,15 @@ def measure_kv_fidelity(
     install_memory_caps()  # must precede model load
     _loaded = load(model_id, revision=model_revision)  # pragma: no cover
     model, tokenizer = _loaded[0], _loaded[1]  # pragma: no cover
+    probe_warnings: list[str] = []  # pragma: no cover
+    model_type = str(
+        getattr(getattr(model, "args", None), "model_type", "unknown")
+    )  # pragma: no cover
+    head_dim_warning = _head_dim_gate(  # pragma: no cover
+        head_dim=_kv_head_dim(model), kv_group_size=kv_group_size, model_type=model_type
+    )
+    if head_dim_warning is not None:  # pragma: no cover
+        probe_warnings.append(head_dim_warning)
 
     if corpus is None:  # pragma: no cover
         from mlx_quant_fidelity.corpora.wikitext import load_wikitext2
@@ -231,5 +273,5 @@ def measure_kv_fidelity(
         peak_memory_bytes=int(mx.get_peak_memory()),
         cache_supported=True,
         verdict=verdict_for(agg.kl.mean, agg.kl.p99, agg.flip_rate),
-        warnings=(),
+        warnings=tuple(probe_warnings),
     )
