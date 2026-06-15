@@ -83,16 +83,23 @@ def _gate_configs(
 ) -> tuple[QuantMeta, int | None]:
     """Validate the quant/reference pair is comparable. Returns (quant_meta, reference_bits).
 
-    Raises ModelMismatchError if the quant repo isn't quantized, or model_type / vocab_size differ.
+    Raises ModelMismatchError if:
+    - the quant repo isn't quantized or carries no 'bits' (bits=None produces a misleading report),
+    - model_type is absent from either config or differs between them,
+    - vocab_size is absent from either config or differs between them.
     """
     quant_meta = extract_quant_meta(quant_config)
     if quant_meta is None:
         raise ModelMismatchError("quant repo declares no quantization — nothing to measure.")
+    if quant_meta.bits is None:
+        raise ModelMismatchError(
+            "quant repo's quantization block carries no 'bits' — cannot determine bit-width."
+        )
     qt, rt = _top_or_text(quant_config, "model_type"), _top_or_text(reference_config, "model_type")
-    if qt != rt:
+    if qt is None or rt is None or qt != rt:
         raise ModelMismatchError(f"model_type mismatch: quant={qt!r} vs reference={rt!r}.")
     qv, rv = _top_or_text(quant_config, "vocab_size"), _top_or_text(reference_config, "vocab_size")
-    if qv != rv:
+    if qv is None or rv is None or qv != rv:
         raise ModelMismatchError(f"vocab_size mismatch: quant={qv} vs reference={rv}.")
     reference_meta = extract_quant_meta(reference_config)
     reference_bits = reference_meta.bits if reference_meta is not None else None
