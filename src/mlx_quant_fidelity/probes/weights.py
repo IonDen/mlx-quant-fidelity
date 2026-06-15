@@ -129,7 +129,7 @@ def _resolve_weight_bytes(repo: str, revision: str | None) -> int | None:
     """
     try:
         path = Path(repo)
-        if not path.exists():
+        if not (path.exists() and path.is_dir()):
             from huggingface_hub import snapshot_download
 
             path = Path(snapshot_download(repo, revision=revision, local_files_only=True))
