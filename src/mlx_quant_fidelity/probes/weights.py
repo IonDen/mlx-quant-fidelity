@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import cast
 
 import mlx.core as mx
 
-from mlx_quant_fidelity.errors import ModelMismatchError
+from mlx_quant_fidelity.errors import InsufficientMemoryError, ModelMismatchError
 from mlx_quant_fidelity.probes._paired import _reduce_pair
 
 TOKENIZER_ASSUMPTION_WARNING = (
@@ -114,6 +115,50 @@ def _tokenizer_warnings(ref_tok: object, quant_tok: object) -> list[str]:
         if getattr(ref_tok, attr, None) != getattr(quant_tok, attr, None)
     ]
     return [TOKENIZER_ASSUMPTION_WARNING, *mismatches]
+
+
+_PREFLIGHT_HEADROOM_BYTES = 2 * 1024**3
+
+
+def _resolve_weight_bytes(repo: str, revision: str | None) -> int | None:
+    """Sum the repo's `model*.safetensors` bytes (local dir or already-cached snapshot), or None.
+
+    Best-effort: returns None for an uncached HF repo (local_files_only) or any error, so a
+    measurement is never aborted by a missing byte count. Mirrors mlx-lm's `model*.safetensors`
+    glob (utils.py) — not all `*.safetensors`.
+    """
+    try:
+        path = Path(repo)
+        if not path.exists():
+            from huggingface_hub import snapshot_download
+
+            path = Path(snapshot_download(repo, revision=revision, local_files_only=True))
+        total = sum(f.stat().st_size for f in path.glob("model*.safetensors"))
+        return total or None
+    except Exception:
+        return None
+
+
+def _preflight_memory(*, quant_bytes: int | None, reference_bytes: int | None) -> None:
+    """Raise InsufficientMemoryError if both models + headroom exceed the device working set.
+
+    Best-effort: skips silently when either size is unknown or the device reports no working set.
+    The wired cap does NOT bound two live, un-evictable models, so this byte check is the real guard.
+    """
+    if quant_bytes is None or reference_bytes is None:
+        return
+    try:
+        max_ws = int(mx.device_info().get("max_recommended_working_set_size", 0))
+    except Exception:
+        return
+    if max_ws <= 0:
+        return
+    if quant_bytes + reference_bytes + _PREFLIGHT_HEADROOM_BYTES > max_ws:
+        raise InsufficientMemoryError(
+            f"reference ({reference_bytes / 1e9:.1f} GB) + quant ({quant_bytes / 1e9:.1f} GB) + "
+            f"headroom exceed the device working set ({max_ws / 1e9:.1f} GB); "
+            "use smaller models or a larger machine."
+        )
 
 
 def _score_weight_chunk(

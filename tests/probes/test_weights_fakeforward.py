@@ -5,11 +5,13 @@ import math
 import mlx.core as mx
 import pytest
 
-from mlx_quant_fidelity.errors import ModelMismatchError
+from mlx_quant_fidelity.errors import InsufficientMemoryError, ModelMismatchError
 from mlx_quant_fidelity.probes.weights import (
     TOKENIZER_ASSUMPTION_WARNING,
     QuantMeta,
     _gate_configs,
+    _preflight_memory,
+    _resolve_weight_bytes,
     _score_weight_chunk,
     _tokenizer_warnings,
     extract_quant_meta,
@@ -183,3 +185,39 @@ def test_gate_rejects_unknown_bits():
     quant_no_bits = {"model_type": "llama", "vocab_size": 128, "quantization": {}}
     with pytest.raises(ModelMismatchError, match="bits"):
         _gate_configs(quant_config=quant_no_bits, reference_config=_REF_FP)
+
+
+def test_resolve_weight_bytes_local_dir(tmp_path):
+    (tmp_path / "model-00001.safetensors").write_bytes(b"x" * 2048)
+    (tmp_path / "tokenizer.json").write_bytes(b"y" * 10)  # not summed (only model*.safetensors)
+    assert _resolve_weight_bytes(str(tmp_path), None) == 2048
+
+
+def test_resolve_weight_bytes_none_when_no_weights(tmp_path):
+    assert _resolve_weight_bytes(str(tmp_path), None) is None
+
+
+def test_preflight_raises_when_over_budget(monkeypatch):
+    from mlx_quant_fidelity.probes import weights as w
+
+    monkeypatch.setattr(
+        w.mx, "device_info", lambda: {"max_recommended_working_set_size": 10 * 1024**3}
+    )
+    with pytest.raises(InsufficientMemoryError, match="exceed"):
+        _preflight_memory(quant_bytes=6 * 1024**3, reference_bytes=6 * 1024**3)
+
+
+def test_preflight_silent_when_within_budget(monkeypatch):
+    from mlx_quant_fidelity.probes import weights as w
+
+    monkeypatch.setattr(
+        w.mx, "device_info", lambda: {"max_recommended_working_set_size": 32 * 1024**3}
+    )
+    _preflight_memory(quant_bytes=4 * 1024**3, reference_bytes=14 * 1024**3)  # no raise
+
+
+def test_preflight_skips_when_size_unknown(monkeypatch):
+    from mlx_quant_fidelity.probes import weights as w
+
+    monkeypatch.setattr(w.mx, "device_info", lambda: {"max_recommended_working_set_size": 1})
+    _preflight_memory(quant_bytes=None, reference_bytes=14 * 1024**3)  # no raise (can't pre-flight)
