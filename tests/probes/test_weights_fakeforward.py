@@ -285,6 +285,7 @@ def test_measure_weight_caps_before_both_loads(monkeypatch):
     assert report.n_positions == 6  # 2 chunks x (4-1) positions, pooled
     assert report.kl.mean > 0.1
     assert report.reference_bits is None
+    assert any("share a tokenizer" in w for w in report.warnings)
 
 
 def test_measure_weight_records_quantized_reference_bits(monkeypatch):
@@ -313,3 +314,51 @@ def test_measure_weight_rejects_empty_corpus():
     )
     with pytest.raises(CorpusError, match="no chunks"):
         measure_weight_fidelity("quant", "ref", corpus=empty)
+
+
+def test_measure_weight_max_chunks_caps_provided_corpus(monkeypatch):
+    calls: list[str] = []
+    _patch_loads(monkeypatch, ref_peak=0, quant_peak=1, calls=calls)
+    report = measure_weight_fidelity("quant", "ref", corpus=_corpus(5), max_chunks=2)
+    assert report.n_chunks == 2
+    assert report.n_positions == 6  # 2 chunks x (4-1) positions
+
+
+# ---------------------------------------------------------------------------
+# Defensive / fallback branch coverage
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_weight_bytes_via_snapshot(tmp_path, monkeypatch):
+    import huggingface_hub
+
+    (tmp_path / "model.safetensors").write_bytes(b"z" * 512)
+    monkeypatch.setattr(huggingface_hub, "snapshot_download", lambda *a, **k: str(tmp_path))
+    assert _resolve_weight_bytes("org/some-repo", None) == 512
+
+
+def test_resolve_weight_bytes_none_on_error(tmp_path, monkeypatch):
+    import pathlib
+
+    def _boom(self, pattern):
+        raise OSError("boom")
+
+    monkeypatch.setattr(pathlib.Path, "glob", _boom)
+    assert _resolve_weight_bytes(str(tmp_path), None) is None
+
+
+def test_preflight_skips_when_device_info_raises(monkeypatch):
+    from mlx_quant_fidelity.probes import weights as w
+
+    def _boom():
+        raise RuntimeError("no device")
+
+    monkeypatch.setattr(w.mx, "device_info", _boom)
+    _preflight_memory(quant_bytes=4 * 1024**3, reference_bytes=4 * 1024**3)  # no raise
+
+
+def test_preflight_skips_when_working_set_zero(monkeypatch):
+    from mlx_quant_fidelity.probes import weights as w
+
+    monkeypatch.setattr(w.mx, "device_info", dict)  # missing key -> int(...get(...,0)) == 0
+    _preflight_memory(quant_bytes=4 * 1024**3, reference_bytes=4 * 1024**3)  # no raise

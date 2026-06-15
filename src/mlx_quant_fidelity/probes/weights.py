@@ -203,6 +203,15 @@ def measure_weight_fidelity(
     bundles quantized-matmul kernel numerics (the deployed model's real cost), with no
     quantized-attention confound. Raises ModelMismatchError (incomparable pair),
     InsufficientMemoryError (pair too large for the device), ExactZeroError (identical repos).
+
+    Args:
+        quant_model_id: Local path or HF repo id of the quantized model.
+        reference_model_id: Local path or HF repo id of the full-precision (or lower-quant) reference.
+        corpus: Pre-built corpus to score; if None, WikiText-2 is loaded automatically.
+        max_chunks: Score at most this many corpus chunks (applies to both the auto-loaded
+            and a caller-provided corpus).
+        quant_revision: Optional git revision for the quantized repo.
+        reference_revision: Optional git revision for the reference repo.
     """
     from mlx_lm import load
 
@@ -243,11 +252,13 @@ def measure_weight_fidelity(
         if len(corpus.chunks) == 0:
             raise CorpusError("the evaluation corpus yielded no chunks; at least one is required.")
 
+    # Cap the scored chunks — applies to both an auto-loaded and a caller-provided corpus.
+    chunks = corpus.chunks[:max_chunks] if max_chunks is not None else corpus.chunks
     kls: list[mx.array] = []
     flips: list[mx.array] = []
     ref_nlls: list[mx.array] = []
     quant_nlls: list[mx.array] = []
-    for ids in corpus.chunks:
+    for ids in chunks:
         kl, flip, ref_nll, quant_nll = _score_weight_chunk(ref_model, quant_model, ids)
         mx.eval(kl, flip, ref_nll, quant_nll)
         kls.append(kl)
@@ -281,7 +292,7 @@ def measure_weight_fidelity(
         perplexity_quant=agg.perplexity_quant,
         perplexity_delta=agg.perplexity_quant - agg.perplexity_ref,
         n_positions=agg.n_positions,
-        n_chunks=len(corpus.chunks),
+        n_chunks=len(chunks),
         corpus=corpus.provenance,
         mlx_version=importlib.metadata.version("mlx"),
         mlx_lm_version=importlib.metadata.version("mlx-lm"),
