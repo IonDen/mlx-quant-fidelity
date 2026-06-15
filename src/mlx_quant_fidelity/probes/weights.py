@@ -17,7 +17,7 @@ class QuantMeta:
 
 
 def _int_or_none(v: object) -> int | None:
-    return v if isinstance(v, int) else None
+    return v if isinstance(v, int) and not isinstance(v, bool) else None
 
 
 def _str_or_none(v: object) -> str | None:
