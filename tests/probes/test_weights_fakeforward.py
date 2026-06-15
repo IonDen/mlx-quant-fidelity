@@ -1,6 +1,10 @@
 """Offline fake-forward tests for the weight-quant probe (no real model load)."""
 
-from mlx_quant_fidelity.probes.weights import QuantMeta, extract_quant_meta
+import math
+
+import mlx.core as mx
+
+from mlx_quant_fidelity.probes.weights import QuantMeta, _score_weight_chunk, extract_quant_meta
 
 
 def test_extract_native_quantization():
@@ -50,3 +54,36 @@ def test_extract_empty_native_block_is_quantized_with_unknown_bits():
     assert meta is not None
     assert meta.bits is None
     assert meta.per_layer is False
+
+
+class _FakeWeightModel:
+    """No-cache forward returning a fixed one-hot-peaked logit tensor (peak index `peak`)."""
+
+    def __init__(self, peak: int):
+        self._peak = peak
+
+    def __call__(self, inp):  # inp [1, L]; returns [1, L, 3]
+        length = inp.shape[1]
+        out = mx.zeros((1, length, 3))
+        out[:, :, self._peak] = 5.0
+        return out
+
+
+def test_score_weight_chunk_detects_divergence():
+    ids = mx.array([0, 1, 2])  # vocab=3; targets [1, 2]
+    kl, flips, ref_nll, quant_nll = _score_weight_chunk(
+        _FakeWeightModel(0), _FakeWeightModel(1), ids
+    )
+    mx.eval(kl, flips, ref_nll, quant_nll)
+    assert kl.shape == (2,)  # L-1 teacher-forced positions
+    # ref peak [5,0,0] vs quant peak [0,5,0] -> per-position KL(ref||quant) ~ 4.90 nats (hand-computed)
+    assert math.isclose(float(kl.mean()), 4.90, abs_tol=0.02)
+    assert int(flips.astype(mx.int32).sum()) == 2  # both positions flip
+    # A bypass that called ref_model twice would give KLD 0 -> this assertion goes red.
+
+
+def test_score_weight_chunk_identical_is_zero():
+    ids = mx.array([0, 1, 2])
+    kl, _flips, _r, _q = _score_weight_chunk(_FakeWeightModel(0), _FakeWeightModel(0), ids)
+    mx.eval(kl)
+    assert float(kl.mean()) == 0.0
