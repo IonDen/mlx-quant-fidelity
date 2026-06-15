@@ -107,6 +107,39 @@ def test_score_weight_chunk_identical_is_zero():
     assert float(kl.mean()) == 0.0
 
 
+class _FakeLogitsModel:
+    """No-cache forward returning a fixed logit row broadcast over all positions."""
+
+    def __init__(self, row):
+        self._row = mx.array(row)
+
+    def __call__(self, inp):  # inp [1, L]; returns [1, L, V]
+        length = inp.shape[1]
+        return mx.broadcast_to(self._row, (1, length, self._row.shape[0]))
+
+
+def test_score_weight_chunk_respects_kl_direction():
+    # asymmetric pair so KL(P_ref || Q_quant) != KL(Q_quant || P_ref); a ref/quant swap is detectable
+    from mlx_quant_fidelity.metrics import kl_divergence
+
+    ref = _FakeLogitsModel([3.0, 1.0, 0.0])
+    quant = _FakeLogitsModel([0.0, 0.5, 2.0])
+    ids = mx.array([0, 1, 2])
+    kl_probe = _score_weight_chunk(ref, quant, ids)[0]
+    # the probe must compute KL(P_ref || Q_quant): compare to the metric on the same logit rows
+    ref_logits = mx.broadcast_to(mx.array([3.0, 1.0, 0.0]), (2, 3))  # L-1 = 2 positions
+    quant_logits = mx.broadcast_to(mx.array([0.0, 0.5, 2.0]), (2, 3))
+    kl_metric = kl_divergence(ref_logits, quant_logits)
+    kl_swapped = kl_divergence(quant_logits, ref_logits)
+    mx.eval(kl_probe, kl_metric, kl_swapped)
+    assert math.isclose(
+        float(kl_probe.mean()), float(kl_metric.mean()), abs_tol=1e-5
+    )  # correct direction
+    assert not math.isclose(
+        float(kl_metric.mean()), float(kl_swapped.mean()), abs_tol=0.05
+    )  # asymmetric
+
+
 _Q_NATIVE = {
     "model_type": "llama",
     "vocab_size": 128,
@@ -362,3 +395,12 @@ def test_preflight_skips_when_working_set_zero(monkeypatch):
 
     monkeypatch.setattr(w.mx, "device_info", dict)  # missing key -> int(...get(...,0)) == 0
     _preflight_memory(quant_bytes=4 * 1024**3, reference_bytes=4 * 1024**3)  # no raise
+
+
+def test_measure_weight_rejects_single_token_chunk():
+    bad = Corpus(
+        chunks=(mx.array([0, 1]), mx.array([2])),
+        provenance=CorpusProvenance("x", "t", "t", 1, 1, "none", "drop", "raw", 3),
+    )
+    with pytest.raises(CorpusError, match="at least 2 tokens"):
+        measure_weight_fidelity("quant", "ref", corpus=bad)
