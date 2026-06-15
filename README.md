@@ -36,9 +36,10 @@ mlx-quant-fidelity weights mlx-community/Llama-3.2-3B-Instruct-4bit --reference 
 ```python
 from mlx_quant_fidelity import measure_weight_fidelity
 
+# measure_weight_fidelity(quantized_repo, reference_repo)
 report = measure_weight_fidelity(
-    "mlx-community/Llama-3.2-3B-Instruct-4bit",
-    "mlx-community/Llama-3.2-3B-Instruct-bf16",
+    "mlx-community/Llama-3.2-3B-Instruct-4bit",  # quantized
+    "mlx-community/Llama-3.2-3B-Instruct-bf16",  # reference
 )
 print(report.kl.mean, report.flip_rate, report.verdict)
 ```
@@ -75,7 +76,7 @@ M1 Max, WikiText-2 test (100 chunks of 512 tokens), stress mode (quantize from t
 | Qwen2.5-7B | 4 | 9.36 | 0.99 | bad |
 | Qwen2.5-7B | 8 | 0.009 | 0.032 | marginal |
 
-8-bit KV is near-lossless on all three models. 4-bit is another matter, and Qwen2.5-7B at 4-bit in stress mode falls apart: nearly every token flips. That is the attention sink at work: stress mode quantizes the cache from token 0, including the first tokens attention leans on most, and Qwen2.5 does not tolerate it. mlx-lm's own default keeps the first 5000 tokens full-precision for exactly this reason. The point of the tool is that you can see this for your model before you pick a bit-width.
+8-bit KV is near-lossless on all three models. 4-bit is another matter, and Qwen2.5-7B at 4-bit in stress mode falls apart: nearly every token flips. That is the attention sink at work: stress mode quantizes the cache from token 0, including the first tokens attention leans on most, and Qwen2.5 does not tolerate it. mlx-lm's own default keeps the first 5000 tokens full-precision for exactly this reason. Run the tool first and you see it coming.
 
 ## How much does weight quantization cost?
 
@@ -89,7 +90,7 @@ Same corpus and recipe, but the comparison is now a quantized model repo against
 | Llama-3.2-3B | 8-bit | bf16 | 0.0009 | 0.021 | 0.00 | good |
 | Qwen2.5-7B | 4-bit | 8-bit | 0.109 | 0.16 | +0.9 | marginal |
 
-8-bit weights are near-lossless: about 2% of top tokens flip and perplexity barely moves. 4-bit is a real trade — 15 to 21% of top tokens flip and perplexity climbs a point or more, worst on the small 1B model. The Qwen row compares 4-bit against 8-bit rather than bf16, so its drift is relative to an already-quantized reference, not full precision; the report records that the reference is 8-bit and says so in plain text. The verdict tiers are provisional, anchored to these q8 and q4 reference points on short prose rather than to downstream task accuracy.
+8-bit weights are near-lossless: about 2% of top tokens flip and perplexity barely moves. 4-bit is a real trade: 15 to 21% of top tokens flip and perplexity climbs a point or more, worst on the small 1B model. The Qwen row compares 4-bit against 8-bit rather than bf16, so its drift is relative to an already-quantized reference, not full precision; the report records that the reference is 8-bit and says so in plain text. The verdict tiers are provisional, anchored to these q8 and q4 reference points on short prose rather than to downstream task accuracy.
 
 Unlike the KV probe, both runs use standard attention, so the drift is the deployed quantized model's weight-quant cost with no quantized-attention kernel folded in. It does still include the quantized-matmul kernel's numerics, which is exactly what you run when you load the model.
 
@@ -100,7 +101,7 @@ Teacher-forced scoring, not generation. For each fixed-length corpus chunk the m
 Two modes:
 
 - **stress** (`--quantize-start 0`, the default): quantize from token 0. The harsh, apples-to-apples quantizer test.
-- **deployment** (`quantize_start > 0`): what mlx-lm users actually run, with the first N tokens kept full-precision. Still on the [roadmap](ROADMAP.md).
+- **deployment** (`quantize_start > 0`): what mlx-lm users actually run, with the first N tokens kept full-precision. Not available yet — see the [roadmap](ROADMAP.md).
 
 A run that returns exactly zero drift raises instead of reporting a silent "perfect fidelity." That almost always means quantization never engaged, not that it was free.
 
