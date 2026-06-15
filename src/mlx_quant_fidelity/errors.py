@@ -19,3 +19,11 @@ class CorpusError(QuantFidelityError):
 
 class MemorySafetyError(QuantFidelityError):
     """Wired-memory caps could not be installed before a model load."""
+
+
+class ModelMismatchError(QuantFidelityError):
+    """The quant and reference repos are not a comparable pair (architecture / vocab / not quantized)."""
+
+
+class InsufficientMemoryError(QuantFidelityError):
+    """The two models' combined size exceeds the device's recommended working set."""
