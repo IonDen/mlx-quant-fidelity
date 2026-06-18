@@ -9,6 +9,7 @@ from mlx_quant_fidelity.report import (
     ComparisonTargetResult,
     FidelityReport,
     WeightFidelityReport,
+    _human_bytes,
     fidelity_report_from_dict,
     render_comparison_json,
     render_comparison_markdown,
@@ -436,6 +437,19 @@ def test_human_bytes_adaptive_formatting() -> None:
 
     # None → "—" (tested via existing None-branch; verify no regression)
     # (covered implicitly by the existing excluded tests, but assert directly on the symbol)
+
+
+def test_human_bytes_all_branches() -> None:
+    """_human_bytes covers every magnitude band including the None sentinel."""
+    assert _human_bytes(None) == "—"
+    assert _human_bytes(0) == "0 B"
+    assert _human_bytes(999) == "999 B"
+    assert _human_bytes(1_000) == "1.0 KB"
+    assert _human_bytes(500_000) == "500.0 KB"
+    assert _human_bytes(1_000_000) == "1.0 MB"
+    assert _human_bytes(250_000_000) == "250.0 MB"
+    assert _human_bytes(1_000_000_000) == "1.00 GB"
+    assert _human_bytes(4_200_000_000) == "4.20 GB"
 
 
 def test_comparison_markdown_dominated_row_shows_dominator_label() -> None:
