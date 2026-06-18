@@ -4,7 +4,7 @@
 
 ## The question
 
-When you have several quantizations of the same model — q4, q6, and q8 weights, or 4-bit and 8-bit KV caches with different group sizes — you want to know which costs the least quality per byte of memory.
+When you have several quantizations of the same model — q4, q6, and q8 weights, or 4-bit and 8-bit KV caches with different group sizes — you want to know which gives the best quality for the fewest bytes.
 
 Raw metric sorting does not answer that. Sorting by KL divergence alone picks the best quality regardless of cost, which tells you nothing you didn't already know (more bits = lower KLD). Sorting by size alone ignores quality. Neither tells you whether q6 is a meaningful step up from q4 or barely different.
 
@@ -16,7 +16,7 @@ Quality is mean full-vocab KL divergence in nats, computed as `KL(P_full ‖ Q_q
 
 The KLD is fp32, full-vocabulary (not truncated to top-k), computed over fixed-length corpus chunks at temperature 0. Each position produces one KLD scalar; the reported mean averages across all positions in the run.
 
-The tool also reports KL p99 and KL max for every target. These appear in the comparison table so you can see whether a quantization has occasional bad positions even when its mean looks fine. The ranking axis, though, is mean KLD only. A target can have a favorable mean and an ugly tail, and the Pareto placement will not penalize it. If the tail matters for your use case, look at the p99 column directly rather than relying on frontier placement alone.
+The tool also reports KL p99 and KL max for every target, so you can see whether a quantization has occasional bad positions even when its mean looks fine. Ranking and domination are decided on mean KLD only, so a target with a favorable mean and an ugly tail will not be penalized in its Pareto placement. If the tail matters for your use case, read the p99 column directly.
 
 ## The cost axis
 
@@ -32,7 +32,7 @@ The `4/group_size` term is the per-group overhead: a fp16 scale (2 bytes) and a 
 
 The formula is exact for the supported path. Group overhead matters for ranking: a smaller group size improves accuracy but increases bytes per token, so two configurations at the same bit width can land at different positions on the cost axis. Ignoring group size would misrank them.
 
-Memory normalization is what makes the comparison meaningful. Without it, comparing q4 and q8 on quality alone is circular — q8 wins by definition. The question is whether q8's quality gain is worth the extra bytes.
+Memory normalization is what makes the comparison meaningful. Without it, comparing q4 and q8 on quality alone is tautological — q8 wins by definition because the cost difference is not part of the comparison. The question is whether q8's quality gain is worth the extra bytes.
 
 ## Pareto efficiency
 
@@ -49,7 +49,7 @@ A worked example: suppose you compare four weight quantizations.
 
 q4-bad has worse quality than q4 (KLD 0.20 vs 0.09) and costs more bytes (4.3 vs 4.2 GB). q4 dominates q4-bad: you would never choose q4-bad. The frontier is {q4, q6, q8}. Each is the cheapest way to achieve at least that quality level; none dominates another.
 
-The tool does not pick a single "knee" from the frontier automatically. Where the knee sits depends on how you weight the two axes, and that is sensitive to axis scaling. Picking it would require assumptions the tool does not make.
+The tool does not pick a single "knee" from the frontier automatically. Where the knee sits depends on how you weight quality against cost, and choosing that weighting is a value judgment the tool deliberately leaves to you.
 
 ## Budget-driven selection
 
@@ -70,7 +70,7 @@ To pick a threshold: start by reading the comparison table. If all frontier targ
 
 Fidelity numbers are corpus- and context-length-specific. The measurements use WikiText-2 short prose at temperature 0. The paper this work builds on, *Accuracy Is Not All You Need* (arXiv:2407.09141), documents that short-prose distributional drift under-predicts degradation on long-context tasks and code. Every report records the corpus and token count so the number is not read as a bare score without context.
 
-Perplexity delta is not an independent signal. It correlates with mean KLD by construction — `KL(P‖Q) = H(P,Q) − H(P)` — so when the two metrics agree, that is arithmetic, not corroboration. Perplexity delta is reported for continuity with llama.cpp; treat it as a restatement of mean KLD.
+Perplexity delta is not an independent signal. It correlates with mean KLD by construction (`KL(P‖Q) = H(P,Q) − H(P)`), so when the two metrics agree, that is arithmetic rather than confirmation. Perplexity delta is reported for continuity with llama.cpp; treat it as a restatement of mean KLD.
 
 In `compare kv`, the quantized run uses `mx.fast.quantized_scaled_dot_product_attention` while the reference uses standard SDPA. The measured drift bundles the quantizer's numerical error with the quantized-attention kernel's numerics. That is the real end-to-end cost of deploying the model — the right thing to measure for a deployment decision — but the report says so explicitly rather than attributing everything to the quantizer alone.
 
