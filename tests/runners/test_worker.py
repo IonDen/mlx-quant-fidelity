@@ -1,5 +1,6 @@
 import json
 
+import pytest
 from tests.test_compare_report import _wreport
 
 from mlx_quant_fidelity.runners import _worker
@@ -32,3 +33,35 @@ def test_worker_writes_failed_envelope_on_domain_error(tmp_path, monkeypatch):
     assert env["status"] == "failed"
     assert env["error_type"] == "ModelMismatchError"
     assert "vocab_size" in env["message"]
+
+
+def test_worker_propagates_non_domain_error(tmp_path, monkeypatch):
+    out = tmp_path / "q.json"
+
+    def boom(*a, **k):
+        raise RuntimeError("unexpected")
+
+    monkeypatch.setattr(_worker, "measure_weight_fidelity", boom)
+    with pytest.raises(RuntimeError, match="unexpected"):
+        _worker.run_weight_worker(["--quant", "q", "--reference", "r", "--out", str(out)])
+    assert not out.exists()  # a non-domain crash writes no envelope; it must propagate
+
+
+def test_worker_forwards_quant_reference_and_max_chunks(tmp_path, monkeypatch):
+    received: dict[str, object] = {}
+
+    def fake(quant, reference, **kw):
+        received["quant"] = quant
+        received["reference"] = reference
+        received["kw"] = kw
+        return _wreport("q4", 0.09, 4200)
+
+    monkeypatch.setattr(_worker, "measure_weight_fidelity", fake)
+    out = tmp_path / "q4.json"
+    rc = _worker.run_weight_worker(
+        ["--quant", "q4", "--reference", "ref", "--out", str(out), "--max-chunks", "3"]
+    )
+    assert rc == 0
+    assert received["quant"] == "q4"  # first positional is the quant repo
+    assert received["reference"] == "ref"  # a quant/reference swap would fail here
+    assert received["kw"]["max_chunks"] == 3  # type: ignore[index]

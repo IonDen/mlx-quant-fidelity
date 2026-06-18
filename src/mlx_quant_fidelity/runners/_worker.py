@@ -17,13 +17,13 @@ from mlx_quant_fidelity.probes.weights import measure_weight_fidelity
 
 def run_weight_worker(argv: list[str] | None = None) -> int:
     """Measure one (quant, reference) pair; write {status, report|error} to --out. Returns 0."""
-    install_memory_caps()  # before any model load
     parser = argparse.ArgumentParser(prog="mlx-quant-fidelity-worker")
     parser.add_argument("--quant", required=True)
     parser.add_argument("--reference", required=True)
     parser.add_argument("--out", required=True)
     parser.add_argument("--max-chunks", type=int, default=None)
     args = parser.parse_args(argv)
+    install_memory_caps()  # after arg validation, before any model load
     try:
         report = measure_weight_fidelity(args.quant, args.reference, max_chunks=args.max_chunks)
         envelope: dict[str, object] = {"status": "ok", "report": dataclasses.asdict(report)}
@@ -39,6 +39,8 @@ def _console_entry() -> None:  # pragma: no cover - process-exit wrapper
     code = 1
     try:
         code = run_weight_worker()
+    except SystemExit as exc:  # argparse usage errors, etc.
+        code = exc.code if isinstance(exc.code, int) else 1
     except Exception as exc:  # last resort, still write nothing and hard-exit
         print(f"worker error: {exc}", file=sys.stderr)
     finally:
