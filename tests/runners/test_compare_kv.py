@@ -491,3 +491,34 @@ def test_compare_kv_stale_model_partial_is_recomputed(monkeypatch, tmp_path):
 
     # (4,64) must have been re-scored — stale partial from model-A should not be resumed
     assert (4, 64) in calls
+
+
+# ── Lines 376, 379: _read_partial returns None for non-ok / bad-report partials ──
+
+
+def test_compare_kv_failed_partial_is_recomputed(monkeypatch, tmp_path):
+    """A KV partial with status='failed' causes _read_partial to return None (line 376),
+    putting that config in pending and re-scoring it.
+    """
+    # Pre-seed a failed partial for (4, 64)
+    (tmp_path / "4_64.json").write_text(
+        json.dumps({"status": "failed", "error_type": "CacheNotQuantizableError", "message": "x"})
+    )
+    reports = {(4, 64): _fid((4, 64), 0.09), (8, 64): _fid((8, 64), 0.01)}
+    calls = _patch_kv_compare(monkeypatch, reports)
+    cmp.compare_kv_fidelity("m", [(4, 64), (8, 64)], artifacts_dir=tmp_path)
+    # (4, 64) must have been re-scored — the failed partial is not resumed
+    assert (4, 64) in calls
+
+
+def test_compare_kv_ok_partial_with_null_report_is_recomputed(monkeypatch, tmp_path):
+    """A KV partial with status='ok' but report=null causes _read_partial to return None
+    (line 379 — isinstance check fails), putting that config in pending and re-scoring it.
+    """
+    # Pre-seed a partial with ok status but report=null (not a dict)
+    (tmp_path / "4_64.json").write_text(json.dumps({"status": "ok", "report": None, "cost": 100}))
+    reports = {(4, 64): _fid((4, 64), 0.09), (8, 64): _fid((8, 64), 0.01)}
+    calls = _patch_kv_compare(monkeypatch, reports)
+    cmp.compare_kv_fidelity("m", [(4, 64), (8, 64)], artifacts_dir=tmp_path)
+    # (4, 64) must have been re-scored — the null-report partial is not resumed
+    assert (4, 64) in calls
