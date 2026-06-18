@@ -54,3 +54,27 @@ def test_weight_marginal_boundary_is_inclusive():
         verdict_for(kl_mean=0.20, kl_p99=1.50, flip_rate=0.25, thresholds=_WEIGHT_TIERS_v0_2_0)
         == "marginal"
     )
+
+
+from mlx_quant_fidelity.policy import qualifies, tier_rank
+
+
+def test_tier_rank_orders_verdicts():
+    assert tier_rank("bad") < tier_rank("marginal") < tier_rank("good")
+
+
+def test_qualifies_max_kld_only():
+    assert qualifies(kl_mean=0.05, verdict="bad", max_kld=0.1, min_tier=None) is True
+    assert qualifies(kl_mean=0.20, verdict="good", max_kld=0.1, min_tier=None) is False
+
+
+def test_qualifies_min_tier_uses_full_verdict():
+    # audit #2: a good mean but a 'marginal' verdict (bad tail/flip) must FAIL --min-tier good
+    assert qualifies(kl_mean=0.001, verdict="marginal", max_kld=None, min_tier="good") is False
+    assert qualifies(kl_mean=0.001, verdict="good", max_kld=None, min_tier="good") is True
+
+
+def test_qualifies_anded_and_default_true():
+    assert qualifies(kl_mean=0.05, verdict="good", max_kld=0.1, min_tier="good") is True
+    assert qualifies(kl_mean=0.05, verdict="marginal", max_kld=0.1, min_tier="good") is False
+    assert qualifies(kl_mean=9.9, verdict="bad", max_kld=None, min_tier=None) is True  # no budget
