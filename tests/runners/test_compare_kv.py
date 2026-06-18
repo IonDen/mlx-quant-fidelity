@@ -149,11 +149,11 @@ def test_compare_kv_rejects_duplicate_configs(monkeypatch, tmp_path):
 
 
 def test_compare_kv_resume_skips_existing_partial(monkeypatch, tmp_path):
-    """A config whose partial JSON already exists is not re-scored."""
+    """A config whose partial JSON already exists with a matching run_identity is not re-scored."""
     rep = _fid((4, 64), 0.09)
     partial_name = "4_64.json"  # ':' sanitized to '_'
     (tmp_path / partial_name).write_text(
-        json.dumps({"status": "ok", "report": dataclasses.asdict(rep), "cost": 1234})
+        _kv_partial_with_identity(rep, 1234, bits=4, group_size=64)
     )
     calls = _patch_kv_compare(monkeypatch, {(8, 64): _fid((8, 64), 0.01)})
     cmp.compare_kv_fidelity("m", [(4, 64), (8, 64)], artifacts_dir=tmp_path)
@@ -363,12 +363,13 @@ def test_compare_kv_corrupt_at_collect_yields_failed_result(monkeypatch, tmp_pat
     rep_4 = _fid((4, 64), 0.09)
     rep_8 = _fid((8, 64), 0.01)
 
-    valid_4 = json.dumps({"status": "ok", "report": dataclasses.asdict(rep_4), "cost": 1000})
-    valid_8 = json.dumps({"status": "ok", "report": dataclasses.asdict(rep_8), "cost": 2000})
-
-    # Pre-seed both partials as valid
-    (tmp_path / "4_64.json").write_text(valid_4)
-    (tmp_path / "8_64.json").write_text(valid_8)
+    # Pre-seed both partials as valid (with matching run_identity so they resume correctly)
+    (tmp_path / "4_64.json").write_text(
+        _kv_partial_with_identity(rep_4, 1000, bits=4, group_size=64)
+    )
+    (tmp_path / "8_64.json").write_text(
+        _kv_partial_with_identity(rep_8, 2000, bits=8, group_size=64)
+    )
 
     # Track read_text calls per path name; on the 2nd call for 4_64.json return corrupt data
     read_counts: dict[str, int] = {}
@@ -418,10 +419,10 @@ def test_compare_kv_all_resumed_skips_model_load(monkeypatch, tmp_path):
     rep_8 = _fid((8, 64), 0.01)
 
     (tmp_path / "4_64.json").write_text(
-        json.dumps({"status": "ok", "report": dataclasses.asdict(rep_4), "cost": 1000})
+        _kv_partial_with_identity(rep_4, 1000, bits=4, group_size=64)
     )
     (tmp_path / "8_64.json").write_text(
-        json.dumps({"status": "ok", "report": dataclasses.asdict(rep_8), "cost": 2000})
+        _kv_partial_with_identity(rep_8, 2000, bits=8, group_size=64)
     )
 
     load_calls: list[str] = []
@@ -463,7 +464,7 @@ def test_compare_kv_resume_data_integrity(monkeypatch, tmp_path):
     seeded_kl_mean = 0.09
 
     (tmp_path / "4_64.json").write_text(
-        json.dumps({"status": "ok", "report": dataclasses.asdict(rep), "cost": seeded_cost})
+        _kv_partial_with_identity(rep, seeded_cost, bits=4, group_size=64)
     )
     calls = _patch_kv_compare(monkeypatch, {(8, 64): _fid((8, 64), 0.01)})
     report = cmp.compare_kv_fidelity("m", [(4, 64), (8, 64)], artifacts_dir=tmp_path)
@@ -511,13 +512,34 @@ def test_compare_kv_collect_loop_isolates_bad_cost_partial(monkeypatch, tmp_path
     rep_4 = _fid((4, 64), 0.05)
     rep_8 = _fid((8, 64), 0.01)
 
-    # Pre-seed 4_64.json with a bad cost so it's skipped in PENDING but fails at collect
+    # Pre-seed 4_64.json with a bad cost so it's skipped in PENDING but fails at collect.
+    # The run_identity must match so _read_partial accepts it (the bad cost is invisible to
+    # the identity check — cost is only validated at collect time by _kv_envelope_to_result).
+    import mlx_quant_fidelity.runners.compare as compare_mod
+
+    identity_4 = {
+        "mode": "kv",
+        "model_id": "m",
+        "model_revision": None,
+        "bits": 4,
+        "group_size": 64,
+        "quantize_start": 0,
+        "max_chunks": None,
+        "schema_version": compare_mod._PARTIAL_SCHEMA_VERSION,
+    }
     (tmp_path / "4_64.json").write_text(
-        json.dumps({"status": "ok", "report": dataclasses.asdict(rep_4), "cost": "bad-cost"})
+        json.dumps(
+            {
+                "status": "ok",
+                "report": dataclasses.asdict(rep_4),
+                "cost": "bad-cost",
+                "run_identity": identity_4,
+            }
+        )
     )
     # Pre-seed 8_64.json with a valid partial so no model load occurs
     (tmp_path / "8_64.json").write_text(
-        json.dumps({"status": "ok", "report": dataclasses.asdict(rep_8), "cost": 2000})
+        _kv_partial_with_identity(rep_8, 2000, bits=8, group_size=64)
     )
 
     _patch_kv_compare(monkeypatch, {})  # no scoring should happen (both pre-seeded)
@@ -596,3 +618,102 @@ def test_compare_kv_ok_partial_with_null_report_is_recomputed(monkeypatch, tmp_p
     cmp.compare_kv_fidelity("m", [(4, 64), (8, 64)], artifacts_dir=tmp_path)
     # (4, 64) must have been re-scored — the null-report partial is not resumed
     assert (4, 64) in calls
+
+
+# ── Run-identity validation (finding 1) ───────────────────────────────────────
+
+
+def _kv_partial_with_identity(
+    rep: object,
+    cost: int,
+    *,
+    model_id: str = "m",
+    model_revision: str | None = None,
+    bits: int,
+    group_size: int,
+    quantize_start: int = 0,
+    max_chunks: int | None = None,
+    schema_version: int | None = None,
+) -> str:
+    """Build a KV partial JSON with a run_identity block.
+
+    schema_version defaults to _PARTIAL_SCHEMA_VERSION (the live constant).
+    Pass a different integer to simulate a version mismatch.
+    """
+    import mlx_quant_fidelity.runners.compare as compare_mod
+
+    sv = schema_version if schema_version is not None else compare_mod._PARTIAL_SCHEMA_VERSION
+    identity = {
+        "mode": "kv",
+        "model_id": model_id,
+        "model_revision": model_revision,
+        "bits": bits,
+        "group_size": group_size,
+        "quantize_start": quantize_start,
+        "max_chunks": max_chunks,
+        "schema_version": sv,
+    }
+    return json.dumps(
+        {"status": "ok", "report": dataclasses.asdict(rep), "cost": cost, "run_identity": identity}
+    )  # type: ignore[arg-type]
+
+
+def test_compare_kv_stale_max_chunks_partial_is_recomputed(monkeypatch, tmp_path):
+    """A partial scored at max_chunks=2 must NOT be resumed for a max_chunks=99 run.
+
+    The run_identity in the partial records max_chunks=2; the orchestrator expects
+    max_chunks=99 — the mismatch must cause _read_partial to return None, putting (4,64)
+    in pending and calling score_kv_config for it.
+    """
+    rep = _fid((4, 64), 0.09)
+    # Partial was written for max_chunks=2 (a smoke run)
+    (tmp_path / "4_64.json").write_text(
+        _kv_partial_with_identity(rep, 1000, bits=4, group_size=64, max_chunks=2)
+    )
+    reports = {(4, 64): _fid((4, 64), 0.09), (8, 64): _fid((8, 64), 0.01)}
+    calls = _patch_kv_compare(monkeypatch, reports)
+
+    # Call with max_chunks=99 — identity mismatch must trigger re-score
+    cmp.compare_kv_fidelity("m", [(4, 64), (8, 64)], max_chunks=99, artifacts_dir=tmp_path)
+
+    assert (4, 64) in calls, "(4,64) must be re-scored; stale max_chunks=2 partial must not resume"
+
+
+def test_compare_kv_stale_model_revision_partial_is_recomputed(monkeypatch, tmp_path):
+    """A partial scored at model_revision='rev-A' must NOT be resumed for model_revision='rev-B'.
+
+    This is a generalization of the existing model_id check: model_revision is also part
+    of the run identity and a mismatch must trigger recomputation.
+    """
+    rep = _fid((4, 64), 0.05)
+    (tmp_path / "4_64.json").write_text(
+        _kv_partial_with_identity(rep, 1000, bits=4, group_size=64, model_revision="rev-A")
+    )
+    reports = {(4, 64): _fid((4, 64), 0.07), (8, 64): _fid((8, 64), 0.01)}
+    calls = _patch_kv_compare(monkeypatch, reports)
+
+    cmp.compare_kv_fidelity("m", [(4, 64), (8, 64)], model_revision="rev-B", artifacts_dir=tmp_path)
+
+    assert (4, 64) in calls, (
+        "(4,64) must be re-scored; stale model_revision='rev-A' must not resume"
+    )
+
+
+def test_compare_kv_matching_identity_resumes(monkeypatch, tmp_path):
+    """A partial with a fully matching run_identity is correctly resumed (not re-scored).
+
+    This is the GREEN path for the identity check: when all identity fields match,
+    _read_partial must return the envelope and score_kv_config must NOT be called.
+    """
+    rep = _fid((4, 64), 0.09)
+    # Partial matches the upcoming call exactly
+    (tmp_path / "4_64.json").write_text(
+        _kv_partial_with_identity(rep, 1000, bits=4, group_size=64, max_chunks=5)
+    )
+    reports = {(8, 64): _fid((8, 64), 0.01)}
+    calls = _patch_kv_compare(monkeypatch, reports)
+
+    cmp.compare_kv_fidelity("m", [(4, 64), (8, 64)], max_chunks=5, artifacts_dir=tmp_path)
+
+    assert (4, 64) not in calls, "(4,64) must be resumed from partial; run_identity matches"
+    assert (8, 64) in calls, "(8,64) must be scored (no pre-existing partial)"

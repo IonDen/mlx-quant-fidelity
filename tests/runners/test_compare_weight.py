@@ -78,13 +78,16 @@ def test_compare_weight_rejects_duplicate_ids(tmp_path):
 
 
 def test_compare_weight_resume_skips_existing_partial(monkeypatch, tmp_path):
-    # fix 6(a): pre-write partial; mock writes its own partial and records calls
-    (tmp_path / "q8.json").write_text(json.dumps(_ok_envelope("q8", 0.01, 8000)))
+    # fix 6(a): pre-write partial; mock writes its own partial and records calls.
+    # Partial must include a matching run_identity (quant='q8', reference='ref', max_chunks=None).
+    (tmp_path / "q8.json").write_text(
+        json.dumps(_weight_ok_envelope_with_identity("q8", 0.01, 8000))
+    )
     calls = []
 
     def _fake_run(quant, reference, partial_path, max_chunks):
         calls.append(quant)
-        env = _ok_envelope(quant, 0.04, 6200)
+        env = _weight_ok_envelope_with_identity(quant, 0.04, 6200)
         partial_path.write_text(json.dumps(env))  # mirror real worker: write partial
         return env
 
@@ -185,6 +188,115 @@ def test_compare_weight_failed_partial_is_recomputed(monkeypatch, tmp_path):
 
 
 # ── Fix B (weight): stale-reference resume recomputes instead of resuming ─────
+
+
+# ── Run-identity validation (finding 1) ───────────────────────────────────────
+
+
+def _weight_ok_envelope_with_identity(
+    label: str,
+    kl_mean: float,
+    cost: int,
+    *,
+    quant: str | None = None,
+    reference: str = "ref",
+    max_chunks: int | None = None,
+    schema_version: int | None = None,
+) -> dict[str, object]:
+    """Build a weight partial envelope with a run_identity block.
+
+    quant defaults to label (the common case).
+    schema_version defaults to _PARTIAL_SCHEMA_VERSION from the live module.
+    """
+    import mlx_quant_fidelity.runners.compare as compare_mod
+
+    sv = schema_version if schema_version is not None else compare_mod._PARTIAL_SCHEMA_VERSION
+    identity: dict[str, object] = {
+        "mode": "weight",
+        "quant": quant if quant is not None else label,
+        "reference": reference,
+        "max_chunks": max_chunks,
+        "schema_version": sv,
+    }
+    env = _ok_envelope(label, kl_mean, cost)
+    env["run_identity"] = identity
+    return env
+
+
+def test_compare_weight_stale_max_chunks_partial_is_recomputed(monkeypatch, tmp_path):
+    """A partial scored at max_chunks=2 must NOT be resumed for a max_chunks=100 run.
+
+    Pre-seed q8.json with a run_identity recording max_chunks=2. Call with max_chunks=100.
+    The identity mismatch must cause the orchestrator to discard the partial and call
+    _run_weight_target for q8.
+    """
+    stale_env = _weight_ok_envelope_with_identity("q8", 0.01, 8000, max_chunks=2)
+    (tmp_path / "q8.json").write_text(json.dumps(stale_env))
+
+    calls = []
+
+    def _fake_run(quant, reference, partial_path, max_chunks):
+        calls.append(quant)
+        env = _weight_ok_envelope_with_identity(quant, 0.01, 8000, max_chunks=max_chunks)
+        partial_path.write_text(json.dumps(env))
+        return env
+
+    monkeypatch.setattr(cmp, "_run_weight_target", _fake_run)
+
+    cmp.compare_weight_fidelity(["q8", "q9"], "ref", max_chunks=100, artifacts_dir=tmp_path)
+
+    assert "q8" in calls, "q8 must be re-run; stale max_chunks=2 partial must not resume"
+
+
+def test_compare_weight_sanitized_filename_collision_causes_recompute(monkeypatch, tmp_path):
+    """A partial whose stored run_identity.quant differs from the requested repo must be recomputed.
+
+    Scenario: a previous run for repo 'org/m' wrote a partial (sanitized to 'org_m.json' with
+    run_identity.quant='org/m'). A later run for repo 'org_m' (different repo, same filename)
+    must NOT resume that partial — the quant field mismatch triggers recompute.
+    """
+    # Partial was written for 'org/m' (different repo, same sanitized filename 'org_m.json')
+    stale_env = _weight_ok_envelope_with_identity("org/m", 0.01, 8000, quant="org/m")
+    (tmp_path / "org_m.json").write_text(json.dumps(stale_env))
+
+    calls = []
+
+    def _fake_run(quant, reference, partial_path, max_chunks):
+        calls.append(quant)
+        env = _weight_ok_envelope_with_identity(quant, 0.01, 8000, quant=quant)
+        partial_path.write_text(json.dumps(env))
+        return env
+
+    monkeypatch.setattr(cmp, "_run_weight_target", _fake_run)
+
+    cmp.compare_weight_fidelity(["org_m", "q9"], "ref", artifacts_dir=tmp_path)
+
+    assert "org_m" in calls, "org_m must be re-run; stale partial for 'org/m' must not resume"
+
+
+def test_compare_weight_matching_identity_resumes(monkeypatch, tmp_path):
+    """A partial with a fully matching run_identity is correctly resumed (not re-run).
+
+    When all identity fields (quant, reference, max_chunks, schema_version) match,
+    _run_weight_target must NOT be called for that target.
+    """
+    matching_env = _weight_ok_envelope_with_identity("q8", 0.01, 8000, max_chunks=5)
+    (tmp_path / "q8.json").write_text(json.dumps(matching_env))
+
+    calls = []
+
+    def _fake_run(quant, reference, partial_path, max_chunks):
+        calls.append(quant)
+        env = _weight_ok_envelope_with_identity(quant, 0.04, 6200, max_chunks=max_chunks)
+        partial_path.write_text(json.dumps(env))
+        return env
+
+    monkeypatch.setattr(cmp, "_run_weight_target", _fake_run)
+
+    cmp.compare_weight_fidelity(["q8", "q9"], "ref", max_chunks=5, artifacts_dir=tmp_path)
+
+    assert "q8" not in calls, "q8 must be resumed from partial; run_identity matches"
+    assert "q9" in calls, "q9 must be run (no pre-existing partial)"
 
 
 def test_compare_weight_stale_reference_partial_is_recomputed(monkeypatch, tmp_path):
