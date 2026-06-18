@@ -1,0 +1,59 @@
+import json
+
+from mlx_quant_fidelity import cli
+from mlx_quant_fidelity.report import ComparisonReport
+
+
+def _fake_comparison(mode):
+    return ComparisonReport(
+        mode=mode,
+        reference="ref" if mode == "weight" else None,
+        model=None if mode == "weight" else "m",
+        corpus=None,
+        quantize_start=None,
+        quantize_mode=None,
+        budget=None,
+        results=(),
+        frontier=(),
+        dominated=(),
+        budget_pick=None,
+        mlx_version="0.21",
+        mlx_lm_version="0.31.3",
+    )
+
+
+def test_compare_weights_dispatches(monkeypatch, capsys):
+    captured = {}
+
+    def fake(quant_ids, reference, **kw):
+        captured["args"] = (quant_ids, reference, kw)
+        return _fake_comparison("weight")
+
+    monkeypatch.setattr(cli, "compare_weight_fidelity", fake)
+    rc = cli.main(
+        ["compare", "weights", "q4", "q6", "q8", "--reference", "ref", "--format", "json"]
+    )
+    assert rc == 0
+    assert json.loads(capsys.readouterr().out)["mode"] == "weight"
+    assert captured["args"][0] == ["q4", "q6", "q8"]
+    assert captured["args"][1] == "ref"
+
+
+def test_compare_kv_parses_configs(monkeypatch, capsys):
+    captured = {}
+
+    def fake(model, configs, **kw):
+        captured["args"] = (model, configs, kw)
+        return _fake_comparison("kv")
+
+    monkeypatch.setattr(cli, "compare_kv_fidelity", fake)
+    rc = cli.main(["compare", "kv", "m", "--configs", "4:32,4:64,8:64", "--min-tier", "good"])
+    assert rc == 0
+    assert captured["args"][1] == [(4, 32), (4, 64), (8, 64)]
+    assert captured["args"][2]["min_tier"] == "good"
+
+
+def test_compare_kv_rejects_bad_config(monkeypatch, capsys):
+    rc = cli.main(["compare", "kv", "m", "--configs", "oops"])
+    assert rc == 2
+    assert "configs" in capsys.readouterr().err.lower()
