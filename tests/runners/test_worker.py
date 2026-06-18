@@ -1,0 +1,34 @@
+import json
+
+from tests.test_compare_report import _wreport
+
+from mlx_quant_fidelity.runners import _worker
+
+
+def test_worker_writes_ok_envelope(tmp_path, monkeypatch):
+    out = tmp_path / "q4.json"
+    monkeypatch.setattr(
+        _worker, "measure_weight_fidelity", lambda *a, **k: _wreport("q4", 0.09, 4200)
+    )
+    rc = _worker.run_weight_worker(["--quant", "q4", "--reference", "ref", "--out", str(out)])
+    assert rc == 0
+    env = json.loads(out.read_text())
+    assert env["status"] == "ok"
+    assert env["report"]["quant_model_id"] == "q4"
+
+
+def test_worker_writes_failed_envelope_on_domain_error(tmp_path, monkeypatch):
+    from mlx_quant_fidelity.errors import ModelMismatchError
+
+    out = tmp_path / "q2.json"
+
+    def boom(*a, **k):
+        raise ModelMismatchError("vocab_size mismatch")
+
+    monkeypatch.setattr(_worker, "measure_weight_fidelity", boom)
+    rc = _worker.run_weight_worker(["--quant", "q2", "--reference", "ref", "--out", str(out)])
+    assert rc == 0  # a measurement failure is data, not a worker crash
+    env = json.loads(out.read_text())
+    assert env["status"] == "failed"
+    assert env["error_type"] == "ModelMismatchError"
+    assert "vocab_size" in env["message"]
