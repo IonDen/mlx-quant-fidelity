@@ -1,4 +1,4 @@
-from mlx_quant_fidelity.policy import _WEIGHT_TIERS_v0_2_0, verdict_for
+from mlx_quant_fidelity.policy import _WEIGHT_TIERS_v0_2_0, qualifies, tier_rank, verdict_for
 
 
 def test_verdicts_by_threshold():
@@ -56,9 +56,6 @@ def test_weight_marginal_boundary_is_inclusive():
     )
 
 
-from mlx_quant_fidelity.policy import qualifies, tier_rank
-
-
 def test_tier_rank_orders_verdicts():
     assert tier_rank("bad") < tier_rank("marginal") < tier_rank("good")
 
@@ -78,3 +75,9 @@ def test_qualifies_anded_and_default_true():
     assert qualifies(kl_mean=0.05, verdict="good", max_kld=0.1, min_tier="good") is True
     assert qualifies(kl_mean=0.05, verdict="marginal", max_kld=0.1, min_tier="good") is False
     assert qualifies(kl_mean=9.9, verdict="bad", max_kld=None, min_tier=None) is True  # no budget
+    assert qualifies(kl_mean=0.5, verdict="good", max_kld=0.1, min_tier="good") is False
+
+
+def test_qualifies_min_tier_marginal_boundary():
+    assert qualifies(kl_mean=0.05, verdict="marginal", max_kld=None, min_tier="marginal") is True
+    assert qualifies(kl_mean=0.05, verdict="bad", max_kld=None, min_tier="marginal") is False
