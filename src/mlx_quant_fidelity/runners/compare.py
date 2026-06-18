@@ -1,14 +1,22 @@
 """Compare orchestration: aggregate per-target results into a memory-normalized ranking."""
 
+import importlib.metadata
+import json
+import subprocess
+import sys
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from mlx_quant_fidelity.policy import qualifies
 from mlx_quant_fidelity.ranking import RankPoint, budget_pick, dominated_by, pareto_frontier
-from mlx_quant_fidelity.report import ComparisonReport
+from mlx_quant_fidelity.report import (
+    ComparisonReport,
+    ComparisonTargetResult,
+    weight_report_from_dict,
+)
 
 if TYPE_CHECKING:
     from mlx_quant_fidelity.corpora.provenance import CorpusProvenance
-    from mlx_quant_fidelity.report import ComparisonTargetResult
 
 
 def _budget_label(max_kld: float | None, min_tier: str | None) -> str | None:
@@ -67,4 +75,102 @@ def assemble_comparison_report(
         budget_pick=pick,
         mlx_version=mlx_version,
         mlx_lm_version=mlx_lm_version,
+    )
+
+
+def _label_for_repo(repo: str) -> str:
+    """The full repo id is the label — unique per distinct repo, unambiguous in the report."""
+    return repo
+
+
+def _partial_filename(repo: str) -> str:
+    """Filesystem-safe partial JSON filename: '/' → '_', stays within artifacts_dir."""
+    return repo.replace("/", "_") + ".json"
+
+
+def _run_weight_target(
+    quant: str, reference: str, partial_path: Path, max_chunks: int | None
+) -> dict[str, object]:  # pragma: no cover - spawns a subprocess; covered by --run-slow
+    """Spawn the weight worker for one target and return its parsed JSON envelope."""
+    cmd = [
+        sys.executable,
+        "-m",
+        "mlx_quant_fidelity.runners._worker",
+        "--quant",
+        quant,
+        "--reference",
+        reference,
+        "--out",
+        str(partial_path),
+    ]
+    if max_chunks is not None:
+        cmd += ["--max-chunks", str(max_chunks)]
+    subprocess.run(cmd, check=True)
+    return json.loads(partial_path.read_text())  # type: ignore[no-any-return]
+
+
+def _envelope_to_result(label: str, env: dict[str, object]) -> ComparisonTargetResult:
+    if env.get("status") == "failed":
+        return ComparisonTargetResult(
+            label, "failed", None, None, None, str(env.get("error_type")), str(env.get("message"))
+        )
+    report = weight_report_from_dict(env["report"])  # type: ignore[arg-type]
+    cost = report.quant_model_bytes
+    if cost is None:
+        return ComparisonTargetResult(label, "ok", report, None, "cost unavailable", None, None)
+    return ComparisonTargetResult(
+        label, "ok", report, RankPoint(label, report.kl.mean, cost), None, None, None
+    )
+
+
+def compare_weight_fidelity(
+    quant_model_ids: list[str],
+    reference_model_id: str,
+    *,
+    max_chunks: int | None = None,
+    max_kld: float | None = None,
+    min_tier: str | None = None,
+    artifacts_dir: Path | None = None,
+) -> ComparisonReport:
+    """Rank N weight-quant repos vs one reference on quality-per-byte.
+
+    Subprocess-per-target (each loads reference + quant); resumes by skipping targets whose
+    partial JSON already exists. Mismatched/unrankable targets are isolated, not aborted.
+    """
+    if len(quant_model_ids) < 2:
+        raise ValueError("compare needs at least 2 quant targets; use the `weights` probe for one.")
+    labels = [_label_for_repo(r) for r in quant_model_ids]
+    if len(set(labels)) != len(labels):
+        duplicates = [lbl for lbl in labels if labels.count(lbl) > 1]
+        raise ValueError(f"duplicate quant_model_ids produce the same label: {set(duplicates)}")
+    out_dir = artifacts_dir or Path("_artifacts/compare/weight")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    results: list[ComparisonTargetResult] = []
+    corpus = None
+    for repo in quant_model_ids:
+        label = _label_for_repo(repo)
+        partial = out_dir / _partial_filename(repo)
+        env = (
+            json.loads(partial.read_text())
+            if partial.exists()
+            else _run_weight_target(
+                repo, reference=reference_model_id, partial_path=partial, max_chunks=max_chunks
+            )
+        )
+        result = _envelope_to_result(label, env)
+        if result.report is not None:
+            corpus = result.report.corpus
+        results.append(result)
+    return assemble_comparison_report(
+        results,
+        mode="weight",
+        reference=reference_model_id,
+        model=None,
+        corpus=corpus,
+        quantize_start=None,
+        quantize_mode=None,
+        max_kld=max_kld,
+        min_tier=min_tier,
+        mlx_version=importlib.metadata.version("mlx"),
+        mlx_lm_version=importlib.metadata.version("mlx-lm"),
     )
