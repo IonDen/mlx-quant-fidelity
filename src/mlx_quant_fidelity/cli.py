@@ -10,7 +10,25 @@ from mlx_quant_fidelity._memory_caps import install_memory_caps
 from mlx_quant_fidelity.errors import QuantFidelityError
 from mlx_quant_fidelity.probes.kv import measure_kv_fidelity
 from mlx_quant_fidelity.probes.weights import measure_weight_fidelity
-from mlx_quant_fidelity.report import render_json, render_markdown, render_weight_markdown
+from mlx_quant_fidelity.report import (
+    render_comparison_json,
+    render_comparison_markdown,
+    render_json,
+    render_markdown,
+    render_weight_markdown,
+)
+from mlx_quant_fidelity.runners.compare import compare_kv_fidelity, compare_weight_fidelity
+
+
+def _parse_kv_configs(raw: str) -> list[tuple[int, int]]:
+    """Parse '4:32,4:64,8:64' -> [(4,32),(4,64),(8,64)]. Raises ValueError on a malformed entry."""
+    configs = []
+    for item in raw.split(","):
+        bits_s, sep, gs_s = item.partition(":")
+        if not sep or not bits_s.isdigit() or not gs_s.isdigit():
+            raise ValueError(f"--configs entry {item!r} must be 'bits:group_size' (e.g. 4:64).")
+        configs.append((int(bits_s), int(gs_s)))
+    return configs
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -37,6 +55,26 @@ def main(argv: list[str] | None = None) -> int:
     weights.add_argument("--max-chunks", type=int, default=None)
     weights.add_argument("--format", choices=["json", "md"], default="md")
 
+    compare = sub.add_parser("compare", help="rank N quantizations on a memory-normalized Pareto")
+    csub = compare.add_subparsers(dest="compare_mode", required=True)
+
+    cw = csub.add_parser("weights", help="rank N weight-quant repos vs a reference")
+    cw.add_argument("quant_models", nargs="+")
+    cw.add_argument("--reference", required=True)
+    cw.add_argument("--max-chunks", type=int, default=None)
+    cw.add_argument("--max-kld", type=float, default=None)
+    cw.add_argument("--min-tier", choices=["good", "marginal", "bad"], default=None)
+    cw.add_argument("--format", choices=["json", "md"], default="md")
+
+    ck = csub.add_parser("kv", help="rank N (bits:group_size) KV configs on one model")
+    ck.add_argument("model")
+    ck.add_argument("--configs", required=True)
+    ck.add_argument("--quantize-start", type=int, default=0)
+    ck.add_argument("--max-chunks", type=int, default=None)
+    ck.add_argument("--max-kld", type=float, default=None)
+    ck.add_argument("--min-tier", choices=["good", "marginal", "bad"], default=None)
+    ck.add_argument("--format", choices=["json", "md"], default="md")
+
     args = parser.parse_args(argv)
     try:
         if args.command == "kv":
@@ -48,13 +86,45 @@ def main(argv: list[str] | None = None) -> int:
                 max_chunks=args.max_chunks,
             )
             out = render_json(report) if args.format == "json" else render_markdown(report)
-        else:  # "weights"
+        elif args.command == "weights":
             wreport = measure_weight_fidelity(
                 args.quant_model,
                 args.reference,
                 max_chunks=args.max_chunks,
             )
             out = render_json(wreport) if args.format == "json" else render_weight_markdown(wreport)
+        elif args.command == "compare" and args.compare_mode == "weights":
+            creport = compare_weight_fidelity(
+                args.quant_models,
+                args.reference,
+                max_chunks=args.max_chunks,
+                max_kld=args.max_kld,
+                min_tier=args.min_tier,
+            )
+            out = (
+                render_comparison_json(creport)
+                if args.format == "json"
+                else render_comparison_markdown(creport)
+            )
+        else:  # compare kv
+            try:
+                configs = _parse_kv_configs(args.configs)
+            except ValueError as exc:
+                print(f"error: {exc}", file=sys.stderr)
+                return 2
+            creport = compare_kv_fidelity(
+                args.model,
+                configs,
+                quantize_start=args.quantize_start,
+                max_chunks=args.max_chunks,
+                max_kld=args.max_kld,
+                min_tier=args.min_tier,
+            )
+            out = (
+                render_comparison_json(creport)
+                if args.format == "json"
+                else render_comparison_markdown(creport)
+            )
     except QuantFidelityError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
