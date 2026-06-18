@@ -96,7 +96,7 @@ Unlike the KV probe, both runs use standard attention, so the drift is the deplo
 
 ## Comparing quantizations
 
-`compare` ranks a set of quantizations on a memory-normalized Pareto frontier: quality (mean KL divergence) on one axis, memory cost on the other. It flags any configuration that is both worse quality and more expensive than another option on the list — those are dominated and you would never choose them.
+`compare` ranks a set of quantizations on a memory-normalized Pareto frontier: quality (mean KL divergence) on one axis, memory cost on the other. It identifies any configuration that is both worse quality and more expensive than another option on the list — those are dominated and you would never choose them.
 
 ```bash
 # rank weight quantizations against a bf16 reference
