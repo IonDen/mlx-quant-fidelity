@@ -153,6 +153,37 @@ def test_compare_weight_failed_missing_envelope_keys_are_none(monkeypatch, tmp_p
     assert failed_q8.message is None
 
 
+# ── Line 202: failed partial recomputes on resume ─────────────────────────────
+
+
+def test_compare_weight_failed_partial_is_recomputed(monkeypatch, tmp_path):
+    """A partial with status='failed' carries no stored identity and must be recomputed.
+
+    Line 202 (elif env is not None: env = None) is the branch for non-ok, non-corrupt
+    partials — they are discarded and the target is re-run.
+    """
+    from tests.test_compare_report import _wreport
+
+    # Pre-seed a failed partial for q8 (no reference identity stored)
+    failed_envelope = {"status": "failed", "error_type": "RuntimeError", "message": "boom"}
+    (tmp_path / "q8.json").write_text(json.dumps(failed_envelope))
+
+    calls = []
+
+    def _fake_run(quant, reference, partial_path, max_chunks):
+        calls.append(quant)
+        env = {"status": "ok", "report": dataclasses.asdict(_wreport(quant, 0.01, 8000))}
+        partial_path.write_text(json.dumps(env))
+        return env
+
+    monkeypatch.setattr(cmp, "_run_weight_target", _fake_run)
+
+    cmp.compare_weight_fidelity(["q8", "q9"], "ref", artifacts_dir=tmp_path)
+
+    # q8's failed partial must have been discarded — _run_weight_target called for it
+    assert "q8" in calls
+
+
 # ── Fix B (weight): stale-reference resume recomputes instead of resuming ─────
 
 
