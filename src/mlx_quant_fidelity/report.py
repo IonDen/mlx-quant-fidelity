@@ -238,7 +238,9 @@ def render_comparison_markdown(report: ComparisonReport) -> str:
             lines.append(f"- `{r.label}` — {why}")
     lines += [""]
     if report.budget_pick is not None:
-        lines.append(f"**Recommended** (cheapest clearing {report.budget}): `{report.budget_pick}`")
+        lines.append(
+            f"**Recommended** (cheapest clearing {report.budget or 'budget'}): `{report.budget_pick}`"
+        )
     elif report.budget is not None:
         lines.append(f"No target clears the budget ({report.budget}).")
     if report.mode == "weight":
