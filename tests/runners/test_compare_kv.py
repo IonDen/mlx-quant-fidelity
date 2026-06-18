@@ -47,7 +47,7 @@ def _patch_kv_compare(
 ) -> list:
     """Patch all real-model helpers; return the call list for score_kv_config."""
     monkeypatch.setattr(cmp, "install_memory_caps", lambda: (0, 0))
-    monkeypatch.setattr(cmp, "_load_model", lambda model_id, revision: object())
+    monkeypatch.setattr(cmp, "_load_model", lambda model_id, revision: (object(), object()))
     monkeypatch.setattr(cmp, "_kv_dims", lambda model: dims)
     calls: list[tuple[int, int]] = []
 
@@ -59,7 +59,9 @@ def _patch_kv_compare(
         return rep
 
     monkeypatch.setattr(cmp, "score_kv_config", fake_score)
-    monkeypatch.setattr(cmp, "_load_corpus_for_kv", lambda model, model_id, max_chunks: object())
+    monkeypatch.setattr(
+        cmp, "_load_corpus_for_kv", lambda tokenizer, model_id, max_chunks: object()
+    )
     return calls
 
 
@@ -92,6 +94,29 @@ def test_compare_kv_isolates_unsupported_config(monkeypatch, tmp_path):
     # Fix 9: positive isolation assert — the good config IS on the frontier alone
     assert "4:64" in report.frontier
     assert len(report.frontier) == 1
+
+
+def test_compare_kv_isolates_non_domain_error(monkeypatch, tmp_path):
+    """A non-QuantFidelityError from score_kv_config is isolated as a failed result.
+
+    The CHANGELOG promises any config failure is isolated, not abort-inducing. Previously
+    only QuantFidelityError was caught; a RuntimeError (e.g. invalid repo / unexpected crash)
+    aborted the whole run. Now any Exception is caught, written to a failed envelope, and the
+    remaining configs continue.
+    """
+    reports = {
+        (4, 64): _fid((4, 64), 0.09),
+        (8, 64): RuntimeError("unexpected-hf-error"),
+    }
+    _patch_kv_compare(monkeypatch, reports)
+    report = cmp.compare_kv_fidelity("m", [(4, 64), (8, 64)], artifacts_dir=tmp_path)
+    failed = next(r for r in report.results if r.label == "8:64")
+    assert failed.status == "failed"
+    assert failed.error_type == "RuntimeError"
+    assert "unexpected-hf-error" in (failed.message or "")
+    # The good config is unaffected and lands on the frontier
+    assert "4:64" in report.frontier
+    assert "8:64" not in report.frontier
 
 
 def test_compare_kv_requires_two_configs(tmp_path):
@@ -186,9 +211,9 @@ def test_compare_kv_model_loaded_once(monkeypatch, tmp_path):
     reports = {(4, 64): _fid((4, 64), 0.09), (8, 64): _fid((8, 64), 0.01)}
     load_calls: list[str] = []
 
-    def fake_load(model_id: str, revision) -> object:
+    def fake_load(model_id: str, revision) -> tuple[object, object]:
         load_calls.append(model_id)
-        return object()
+        return (object(), object())
 
     monkeypatch.setattr(cmp, "install_memory_caps", lambda: (0, 0))
     monkeypatch.setattr(cmp, "_load_model", fake_load)
@@ -197,7 +222,7 @@ def test_compare_kv_model_loaded_once(monkeypatch, tmp_path):
     # Fix 10: count corpus-build calls with a wrapper, assert exactly once
     corpus_calls: list[object] = []
 
-    def counting_load_corpus(model, model_id, max_chunks):  # type: ignore[return]
+    def counting_load_corpus(tokenizer, model_id, max_chunks):  # type: ignore[return]
         corpus_calls.append(model_id)
         return object()
 
@@ -209,6 +234,55 @@ def test_compare_kv_model_loaded_once(monkeypatch, tmp_path):
     cmp.compare_kv_fidelity("m", [(4, 64), (8, 64)], artifacts_dir=tmp_path)
     assert len(load_calls) == 1
     assert len(corpus_calls) == 1
+
+
+# ── Fix A: model_revision threading test ─────────────────────────────────────
+
+
+def test_compare_kv_threads_revision_and_tokenizer(monkeypatch, tmp_path):
+    """model_revision is passed to _load_model AND the returned tokenizer reaches _load_corpus_for_kv.
+
+    Verifies the fix end-to-end: _load_model is called with revision='rev123', returns
+    (fake_model, SENTINEL_TOKENIZER), and _load_corpus_for_kv receives SENTINEL_TOKENIZER as
+    its first argument — not the model, and not a separately-loaded tokenizer.
+    """
+    sentinel_tokenizer = object()
+
+    load_model_calls: list[dict[str, object]] = []
+
+    def fake_load_model(model_id: str, revision: "str | None") -> "tuple[object, object]":
+        load_model_calls.append({"model_id": model_id, "revision": revision})
+        return (object(), sentinel_tokenizer)
+
+    corpus_tokenizer_received: list[object] = []
+
+    def fake_load_corpus(tokenizer: object, model_id: str, max_chunks: "int | None") -> object:
+        corpus_tokenizer_received.append(tokenizer)
+        return object()
+
+    monkeypatch.setattr(cmp, "install_memory_caps", lambda: (0, 0))
+    monkeypatch.setattr(cmp, "_load_model", fake_load_model)
+    monkeypatch.setattr(cmp, "_kv_dims", lambda model: (16, 8, 64))
+    monkeypatch.setattr(cmp, "_load_corpus_for_kv", fake_load_corpus)
+
+    reports = {(4, 64): _fid((4, 64), 0.09), (8, 64): _fid((8, 64), 0.01)}
+
+    def fake_score(model, corpus, *, kv_bits, kv_group_size, **kw):  # type: ignore[return]
+        return reports[(kv_bits, kv_group_size)]
+
+    monkeypatch.setattr(cmp, "score_kv_config", fake_score)
+
+    cmp.compare_kv_fidelity(
+        "m", [(4, 64), (8, 64)], model_revision="rev123", artifacts_dir=tmp_path
+    )
+
+    # _load_model must have been called with the explicit revision
+    assert len(load_model_calls) == 1
+    assert load_model_calls[0]["revision"] == "rev123"
+
+    # _load_corpus_for_kv must have received the sentinel_tokenizer from _load_model
+    assert len(corpus_tokenizer_received) == 1
+    assert corpus_tokenizer_received[0] is sentinel_tokenizer
 
 
 # ── Fix 7a: _kv_dims unit tests (closes coverage gap) ─────────────────────────
@@ -310,9 +384,9 @@ def test_compare_kv_corrupt_at_collect_yields_failed_result(monkeypatch, tmp_pat
     monkeypatch.setattr(pathlib.Path, "read_text", patched_read_text)
 
     monkeypatch.setattr(cmp, "install_memory_caps", lambda: (0, 0))
-    monkeypatch.setattr(cmp, "_load_model", lambda model_id, revision: object())
+    monkeypatch.setattr(cmp, "_load_model", lambda model_id, revision: (object(), object()))
     monkeypatch.setattr(cmp, "_kv_dims", lambda model: (16, 8, 64))
-    monkeypatch.setattr(cmp, "_load_corpus_for_kv", lambda m, mid, mc: object())
+    monkeypatch.setattr(cmp, "_load_corpus_for_kv", lambda tok, mid, mc: object())
     # score_kv_config should NOT be called (pending=[]) — use a sentinel that would raise
     score_calls: list[object] = []
     monkeypatch.setattr(cmp, "score_kv_config", lambda *a, **kw: score_calls.append(None))
@@ -352,9 +426,9 @@ def test_compare_kv_all_resumed_skips_model_load(monkeypatch, tmp_path):
 
     load_calls: list[str] = []
 
-    def fail_if_loaded(model_id: str, revision) -> object:
+    def fail_if_loaded(model_id: str, revision) -> tuple[object, object]:
         load_calls.append(model_id)
-        return object()
+        return (object(), object())
 
     def assert_not_scored(*a, **kw):  # type: ignore[return]
         raise AssertionError("score_kv_config should not be called when all configs are cached")
@@ -362,7 +436,7 @@ def test_compare_kv_all_resumed_skips_model_load(monkeypatch, tmp_path):
     monkeypatch.setattr(cmp, "install_memory_caps", lambda: (0, 0))
     monkeypatch.setattr(cmp, "_load_model", fail_if_loaded)
     monkeypatch.setattr(cmp, "_kv_dims", lambda model: (16, 8, 64))
-    monkeypatch.setattr(cmp, "_load_corpus_for_kv", lambda m, mid, mc: object())
+    monkeypatch.setattr(cmp, "_load_corpus_for_kv", lambda tok, mid, mc: object())
     monkeypatch.setattr(cmp, "score_kv_config", assert_not_scored)
 
     report = cmp.compare_kv_fidelity("m", [(4, 64), (8, 64)], artifacts_dir=tmp_path)

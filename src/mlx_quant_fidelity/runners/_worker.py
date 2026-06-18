@@ -11,7 +11,6 @@ import sys
 from pathlib import Path
 
 from mlx_quant_fidelity._memory_caps import install_memory_caps
-from mlx_quant_fidelity.errors import QuantFidelityError
 from mlx_quant_fidelity.probes.weights import measure_weight_fidelity
 
 
@@ -27,7 +26,7 @@ def run_weight_worker(argv: list[str] | None = None) -> int:
     try:
         report = measure_weight_fidelity(args.quant, args.reference, max_chunks=args.max_chunks)
         envelope: dict[str, object] = {"status": "ok", "report": dataclasses.asdict(report)}
-    except QuantFidelityError as exc:
+    except Exception as exc:  # any measurement failure is data, not a crash
         envelope = {"status": "failed", "error_type": type(exc).__name__, "message": str(exc)}
     Path(args.out).write_text(json.dumps(envelope))
     return 0

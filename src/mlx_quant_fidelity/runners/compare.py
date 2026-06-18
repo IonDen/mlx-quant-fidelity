@@ -12,7 +12,6 @@ import mlx.core as mx
 
 from mlx_quant_fidelity._memory_caps import install_memory_caps
 from mlx_quant_fidelity.costs import kv_bytes_per_token
-from mlx_quant_fidelity.errors import QuantFidelityError
 from mlx_quant_fidelity.policy import qualifies
 from mlx_quant_fidelity.probes.kv import _kv_head_dim, score_kv_config
 from mlx_quant_fidelity.ranking import RankPoint, budget_pick, dominated_by, pareto_frontier
@@ -101,7 +100,11 @@ def _partial_filename(repo: str) -> str:
 def _run_weight_target(
     quant: str, reference: str, partial_path: Path, max_chunks: int | None
 ) -> dict[str, object]:  # pragma: no cover - spawns a subprocess; covered by --run-slow
-    """Spawn the weight worker for one target and return its parsed JSON envelope."""
+    """Spawn the weight worker for one target and return its parsed JSON envelope.
+
+    If the worker exits non-zero or writes no parseable envelope, returns a failed envelope
+    so the orchestrator can isolate the failure rather than aborting the whole compare run.
+    """
     cmd = [
         sys.executable,
         "-m",
@@ -115,8 +118,31 @@ def _run_weight_target(
     ]
     if max_chunks is not None:
         cmd += ["--max-chunks", str(max_chunks)]
-    subprocess.run(cmd, check=True)
-    return json.loads(partial_path.read_text())  # type: ignore[no-any-return]
+    try:
+        result = subprocess.run(cmd, check=True, capture_output=True, text=True)
+        stderr_hint = result.stderr.strip()
+    except subprocess.CalledProcessError as exc:
+        stderr_hint = (exc.stderr or "").strip()
+        return {
+            "status": "failed",
+            "error_type": "WorkerError",
+            "message": stderr_hint or f"worker exited with code {exc.returncode}",
+        }
+    raw = ""
+    try:
+        raw = partial_path.read_text()
+        return json.loads(raw)  # type: ignore[no-any-return]
+    except (json.JSONDecodeError, OSError):
+        return {
+            "status": "failed",
+            "error_type": "WorkerError",
+            "message": stderr_hint
+            or (
+                f"worker wrote unreadable partial: {raw[:200]!r}"
+                if raw
+                else "worker wrote no partial"
+            ),
+        }
 
 
 def _envelope_to_result(label: str, env: dict[str, object]) -> ComparisonTargetResult:
@@ -237,27 +263,29 @@ def _kv_partial_filename(bits: int, group_size: int) -> str:
     return f"{bits}_{group_size}.json"
 
 
-def _load_model(model_id: str, revision: str | None) -> object:  # pragma: no cover
-    """Load model weights from a HuggingFace repo. Returns the model object only."""
+def _load_model(model_id: str, revision: str | None) -> tuple[object, object]:  # pragma: no cover
+    """Load model weights from a HuggingFace repo. Returns (model, tokenizer).
+
+    Both objects come from the same revision-pinned load call so the corpus tokenizer
+    is guaranteed to match the loaded model weights.
+    """
     from mlx_lm import load
 
-    return load(model_id, revision=revision)[0]
+    loaded = load(model_id, revision=revision)
+    return loaded[0], loaded[1]
 
 
 def _load_corpus_for_kv(
-    model: object, model_id: str, max_chunks: int | None
+    tokenizer: object, model_id: str, max_chunks: int | None
 ) -> object:  # pragma: no cover
     """Build the WikiText-2 corpus for a KV-compare run.
 
-    Uses mlx_lm's load_tokenizer so the model weights do not need to be reloaded
-    just to get the tokenizer — the model is already in memory.
+    Takes the tokenizer directly from the caller (already loaded at the correct revision)
+    rather than re-fetching it, so a revision-pinned run always uses the matching tokenizer.
     """
-    from mlx_lm.utils import load_tokenizer
-
     from mlx_quant_fidelity.corpora.wikitext import load_wikitext2
 
-    tokenizer = load_tokenizer(model_id)  # type: ignore[no-untyped-call]
-    return load_wikitext2(tokenizer, max_chunks=max_chunks, tokenizer_id=model_id)
+    return load_wikitext2(tokenizer, max_chunks=max_chunks, tokenizer_id=model_id)  # type: ignore[arg-type]
 
 
 def _kv_dims(model: object) -> tuple[int | None, int | None, int | None]:
@@ -389,9 +417,9 @@ def compare_kv_fidelity(
 
     if pending:
         install_memory_caps()
-        model = _load_model(model_id, model_revision)
+        model, tokenizer = _load_model(model_id, model_revision)
         n_layers, n_kv_heads, head_dim = _kv_dims(model)
-        corpus = _load_corpus_for_kv(model, model_id, max_chunks)
+        corpus = _load_corpus_for_kv(tokenizer, model_id, max_chunks)
         for bits, gs in pending:
             mx.reset_peak_memory()
             partial = out_dir / _kv_partial_filename(bits, gs)
@@ -422,7 +450,7 @@ def compare_kv_fidelity(
                     "report": _asdict(fid_report),
                     "cost": cost,
                 }
-            except QuantFidelityError as exc:
+            except Exception as exc:  # any config failure is data, not abort
                 envelope = {
                     "status": "failed",
                     "error_type": type(exc).__name__,
