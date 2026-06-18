@@ -56,8 +56,13 @@ def dominated_by(points: list[RankPoint]) -> dict[str, str]:
 def budget_pick(points: list[RankPoint], *, qualifying: set[str]) -> str | None:
     """Cheapest frontier point whose label is in `qualifying`; None if none qualify.
 
-    Restricting to the frontier loses no cheapest-qualifying option: a dominated qualifier
-    has a dominator that also qualifies at <= cost. See docs/ranking-principles.md.
+    The contract is the cheapest *frontier* point that qualifies — a qualifying label that
+    is off the frontier is never returned. For a `--max-kld` budget this is also the cheapest
+    qualifying point overall (a dominated qualifier's dominator has <= mean KLD, so it clears
+    the same threshold). For a `--min-tier` budget that need not hold: tier qualification uses
+    the full verdict (mean, p99, flip) while domination is on mean KLD alone, so a dominated
+    point can qualify while its frontier dominator does not — then the result is None.
+    See docs/ranking-principles.md.
     """
     frontier = set(pareto_frontier(points))
     eligible = [p for p in points if p.label in frontier and p.label in qualifying]

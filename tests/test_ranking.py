@@ -61,9 +61,11 @@ def test_budget_pick_determinism_under_shuffle():
     pts = [Q8, Q6, Q4, Q4_BAD]
     shuffled = pts[:]
     random.Random(0).shuffle(shuffled)
-    assert budget_pick(shuffled, qualifying={"q4", "q6", "q8"}) == budget_pick(
-        pts, qualifying={"q4", "q6", "q8"}
-    ) == "q4"
+    assert (
+        budget_pick(shuffled, qualifying={"q4", "q6", "q8"})
+        == budget_pick(pts, qualifying={"q4", "q6", "q8"})
+        == "q4"
+    )
 
 
 def test_naive_sort_would_fail():
@@ -72,3 +74,10 @@ def test_naive_sort_would_fail():
     frontier = pareto_frontier([Q8, Q6, Q4, Q4_BAD])
     assert "q4-bad" not in frontier
     assert set(frontier) == {"q4", "q6", "q8"}
+
+
+def test_budget_pick_excludes_dominated_qualifier():
+    # Only a dominated label qualifies, and its dominator (q4) is not in `qualifying`.
+    # The contract returns the cheapest *frontier* qualifier, so this is None — an
+    # implementation that dropped the frontier filter would wrongly return "q4-bad".
+    assert budget_pick([Q4, Q4_BAD], qualifying={"q4-bad"}) is None
