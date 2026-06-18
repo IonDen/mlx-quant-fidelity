@@ -237,9 +237,14 @@ def test_head_dim_gate_warns_when_unknown():
 
 def test_measure_kv_rejects_incompatible_group_size_before_scoring(monkeypatch):
     """An incompatible kv_group_size raises CacheNotQuantizableError after load but BEFORE
-    make_prompt_cache / any scoring (monkeypatched load + make_prompt_cache record order)."""
+    make_prompt_cache / any scoring (monkeypatched load + make_prompt_cache record order).
+
+    The patch targets ``kv_mod.make_prompt_cache`` — the name that ``score_kv_config``
+    actually uses — because kv.py binds the name locally via ``from mlx_lm.models.cache import
+    make_prompt_cache``.  Patching ``mlx_lm.models.cache.make_prompt_cache`` would be
+    disconnected and leave the assertion vacuously true.
+    """
     import mlx_lm
-    import mlx_lm.models.cache as cache_mod
 
     from mlx_quant_fidelity.corpora.provenance import Corpus, CorpusProvenance
     from mlx_quant_fidelity.probes import kv as kv_mod
@@ -249,7 +254,7 @@ def test_measure_kv_rejects_incompatible_group_size_before_scoring(monkeypatch):
     monkeypatch.setattr(mlx_lm, "load", lambda *a, **k: (stub, object()))
     cache_calls: list[str] = []
     monkeypatch.setattr(
-        cache_mod, "make_prompt_cache", lambda *a, **k: cache_calls.append("cache") or []
+        kv_mod, "make_prompt_cache", lambda *a, **k: cache_calls.append("cache") or []
     )
     corpus = Corpus(
         chunks=(mx.array([0, 1, 2, 3]),),
@@ -291,8 +296,44 @@ class _FakeKVModel:
         return out
 
 
+class _FakeDivergentModel:
+    """Mirrors _FakeModel's cache-bump logic with proper args for score_kv_config.
+
+    Returns peak on token 0 for ref cache (no .bits) and peak on token 1 for quant cache
+    (has .bits), producing divergent logits so KLD > 0 and _check_exact_zero runs live.
+    head_dim=64, kv_group_size default 64: 64 % 64 == 0 so no head_dim warning fires.
+    """
+
+    def __init__(self):
+        self.args = type(
+            "A",
+            (),
+            {
+                "model_type": "llama",
+                "head_dim": 64,
+                "hidden_size": None,
+                "num_attention_heads": None,
+            },
+        )()
+
+    def __call__(self, inp, cache=None):  # inp [1, L]; returns [1, L, 3]
+        bump = 1 if (cache is not None and getattr(cache[0], "bits", None) is not None) else 0
+        out = mx.zeros((1, inp.shape[1], 3))
+        out[:, :, bump] = 5.0
+        return out
+
+
 class _FakeLayerCache:
     def to_quantized(self, group_size, bits):  # present + non-raising -> quantizable
+        return self
+
+
+class _FakeQuantCache:
+    """A quantized cache: has .bits so _FakeDivergentModel returns quant (peak-1) logits."""
+
+    bits = 4
+
+    def to_quantized(self, group_size, bits):
         return self
 
 
@@ -305,6 +346,12 @@ def _kv_corpus(n_chunks, chunk_len=4):
 
 
 def _patch_kv_caches(monkeypatch, n_layers=2):
+    """Patch cache helpers for tests that only need structural coverage (not divergence).
+
+    Uses _FakeLayerCache (no .bits) for both ref and quant paths — KLD will be 0,
+    so _check_exact_zero is silenced here.  Tests that need live KLD use
+    _patch_kv_caches_divergent instead.
+    """
     monkeypatch.setattr(
         kvmod,
         "make_prompt_cache",
@@ -317,19 +364,84 @@ def _patch_kv_caches(monkeypatch, n_layers=2):
     monkeypatch.setattr(kvmod, "_check_exact_zero", lambda **k: None)
 
 
+def _patch_kv_caches_divergent(monkeypatch, n_layers=2):
+    """Patch cache helpers so ref and quant caches are distinguishable by .bits.
+
+    make_prompt_cache returns _FakeLayerCache (no .bits → ref peak 0).
+    QuantizedKVCache returns _FakeQuantCache (has .bits=4 → quant peak 1).
+    _check_exact_zero is NOT silenced: divergent logits yield KLD > 0.
+    """
+    monkeypatch.setattr(
+        kvmod,
+        "make_prompt_cache",
+        lambda model: [_FakeLayerCache() for _ in range(n_layers)],
+        raising=False,
+    )
+    monkeypatch.setattr(
+        kvmod, "QuantizedKVCache", lambda group_size, bits: _FakeQuantCache(), raising=False
+    )
+
+
 def test_score_kv_config_offline_reaches_loop(monkeypatch):
-    _patch_kv_caches(monkeypatch)
-    # ref peak 0 vs quant peak 1 would need two models; here the SAME model is used for both
-    # caches, so to force drift we instead make the quant path diverge via a different model.
-    report = score_kv_config(_FakeKVModel(0), _kv_corpus(2), model_id="org/m")
+    """score_kv_config runs the full chunk loop and produces divergent, non-zero KLD.
+
+    Uses _FakeDivergentModel (head_dim=64, model_type=llama) so:
+    - _kv_head_dim returns 64; 64 % 64 == 0 → NO head_dim warning (warnings == ())
+    - ref cache has no .bits → peak on token 0; quant cache has .bits=4 → peak on token 1
+    - KLD > 0 → _check_exact_zero runs live (not silenced)
+
+    A constant-zero _score_chunk would leave kl.mean == 0 and trigger ExactZeroError (red).
+    Stubbing _score_chunk to zeros would also go red.  Dropping the max_chunks slice would
+    change n_chunks (red for test_score_kv_config_caps_provided_corpus).
+    """
+    _patch_kv_caches_divergent(monkeypatch)
+    report = score_kv_config(_FakeDivergentModel(), _kv_corpus(2), model_id="org/m")
     assert report.n_chunks == 2
-    assert report.n_positions == 6  # 2 chunks x (4-1) positions
+    assert report.n_positions == 6  # 2 chunks x (4-1) teacher-forced positions
     assert report.cache_supported is True
+    assert report.kl.mean > 0  # divergent caches → KLD must be non-zero
+    assert report.warnings == ()  # head_dim=64 divides group_size=64 → no warning
 
 
 def test_score_kv_config_caps_provided_corpus(monkeypatch):
-    # backlog 0012: max_chunks must apply to a caller-provided corpus
-    _patch_kv_caches(monkeypatch)
-    report = score_kv_config(_FakeKVModel(0), _kv_corpus(5), model_id="org/m", max_chunks=2)
+    """max_chunks caps a caller-provided corpus (backlog 0012).
+
+    Uses the same divergent model so _check_exact_zero is not silenced and a broken
+    max_chunks slice (e.g. dropped corpus.chunks[:max_chunks]) would change n_chunks (red).
+    """
+    _patch_kv_caches_divergent(monkeypatch)
+    report = score_kv_config(_FakeDivergentModel(), _kv_corpus(5), model_id="org/m", max_chunks=2)
     assert report.n_chunks == 2
     assert report.n_positions == 6
+
+
+def test_score_kv_config_emits_warning_when_head_dim_unknown(monkeypatch):
+    """score_kv_config appends a warning when head_dim is not derivable (covers kv.py line 135).
+
+    Uses _FakeDivergentModel with head_dim=None and no hidden_size/num_attention_heads
+    so _kv_head_dim returns None → _head_dim_gate returns a warning string → line 135 runs.
+    KLD is still > 0 (divergent caches) so _check_exact_zero does not fire.
+    """
+
+    class _UnknownHeadDimModel:
+        args = type(
+            "A",
+            (),
+            {
+                "model_type": "mystery",
+                "head_dim": None,
+                "hidden_size": None,
+                "num_attention_heads": None,
+            },
+        )()
+
+        def __call__(self, inp, cache=None):  # inp [1, L]; returns [1, L, 3]
+            bump = 1 if (cache is not None and getattr(cache[0], "bits", None) is not None) else 0
+            out = mx.zeros((1, inp.shape[1], 3))
+            out[:, :, bump] = 5.0
+            return out
+
+    _patch_kv_caches_divergent(monkeypatch)
+    report = score_kv_config(_UnknownHeadDimModel(), _kv_corpus(1), model_id="org/m")
+    assert len(report.warnings) == 1
+    assert "mystery" in report.warnings[0]
