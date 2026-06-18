@@ -111,8 +111,15 @@ def _run_weight_target(
 
 def _envelope_to_result(label: str, env: dict[str, object]) -> ComparisonTargetResult:
     if env.get("status") == "failed":
+        # fix 3: absent keys yield None, not the string "None"
         return ComparisonTargetResult(
-            label, "failed", None, None, None, str(env.get("error_type")), str(env.get("message"))
+            label,
+            "failed",
+            None,
+            None,
+            None,
+            env.get("error_type") or None,  # type: ignore[arg-type]
+            env.get("message") or None,  # type: ignore[arg-type]
         )
     report = weight_report_from_dict(env["report"])  # type: ignore[arg-type]
     cost = report.quant_model_bytes
@@ -143,6 +150,21 @@ def compare_weight_fidelity(
     if len(set(labels)) != len(labels):
         duplicates = [lbl for lbl in labels if labels.count(lbl) > 1]
         raise ValueError(f"duplicate quant_model_ids produce the same label: {set(duplicates)}")
+    # fix 5: reject malformed repo ids before any filesystem touch
+    for repo in quant_model_ids:
+        if "\x00" in repo:
+            raise ValueError(f"repo id contains a NUL byte: {repo!r}")
+        if len(_partial_filename(repo).encode()) > 255:
+            raise ValueError(f"repo id {repo!r} produces a partial filename exceeding 255 bytes")
+    # fix 2: filename-collision guard — distinct labels can still map to the same partial file
+    filenames = [_partial_filename(r) for r in quant_model_ids]
+    seen: dict[str, str] = {}
+    for repo, fname in zip(quant_model_ids, filenames, strict=True):
+        if fname in seen:
+            raise ValueError(
+                f"partial-filename collision: {repo!r} and {seen[fname]!r} both map to {fname!r}"
+            )
+        seen[fname] = repo
     out_dir = artifacts_dir or Path("_artifacts/compare/weight")
     out_dir.mkdir(parents=True, exist_ok=True)
     results: list[ComparisonTargetResult] = []
@@ -150,15 +172,20 @@ def compare_weight_fidelity(
     for repo in quant_model_ids:
         label = _label_for_repo(repo)
         partial = out_dir / _partial_filename(repo)
-        env = (
-            json.loads(partial.read_text())
-            if partial.exists()
-            else _run_weight_target(
+        # fix 1: treat a corrupt/truncated partial as absent — fall through and re-run
+        env: dict[str, object] | None = None
+        if partial.exists():
+            try:
+                env = json.loads(partial.read_text())
+            except (json.JSONDecodeError, OSError):
+                env = None
+        if env is None:
+            env = _run_weight_target(
                 repo, reference=reference_model_id, partial_path=partial, max_chunks=max_chunks
             )
-        )
         result = _envelope_to_result(label, env)
-        if result.report is not None:
+        # fix 4: corpus from the FIRST successful result (don't overwrite once set)
+        if corpus is None and result.report is not None:
             corpus = result.report.corpus
         results.append(result)
     return assemble_comparison_report(

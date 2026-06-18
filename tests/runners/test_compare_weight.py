@@ -27,6 +27,7 @@ def test_compare_weight_builds_frontier(monkeypatch, tmp_path):
     assert set(report.frontier) == {"q4", "q6", "q8"}
     assert report.mode == "weight"
     assert report.reference == "ref"
+    assert report.corpus is not None  # fix 10: corpus must be populated
 
 
 def test_compare_weight_unrankable_when_cost_none(monkeypatch, tmp_path):
@@ -48,10 +49,11 @@ def test_compare_weight_unrankable_when_cost_none(monkeypatch, tmp_path):
 
 
 def test_compare_weight_failed_target_isolated(monkeypatch, tmp_path):
+    # fix 8: full-signature lambda instead of **k
     monkeypatch.setattr(
         cmp,
         "_run_weight_target",
-        lambda quant, **k: (
+        lambda quant, reference, partial_path, max_chunks: (
             {"status": "failed", "error_type": "ModelMismatchError", "message": "bad"}
             if quant == "q2"
             else _ok_envelope(quant, 0.01, 8000)
@@ -76,12 +78,76 @@ def test_compare_weight_rejects_duplicate_ids(tmp_path):
 
 
 def test_compare_weight_resume_skips_existing_partial(monkeypatch, tmp_path):
+    # fix 6(a): pre-write partial; mock writes its own partial and records calls
     (tmp_path / "q8.json").write_text(json.dumps(_ok_envelope("q8", 0.01, 8000)))
     calls = []
+
+    def _fake_run(quant, reference, partial_path, max_chunks):
+        calls.append(quant)
+        env = _ok_envelope(quant, 0.04, 6200)
+        partial_path.write_text(json.dumps(env))  # mirror real worker: write partial
+        return env
+
+    monkeypatch.setattr(cmp, "_run_weight_target", _fake_run)
+    cmp.compare_weight_fidelity(["q8", "q6"], "ref", artifacts_dir=tmp_path)
+    assert calls == ["q6"]  # q8 resumed from its partial, not re-run
+    assert (tmp_path / "q6.json").exists()  # partial written for the un-cached target
+
+
+# ── fix 6(b): corrupt partial must re-run ────────────────────────────────────
+
+
+def test_compare_weight_corrupt_partial_reruns(monkeypatch, tmp_path):
+    """A truncated/invalid partial must not crash — the target is re-run."""
+    (tmp_path / "q8.json").write_text("{bad json")  # corrupt partial
+    calls = []
+
+    def _fake_run(quant, reference, partial_path, max_chunks):
+        calls.append(quant)
+        env = _ok_envelope(quant, 0.01, 8000)
+        partial_path.write_text(json.dumps(env))
+        return env
+
+    monkeypatch.setattr(cmp, "_run_weight_target", _fake_run)
+    report = cmp.compare_weight_fidelity(["q8", "q6"], "ref", artifacts_dir=tmp_path)
+    assert "q8" in calls  # corrupt partial triggered a re-run
+    assert len(report.results) == 2  # both targets produced results
+
+
+# ── fix 7: filename-collision guard ──────────────────────────────────────────
+
+
+def test_compare_weight_rejects_filename_collision(tmp_path):
+    """'a/b' and 'a_b' map to the same partial filename — must raise before any spawn."""
+    with pytest.raises(ValueError, match="collision"):
+        cmp.compare_weight_fidelity(["a/b", "a_b"], "ref", artifacts_dir=tmp_path)
+
+
+def test_compare_weight_rejects_nul_in_repo_id(tmp_path):
+    """A NUL byte in a repo id must be rejected up front."""
+    with pytest.raises(ValueError, match="NUL"):
+        cmp.compare_weight_fidelity(["q8\x00", "q9"], "ref", artifacts_dir=tmp_path)
+
+
+def test_compare_weight_rejects_oversized_filename(tmp_path):
+    """A repo id whose partial filename exceeds 255 bytes must be rejected up front."""
+    long_repo = "a" * 253  # + ".json" = 258 bytes, over the 255 limit
+    with pytest.raises(ValueError, match="255"):
+        cmp.compare_weight_fidelity([long_repo, "q9"], "ref", artifacts_dir=tmp_path)
+
+
+# ── fix 9: missing envelope keys yield None, not "None" ──────────────────────
+
+
+def test_compare_weight_failed_missing_envelope_keys_are_none(monkeypatch, tmp_path):
+    """A 'failed' envelope with absent error_type/message keys → None, not the string 'None'."""
     monkeypatch.setattr(
         cmp,
         "_run_weight_target",
-        lambda quant, **k: calls.append(quant) or _ok_envelope(quant, 0.04, 6200),
+        lambda quant, reference, partial_path, max_chunks: {"status": "failed"},
     )
-    cmp.compare_weight_fidelity(["q8", "q6"], "ref", artifacts_dir=tmp_path)
-    assert calls == ["q6"]  # q8 resumed from its partial, not re-run
+    report = cmp.compare_weight_fidelity(["q8", "q9"], "ref", artifacts_dir=tmp_path)
+    failed_q8 = next(r for r in report.results if r.label == "q8")
+    assert failed_q8.status == "failed"
+    assert failed_q8.error_type is None
+    assert failed_q8.message is None
