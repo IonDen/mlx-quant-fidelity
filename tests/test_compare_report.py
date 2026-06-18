@@ -125,11 +125,53 @@ def test_comparison_json_round_trips_status() -> None:
     assert statuses == {"q4": "ok", "q4-nobytes": "ok", "q2": "failed"}
     assert out["frontier"] == ["q4"]
     assert out["budget_pick"] == "q4"
+    assert out["dominated"] == []  # fixture has dominated=()
+
+
+def test_comparison_json_dominated_shape() -> None:
+    """asdict serializes tuple-of-tuples as list-of-lists; dominated pair is preserved."""
+    cheaper = ComparisonTargetResult(
+        label="q4",
+        status="ok",
+        report=_wreport("q4", 0.05, 3000),
+        point=RankPoint("q4", 0.05, 3000),
+        excluded_reason=None,
+        error_type=None,
+        message=None,
+    )
+    pricier = ComparisonTargetResult(
+        label="q8",
+        status="ok",
+        report=_wreport("q8", 0.01, 7000),
+        point=RankPoint("q8", 0.01, 7000),
+        excluded_reason=None,
+        error_type=None,
+        message=None,
+    )
+    report = ComparisonReport(
+        mode="weight",
+        reference="ref",
+        model=None,
+        corpus=None,
+        quantize_start=None,
+        quantize_mode=None,
+        budget=None,
+        results=(cheaper, pricier),
+        frontier=("q4",),
+        dominated=(("q8", "q4"),),
+        budget_pick=None,
+        mlx_version="0.21",
+        mlx_lm_version="0.31.3",
+    )
+    out = json.loads(render_comparison_json(report))
+    assert out["dominated"] == [["q8", "q4"]]
 
 
 def test_comparison_markdown_shows_all_three_row_kinds() -> None:
     md = render_comparison_markdown(_report())
-    assert "q4" in md
+    assert "| `q4` |" in md  # uniquely targets the ranked table row body
+    assert "✓" in md  # q4 is on the frontier in this fixture
+    assert "vocab_size mismatch" in md  # failed row's message, not just error_type
     assert "cost unavailable" in md
     assert "ModelMismatchError" in md
     assert "Recommended" in md  # the budget-pick line
@@ -176,6 +218,115 @@ def test_comparison_markdown_no_budget_pick_shows_no_target_message() -> None:
     md = render_comparison_markdown(report)
     assert "No target clears the budget" in md
     assert "--min-tier excellent" in md
+
+
+def test_comparison_markdown_frontier_and_cost_order() -> None:
+    """Both ✓ and ✗ appear; cheaper target's row precedes pricier target's row (cost-ascending)."""
+    cheaper = ComparisonTargetResult(
+        label="q4",
+        status="ok",
+        report=_wreport("q4", 0.05, 3000),
+        point=RankPoint("q4", 0.05, 3000),
+        excluded_reason=None,
+        error_type=None,
+        message=None,
+    )
+    pricier = ComparisonTargetResult(
+        label="q8",
+        status="ok",
+        report=_wreport("q8", 0.01, 7000),
+        point=RankPoint("q8", 0.01, 7000),
+        excluded_reason=None,
+        error_type=None,
+        message=None,
+    )
+    report = ComparisonReport(
+        mode="weight",
+        reference="ref",
+        model=None,
+        corpus=None,
+        quantize_start=None,
+        quantize_mode=None,
+        budget=None,
+        results=(cheaper, pricier),
+        frontier=("q4",),
+        dominated=(("q8", "q4"),),
+        budget_pick=None,
+        mlx_version="0.21",
+        mlx_lm_version="0.31.3",
+    )
+    md = render_comparison_markdown(report)
+    assert "✓" in md  # cheaper is on frontier
+    assert "✗" in md  # pricier is dominated
+    # cost-ascending: cheaper row must precede pricier row; use exact prefixes to avoid
+    # substring collisions (e.g. "q4" matching inside "q4-bad")
+    assert md.index("| `q4` |") < md.index("| `q8` |")
+
+
+def test_weight_report_from_dict_round_trip_non_empty_warnings() -> None:
+    """Rehydrating a WeightFidelityReport with non-empty warnings preserves the tuple."""
+    original = WeightFidelityReport(
+        quant_model_id="q4",
+        quant_revision=None,
+        reference_model_id="ref",
+        reference_revision=None,
+        quant_bits=4,
+        quant_group_size=64,
+        quant_mode="affine",
+        per_layer=False,
+        reference_bits=None,
+        kl=ScalarSummary(0.09, 0.09, 0.09, 0.09),
+        flip_rate=0.02,
+        perplexity_ref=10.0,
+        perplexity_quant=10.1,
+        perplexity_delta=0.1,
+        n_positions=10,
+        n_chunks=2,
+        corpus=CorpusProvenance(
+            "wikitext-2-raw", "test", "ref", 512, 512, "none", "drop", "raw", 10
+        ),
+        mlx_version="0.21",
+        mlx_lm_version="0.31.3",
+        peak_memory_bytes=1,
+        quant_model_bytes=4200,
+        reference_model_bytes=8000,
+        verdict="good",
+        warnings=("a warning",),
+    )
+    rebuilt = weight_report_from_dict(dataclasses.asdict(original))
+    assert rebuilt == original
+
+
+def test_comparison_markdown_budget_pick_without_budget_uses_fallback() -> None:
+    """If budget_pick is set but budget=None, the recommendation line must not render 'None'."""
+    ok = ComparisonTargetResult(
+        label="q4",
+        status="ok",
+        report=_wreport("q4", 0.05, 3000),
+        point=RankPoint("q4", 0.05, 3000),
+        excluded_reason=None,
+        error_type=None,
+        message=None,
+    )
+    report = ComparisonReport(
+        mode="weight",
+        reference="ref",
+        model=None,
+        corpus=None,
+        quantize_start=None,
+        quantize_mode=None,
+        budget=None,
+        results=(ok,),
+        frontier=("q4",),
+        dominated=(),
+        budget_pick="q4",  # pick set, but no budget description
+        mlx_version="0.21",
+        mlx_lm_version="0.31.3",
+    )
+    md = render_comparison_markdown(report)
+    assert "clearing None" not in md
+    assert "Recommended" in md
+    assert "`q4`" in md
 
 
 def test_comparison_markdown_kv_mode_omits_weight_footer() -> None:
