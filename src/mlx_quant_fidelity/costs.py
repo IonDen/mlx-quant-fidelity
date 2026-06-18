@@ -11,6 +11,8 @@ def kv_bytes_per_token(
     smaller group_size buys accuracy but costs bytes, and the Pareto must see it. See
     docs/ranking-principles.md (the cost axis).
     """
+    if group_size <= 0:
+        raise ValueError(f"group_size must be positive, got {group_size}")
     elements_per_token = 2 * n_layers * n_kv_heads * head_dim  # K and V
     bytes_per_element = bits / 8 + 4 / group_size  # 4 B = fp16 scale + fp16 bias per group
     return round(elements_per_token * bytes_per_element)
