@@ -189,6 +189,17 @@ def compare_weight_fidelity(
                 env = json.loads(partial.read_text())
             except (json.JSONDecodeError, OSError):
                 env = None
+        # Stale-identity guard: a 'failed' partial carries no stored identity — recompute.
+        # An 'ok' partial whose reference_model_id doesn't match — recompute.
+        if env is not None and env.get("status") == "ok":
+            stored_report = env.get("report")
+            if (
+                not isinstance(stored_report, dict)
+                or stored_report.get("reference_model_id") != reference_model_id
+            ):
+                env = None
+        elif env is not None:
+            env = None  # failed or unknown status partial — recompute
         if env is None:
             env = _run_weight_target(
                 repo, reference=reference_model_id, partial_path=partial, max_chunks=max_chunks
@@ -346,15 +357,29 @@ def compare_kv_fidelity(
 
     # ── Determine which configs need scoring (resume: skip valid partials) ────
     def _read_partial(bits: int, gs: int) -> dict[str, object] | None:
-        """Return parsed envelope if the partial is valid, else None (recompute)."""
+        """Return parsed envelope if the partial is valid and measured against this model.
+
+        Returns None (recompute) when the partial is absent, corrupt/truncated, a 'failed'
+        envelope, or an 'ok' envelope whose report["model_id"] differs from model_id
+        (stale — measured against a different model).
+        """
         partial = out_dir / _kv_partial_filename(bits, gs)
         if not partial.exists():
             return None
         try:
             raw: dict[str, object] = json.loads(partial.read_text())
-            return raw
         except (json.JSONDecodeError, OSError):
             return None  # corrupt/truncated — treat as absent, recompute
+        # Stale-identity guard: a 'failed' partial carries no stored identity — recompute.
+        # An 'ok' partial whose model_id doesn't match — recompute.
+        if raw.get("status") != "ok":
+            return None
+        stored_report = raw.get("report")
+        if not isinstance(stored_report, dict):
+            return None
+        if stored_report.get("model_id") != model_id:
+            return None
+        return raw
 
     pending = [(b, g) for b, g in configs if _read_partial(b, g) is None]
 
@@ -416,7 +441,7 @@ def compare_kv_fidelity(
                 (out_dir / _kv_partial_filename(bits, gs)).read_text()
             )
             result = _kv_envelope_to_result(label, env)
-        except (json.JSONDecodeError, OSError):
+        except (json.JSONDecodeError, OSError, ValueError):
             result = ComparisonTargetResult(
                 label,
                 "failed",

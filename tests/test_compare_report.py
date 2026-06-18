@@ -358,3 +358,57 @@ def test_comparison_markdown_kv_mode_omits_weight_footer() -> None:
     md = render_comparison_markdown(report)
     assert "Weight compare" not in md
     assert "kv" in md
+
+
+# ── Fix C: dominated row renders dominator label ──────────────────────────────
+
+
+def test_comparison_markdown_dominated_row_shows_dominator_label() -> None:
+    """A dominated (✗) row in the ranked table must also render the dominator's label.
+
+    docs/ranking-principles.md specifies that dominated targets are flagged with a
+    dominator's label.  The fixture has q8 dominated by q4 (q4 is cheaper AND better).
+    The rendered markdown row for q8 must include the string 'q4' as the dominator.
+    """
+    cheaper_better = ComparisonTargetResult(
+        label="q4",
+        status="ok",
+        report=_wreport("q4", 0.05, 3000),
+        point=RankPoint("q4", 0.05, 3000),
+        excluded_reason=None,
+        error_type=None,
+        message=None,
+    )
+    dominated = ComparisonTargetResult(
+        label="q8",
+        status="ok",
+        report=_wreport("q8", 0.09, 7000),
+        point=RankPoint("q8", 0.09, 7000),
+        excluded_reason=None,
+        error_type=None,
+        message=None,
+    )
+    report = ComparisonReport(
+        mode="weight",
+        reference="ref",
+        model=None,
+        corpus=None,
+        quantize_start=None,
+        quantize_mode=None,
+        budget=None,
+        results=(cheaper_better, dominated),
+        frontier=("q4",),
+        dominated=(("q8", "q4"),),  # q8 is dominated by q4
+        budget_pick=None,
+        mlx_version="0.21",
+        mlx_lm_version="0.31.3",
+    )
+    md = render_comparison_markdown(report)
+
+    # q8 row must carry ✗ (dominated) and name its dominator 'q4'
+    # Find the q8 row line
+    q8_lines = [line for line in md.splitlines() if "| `q8` |" in line]
+    assert len(q8_lines) == 1, f"expected exactly one q8 row, got: {q8_lines}"
+    q8_row = q8_lines[0]
+    assert "✗" in q8_row
+    assert "q4" in q8_row, f"dominator label 'q4' not found in q8 row: {q8_row!r}"
