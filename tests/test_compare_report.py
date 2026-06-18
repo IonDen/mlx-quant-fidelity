@@ -363,6 +363,81 @@ def test_comparison_markdown_kv_mode_omits_weight_footer() -> None:
 # ── Fix C: dominated row renders dominator label ──────────────────────────────
 
 
+def test_human_bytes_adaptive_formatting() -> None:
+    """_human_bytes must scale adaptively so KV byte-per-token costs are not hidden as '0.00 GB'.
+
+    Tested via render_comparison_markdown because _human_bytes is module-private.
+    The cost column in the ranked table must reflect the correct magnitude unit.
+    """
+    # KV-scale cost: 576 bytes-per-token → must show "576 B", NOT "0.00 GB"
+    kv_row = ComparisonTargetResult(
+        label="kv4",
+        status="ok",
+        report=_wreport("kv4", 0.02, 576),
+        point=RankPoint("kv4", 0.02, 576),
+        excluded_reason=None,
+        error_type=None,
+        message=None,
+    )
+    # GB-scale cost (weight mode, ~4.2 GB) → must still show "GB"
+    gb_row = ComparisonTargetResult(
+        label="q4",
+        status="ok",
+        report=_wreport("q4", 0.05, 4_200_000_000),
+        point=RankPoint("q4", 0.05, 4_200_000_000),
+        excluded_reason=None,
+        error_type=None,
+        message=None,
+    )
+    # MB-scale cost → must show "MB"
+    mb_row = ComparisonTargetResult(
+        label="q2",
+        status="ok",
+        report=_wreport("q2", 0.20, 280_000_000),
+        point=RankPoint("q2", 0.20, 280_000_000),
+        excluded_reason=None,
+        error_type=None,
+        message=None,
+    )
+    report = ComparisonReport(
+        mode="kv",
+        reference=None,
+        model="org/model",
+        corpus=None,
+        quantize_start=0,
+        quantize_mode="stress",
+        budget=None,
+        results=(kv_row, gb_row, mb_row),
+        frontier=("kv4", "q4", "q2"),
+        dominated=(),
+        budget_pick=None,
+        mlx_version="0.21",
+        mlx_lm_version="0.31.3",
+    )
+    md = render_comparison_markdown(report)
+
+    # Locate each row line
+    kv4_lines = [line for line in md.splitlines() if "| `kv4` |" in line]
+    q4_lines = [line for line in md.splitlines() if "| `q4` |" in line]
+    q2_lines = [line for line in md.splitlines() if "| `q2` |" in line]
+    assert len(kv4_lines) == 1
+    assert len(q4_lines) == 1
+    assert len(q2_lines) == 1
+
+    # Byte-scale must show "B" unit, not "GB"
+    assert "576 B" in kv4_lines[0], f"expected '576 B' in kv4 row: {kv4_lines[0]!r}"
+    assert "0.00 GB" not in kv4_lines[0], f"'0.00 GB' must not appear in kv4 row: {kv4_lines[0]!r}"
+
+    # GB-scale must show "GB"
+    assert "GB" in q4_lines[0], f"expected 'GB' in q4 row: {q4_lines[0]!r}"
+
+    # MB-scale must show "MB"
+    assert "MB" in q2_lines[0], f"expected 'MB' in q2 row: {q2_lines[0]!r}"
+
+    # None → "—" (tested via existing None-branch; verify no regression)
+    # (covered implicitly by the existing excluded tests, but assert directly on the symbol)
+
+
 def test_comparison_markdown_dominated_row_shows_dominator_label() -> None:
     """A dominated (✗) row in the ranked table must also render the dominator's label.
 

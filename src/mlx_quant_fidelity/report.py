@@ -209,7 +209,15 @@ def render_comparison_json(report: ComparisonReport) -> str:
 
 
 def _human_bytes(n: int | None) -> str:
-    return f"{n / 1e9:.2f} GB" if n is not None else "—"
+    if n is None:
+        return "—"
+    if n < 1_000:
+        return f"{n} B"
+    if n < 1_000_000:
+        return f"{n / 1e3:.1f} KB"
+    if n < 1_000_000_000:
+        return f"{n / 1e6:.1f} MB"
+    return f"{n / 1e9:.2f} GB"
 
 
 def render_comparison_markdown(report: ComparisonReport) -> str:
