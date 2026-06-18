@@ -40,3 +40,22 @@ def verdict_for(
     if kl_mean <= m["kl_mean"] and kl_p99 <= m["kl_p99"] and flip_rate <= m["flip_rate"]:
         return "marginal"
     return "bad"
+
+
+_TIER_RANK = {"bad": 0, "marginal": 1, "good": 2}
+
+
+def tier_rank(verdict: str) -> int:
+    """Ordinal rank of a verdict for >= comparisons ('bad' < 'marginal' < 'good')."""
+    return _TIER_RANK[verdict]
+
+
+def qualifies(*, kl_mean: float, verdict: str, max_kld: float | None, min_tier: str | None) -> bool:
+    """True if a target clears the compare budget. ANDs whichever constraints are set; True if none.
+
+    `--max-kld` checks mean KLD only; `--min-tier` checks the full 3-threshold verdict
+    (mean AND p99 AND flip), so a tail-bad target cannot pass a tier budget. See spec audit #2.
+    """
+    if max_kld is not None and kl_mean > max_kld:
+        return False
+    return not (min_tier is not None and tier_rank(verdict) < tier_rank(min_tier))
