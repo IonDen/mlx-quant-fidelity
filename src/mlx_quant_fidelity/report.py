@@ -221,11 +221,16 @@ def render_comparison_markdown(report: ComparisonReport) -> str:
         "| target | cost | KL mean | KL p99 | flip | verdict | frontier |",
         "|---|---|---|---|---|---|---|",
     ]
+    dominated_by: dict[str, str] = dict(report.dominated)
     ranked = [r for r in report.results if r.point is not None]
     for r in sorted(ranked, key=lambda r: r.point.cost_bytes):  # type: ignore[union-attr]
         assert r.report is not None
         assert r.point is not None
-        mark = "✓" if r.label in report.frontier else "✗"
+        if r.label in report.frontier:
+            mark = "✓"
+        else:
+            dominator = dominated_by.get(r.label)
+            mark = f"✗ dominated by `{dominator}`" if dominator is not None else "✗"
         lines.append(
             f"| `{r.label}` | {_human_bytes(r.point.cost_bytes)} | {r.report.kl.mean:.4f} | "
             f"{r.report.kl.p99:.4f} | {r.report.flip_rate:.4f} | {r.report.verdict} | {mark} |"

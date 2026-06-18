@@ -407,20 +407,87 @@ def test_compare_kv_resume_data_integrity(monkeypatch, tmp_path):
 # ── Fix 2: defensive ValueError for non-numeric cost in envelope ───────────────
 
 
-def test_kv_envelope_to_result_raises_on_bad_cost_type(monkeypatch, tmp_path):
+def test_kv_envelope_to_result_raises_on_bad_cost_type():
     """_kv_envelope_to_result raises ValueError when cost is a non-numeric type (fix 2).
 
     Under normal operation cost is always int|None, but a hand-edited or externally
     produced partial could carry a string — the assert was stripped under python -O,
     the ValueError fires unconditionally.
+
+    This test calls _kv_envelope_to_result directly to assert the function itself raises.
+    The collect-loop isolation behaviour (ValueError caught → failed result) is covered by
+    test_compare_kv_collect_loop_isolates_bad_cost_partial.
     """
     rep = _fid((4, 64), 0.05)
-    # Pre-seed a partial with a string cost — the type that would previously trip the assert
-    (tmp_path / "4_64.json").write_text(
-        json.dumps({"status": "ok", "report": dataclasses.asdict(rep), "cost": "not_a_number"})
-    )
-    # Second config scored normally so the overall call doesn't fail on the first config
-    _patch_kv_compare(monkeypatch, {(8, 64): _fid((8, 64), 0.01)})
-
+    env = {"status": "ok", "report": dataclasses.asdict(rep), "cost": "not_a_number"}
     with pytest.raises(ValueError, match="unexpected cost type"):
-        cmp.compare_kv_fidelity("m", [(4, 64), (8, 64)], artifacts_dir=tmp_path)
+        cmp._kv_envelope_to_result("4:64", env)
+
+
+# ── Fix A: collect-loop isolates bad-cost partial instead of aborting ─────────
+
+
+def test_compare_kv_collect_loop_isolates_bad_cost_partial(monkeypatch, tmp_path):
+    """A valid-JSON partial with a non-numeric cost becomes a 'failed' result in the collect
+    loop; the other config's result is unaffected and the overall run completes.
+
+    This distinguishes the collect-loop path from _kv_envelope_to_result's own ValueError
+    guard: the collect loop must CATCH ValueError and isolate it, not propagate it.
+    """
+    rep_4 = _fid((4, 64), 0.05)
+    rep_8 = _fid((8, 64), 0.01)
+
+    # Pre-seed 4_64.json with a bad cost so it's skipped in PENDING but fails at collect
+    (tmp_path / "4_64.json").write_text(
+        json.dumps({"status": "ok", "report": dataclasses.asdict(rep_4), "cost": "bad-cost"})
+    )
+    # Pre-seed 8_64.json with a valid partial so no model load occurs
+    (tmp_path / "8_64.json").write_text(
+        json.dumps({"status": "ok", "report": dataclasses.asdict(rep_8), "cost": 2000})
+    )
+
+    _patch_kv_compare(monkeypatch, {})  # no scoring should happen (both pre-seeded)
+
+    # Must NOT raise — bad cost is isolated, not propagated
+    report = cmp.compare_kv_fidelity("m", [(4, 64), (8, 64)], artifacts_dir=tmp_path)
+
+    assert len(report.results) == 2
+
+    failed = next(r for r in report.results if r.label == "4:64")
+    assert failed.status == "failed"
+    assert failed.error_type == "CorruptPartial"
+    assert "4:64" in (failed.message or "")
+
+    good = next(r for r in report.results if r.label == "8:64")
+    assert good.status == "ok"
+    assert "8:64" in report.frontier
+
+
+# ── Fix B (KV): stale-reference resume recomputes instead of resuming ─────────
+
+
+def test_compare_kv_stale_model_partial_is_recomputed(monkeypatch, tmp_path):
+    """A partial measured against model 'A' is not resumed when compare is called with model 'B'.
+
+    Pre-seed a valid ok partial for config (4,64) that records model_id='model-A'.
+    Call compare_kv_fidelity with model_id='model-B' in the same artifacts_dir.
+    Assert that score_kv_config is called for (4,64) — the stale partial is treated as absent.
+    The existing-match resume test (test_compare_kv_resume_skips_existing_partial) uses
+    the SAME model_id and must still pass.
+    """
+    rep_a = _fid((4, 64), 0.05)
+    # report carries model_id='m'; write it as if it was for 'model-A'
+    rep_dict = dataclasses.asdict(rep_a)
+    rep_dict["model_id"] = "model-A"
+    (tmp_path / "4_64.json").write_text(
+        json.dumps({"status": "ok", "report": rep_dict, "cost": 1000})
+    )
+
+    # model-B call should recompute (4,64) and also score (8,64)
+    reports = {(4, 64): _fid((4, 64), 0.07), (8, 64): _fid((8, 64), 0.01)}
+    calls = _patch_kv_compare(monkeypatch, reports)
+
+    cmp.compare_kv_fidelity("model-B", [(4, 64), (8, 64)], artifacts_dir=tmp_path)
+
+    # (4,64) must have been re-scored — stale partial from model-A should not be resumed
+    assert (4, 64) in calls

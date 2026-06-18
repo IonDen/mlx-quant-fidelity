@@ -151,3 +151,41 @@ def test_compare_weight_failed_missing_envelope_keys_are_none(monkeypatch, tmp_p
     assert failed_q8.status == "failed"
     assert failed_q8.error_type is None
     assert failed_q8.message is None
+
+
+# ── Fix B (weight): stale-reference resume recomputes instead of resuming ─────
+
+
+def test_compare_weight_stale_reference_partial_is_recomputed(monkeypatch, tmp_path):
+    """A partial measured against reference 'ref-A' is not resumed when compare is called
+    with reference_model_id='ref-B'.  The stale partial must be treated as absent and
+    _run_weight_target must be called for that target.
+
+    The existing resume test (test_compare_weight_resume_skips_existing_partial) uses
+    a MATCHING reference and must still pass.
+    """
+    from tests.test_compare_report import _wreport
+
+    # Build a valid envelope for q8 that was measured against ref-A
+    rep_a = _wreport("q8", 0.01, 8000)
+    # Patch the reference_model_id in the serialised report to simulate ref-A measurement
+    rep_dict = dataclasses.asdict(rep_a)
+    rep_dict["reference_model_id"] = "ref-A"
+    stale_envelope = {"status": "ok", "report": rep_dict}
+    (tmp_path / "q8.json").write_text(json.dumps(stale_envelope))
+
+    calls = []
+
+    def _fake_run(quant, reference, partial_path, max_chunks):
+        calls.append((quant, reference))
+        env = {"status": "ok", "report": dataclasses.asdict(_wreport(quant, 0.01, 8000))}
+        partial_path.write_text(json.dumps(env))
+        return env
+
+    monkeypatch.setattr(cmp, "_run_weight_target", _fake_run)
+
+    # Call with ref-B — the stale q8 partial (measured against ref-A) must be recomputed
+    cmp.compare_weight_fidelity(["q8", "q9"], "ref-B", artifacts_dir=tmp_path)
+
+    # q8 must have been re-run against ref-B
+    assert any(quant == "q8" and ref == "ref-B" for quant, ref in calls)
