@@ -5,12 +5,14 @@ import math
 import mlx.core as mx
 import pytest
 
+from mlx_quant_fidelity.corpora.provenance import Corpus, CorpusProvenance
 from mlx_quant_fidelity.errors import (
     CacheNotQuantizableError,
     CorpusError,
     ExactZeroError,
     QuantFidelityError,
 )
+from mlx_quant_fidelity.probes import kv as kvmod
 from mlx_quant_fidelity.probes.kv import (
     _aggregate_chunks,
     _cache_is_quantizable,
@@ -19,6 +21,7 @@ from mlx_quant_fidelity.probes.kv import (
     _kv_head_dim,
     _score_chunk,
     measure_kv_fidelity,
+    score_kv_config,
 )
 
 # ---------------------------------------------------------------------------
@@ -263,3 +266,70 @@ def test_kv_head_dim_zero_falls_back_to_derived():
         _kv_head_dim(_ModelWithArgs(_Args(head_dim=0, hidden_size=4096, num_attention_heads=32)))
         == 128
     )
+
+
+# ---------------------------------------------------------------------------
+# Task 4 — score_kv_config: extracted helper operating on an already-loaded model
+# ---------------------------------------------------------------------------
+
+
+class _FakeKVModel:
+    """Forward that ignores the cache and returns a fixed peak per position (peak index `peak`).
+
+    Returns a raw tensor [1, L, vocab] (matching real mlx-lm model behaviour): _score_chunk
+    indexes [0] on the tensor to squeeze the batch dim to [L, vocab].
+    """
+
+    def __init__(self, peak):
+        self._peak = peak
+        self.args = type("A", (), {"model_type": "llama"})()
+
+    def __call__(self, inp, cache=None):  # inp [1, L]; returns [1, L, 3]
+        length = inp.shape[1]
+        out = mx.zeros((1, length, 3))
+        out[:, :, self._peak] = 5.0
+        return out
+
+
+class _FakeLayerCache:
+    def to_quantized(self, group_size, bits):  # present + non-raising -> quantizable
+        return self
+
+
+def _kv_corpus(n_chunks, chunk_len=4):
+    chunks = tuple(mx.arange(chunk_len) for _ in range(n_chunks))
+    prov = CorpusProvenance(
+        "x", "test", "org/m", chunk_len, chunk_len, "none", "drop", "raw", chunk_len * n_chunks
+    )
+    return Corpus(chunks=chunks, provenance=prov)
+
+
+def _patch_kv_caches(monkeypatch, n_layers=2):
+    monkeypatch.setattr(
+        kvmod,
+        "make_prompt_cache",
+        lambda model: [_FakeLayerCache() for _ in range(n_layers)],
+        raising=False,
+    )
+    monkeypatch.setattr(
+        kvmod, "QuantizedKVCache", lambda group_size, bits: _FakeLayerCache(), raising=False
+    )
+    monkeypatch.setattr(kvmod, "_check_exact_zero", lambda **k: None)
+
+
+def test_score_kv_config_offline_reaches_loop(monkeypatch):
+    _patch_kv_caches(monkeypatch)
+    # ref peak 0 vs quant peak 1 would need two models; here the SAME model is used for both
+    # caches, so to force drift we instead make the quant path diverge via a different model.
+    report = score_kv_config(_FakeKVModel(0), _kv_corpus(2), model_id="org/m")
+    assert report.n_chunks == 2
+    assert report.n_positions == 6  # 2 chunks x (4-1) positions
+    assert report.cache_supported is True
+
+
+def test_score_kv_config_caps_provided_corpus(monkeypatch):
+    # backlog 0012: max_chunks must apply to a caller-provided corpus
+    _patch_kv_caches(monkeypatch)
+    report = score_kv_config(_FakeKVModel(0), _kv_corpus(5), model_id="org/m", max_chunks=2)
+    assert report.n_chunks == 2
+    assert report.n_positions == 6
