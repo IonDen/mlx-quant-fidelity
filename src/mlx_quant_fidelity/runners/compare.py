@@ -8,6 +8,8 @@ import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import mlx.core as mx
+
 from mlx_quant_fidelity._memory_caps import install_memory_caps
 from mlx_quant_fidelity.costs import kv_bytes_per_token
 from mlx_quant_fidelity.errors import QuantFidelityError
@@ -253,9 +255,8 @@ def _kv_dims(model: object) -> tuple[int | None, int | None, int | None]:
 
     args = getattr(model, "args", None)
     n_layers = len(make_prompt_cache(model))
-    n_kv_heads = getattr(args, "num_key_value_heads", None) or getattr(
-        args, "num_attention_heads", None
-    )
+    _nkv = getattr(args, "num_key_value_heads", None)
+    n_kv_heads = _nkv if _nkv is not None else getattr(args, "num_attention_heads", None)
     head_dim = _kv_head_dim(model)
     return n_layers, n_kv_heads, head_dim
 
@@ -276,7 +277,8 @@ def _kv_envelope_to_result(label: str, env: dict[str, object]) -> ComparisonTarg
     cost = env.get("cost")
     if cost is None:
         return ComparisonTargetResult(label, "ok", report, None, "cost unavailable", None, None)
-    assert isinstance(cost, (int, float)), f"unexpected cost type in partial: {type(cost)}"
+    if not isinstance(cost, (int, float)):
+        raise ValueError(f"unexpected cost type in partial: {type(cost)!r}")
     return ComparisonTargetResult(
         label,
         "ok",
@@ -341,7 +343,6 @@ def compare_kv_fidelity(
 
     out_dir = artifacts_dir or Path("_artifacts/compare/kv")
     out_dir.mkdir(parents=True, exist_ok=True)
-    install_memory_caps()
 
     # ── Determine which configs need scoring (resume: skip valid partials) ────
     def _read_partial(bits: int, gs: int) -> dict[str, object] | None:
@@ -362,10 +363,12 @@ def compare_kv_fidelity(
     head_dim: int | None = None
 
     if pending:
+        install_memory_caps()
         model = _load_model(model_id, model_revision)
         n_layers, n_kv_heads, head_dim = _kv_dims(model)
         corpus = _load_corpus_for_kv(model, model_id, max_chunks)
         for bits, gs in pending:
+            mx.reset_peak_memory()
             partial = out_dir / _kv_partial_filename(bits, gs)
             try:
                 fid_report = score_kv_config(
@@ -401,14 +404,28 @@ def compare_kv_fidelity(
                     "message": str(exc),
                 }
             partial.write_text(json.dumps(envelope))
+            mx.clear_cache()
 
     # ── Collect results (resumed or just-written) ──────────────────────────────
     results: list[ComparisonTargetResult] = []
     corpus_prov: CorpusProvenance | None = None
     for bits, gs in configs:
         label = _kv_config_label(bits, gs)
-        env = json.loads((out_dir / _kv_partial_filename(bits, gs)).read_text())
-        result = _kv_envelope_to_result(label, env)
+        try:
+            env: dict[str, object] = json.loads(
+                (out_dir / _kv_partial_filename(bits, gs)).read_text()
+            )
+            result = _kv_envelope_to_result(label, env)
+        except (json.JSONDecodeError, OSError):
+            result = ComparisonTargetResult(
+                label,
+                "failed",
+                None,
+                None,
+                None,
+                "CorruptPartial",
+                f"partial for config {label!r} was corrupt or unreadable at collect time",
+            )
         if corpus_prov is None and result.report is not None:
             corpus_prov = result.report.corpus
         results.append(result)
