@@ -94,6 +94,20 @@ Same corpus and recipe, but the comparison is now a quantized model repo against
 
 Unlike the KV probe, both runs use standard attention, so the drift is the deployed quantized model's weight-quant cost with no quantized-attention kernel folded in. It does still include the quantized-matmul kernel's numerics, which is exactly what you run when you load the model.
 
+## Comparing quantizations
+
+`compare` ranks a set of quantizations on a memory-normalized Pareto frontier: quality (mean KL divergence) on one axis, memory cost on the other. It flags any configuration that is both worse quality and more expensive than another option on the list — those are dominated and you would never choose them.
+
+```bash
+# rank weight quantizations against a bf16 reference
+mlx-quant-fidelity compare weights q4 q6 q8 --reference fp16
+
+# rank KV configs on a single model
+mlx-quant-fidelity compare kv <model> --configs 4:32,4:64,8:64
+```
+
+Add `--max-kld 0.05` to get the cheapest configuration whose mean KLD stays under a threshold, or `--min-tier good` to get the cheapest one that passes the good-tier verdict. [docs/ranking-principles.md](docs/ranking-principles.md) explains how each axis is computed, what Pareto domination means in practice, and where the ranking has limits.
+
 ## How it works
 
 Teacher-forced scoring, not generation. For each fixed-length corpus chunk the model runs twice on the *same* tokens — once with a full-precision KV cache, once with a quantized one — and the two next-token distributions are compared position by position. Generation would let the runs diverge in their own inputs the moment quantization changed a sampled token, turning the measurement into trajectory drift instead of cache cost. Logits collapse to per-position scalars inside the chunk loop and are released before the next chunk, so a long corpus never holds full distributions in memory.
