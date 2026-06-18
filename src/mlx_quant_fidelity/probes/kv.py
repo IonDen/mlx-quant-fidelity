@@ -6,6 +6,7 @@ import importlib.metadata
 from typing import TYPE_CHECKING
 
 import mlx.core as mx
+from mlx_lm.models.cache import QuantizedKVCache, make_prompt_cache
 
 from mlx_quant_fidelity._memory_caps import install_memory_caps
 from mlx_quant_fidelity.errors import (
@@ -108,6 +109,88 @@ def _score_chunk(
     return _reduce_pair(ref_logits, quant_logits, targets)
 
 
+def score_kv_config(
+    model: object,
+    corpus: Corpus,
+    *,
+    model_id: str,
+    model_revision: str | None = None,
+    kv_bits: int = 4,
+    kv_group_size: int = 64,
+    quantize_start: int = 0,
+    max_chunks: int | None = None,
+) -> FidelityReport:
+    """Score one KV config on an ALREADY-LOADED model (no load, no caps install).
+
+    Shared by ``measure_kv_fidelity`` (load -> delegate) and the KV ``compare`` adapter
+    (load once -> loop configs). Applies ``max_chunks`` to the provided corpus (backlog 0012),
+    so a caller-supplied corpus is capped identically to the weight probe.
+    """
+    probe_warnings: list[str] = []
+    model_type = str(getattr(getattr(model, "args", None), "model_type", "unknown"))
+    head_dim_warning = _head_dim_gate(
+        head_dim=_kv_head_dim(model), kv_group_size=kv_group_size, model_type=model_type
+    )
+    if head_dim_warning is not None:
+        probe_warnings.append(head_dim_warning)
+
+    probe_cache = make_prompt_cache(model)
+    n_layers = len(probe_cache)
+    _cache_is_quantizable(probe_cache, group_size=kv_group_size, bits=kv_bits)
+    del probe_cache
+
+    chunks = corpus.chunks[:max_chunks] if max_chunks is not None else corpus.chunks
+    kls: list[mx.array] = []
+    flips: list[mx.array] = []
+    ref_nlls: list[mx.array] = []
+    quant_nlls: list[mx.array] = []
+    for ids in chunks:
+        ref_cache = make_prompt_cache(model)
+        quant_cache: list[object] = [
+            QuantizedKVCache(group_size=kv_group_size, bits=kv_bits) for _ in range(n_layers)
+        ]
+        kl, flip, ref_nll, quant_nll = _score_chunk(model, ids, ref_cache, quant_cache)
+        mx.eval(kl, flip, ref_nll, quant_nll)
+        kls.append(kl)
+        flips.append(flip)
+        ref_nlls.append(ref_nll)
+        quant_nlls.append(quant_nll)
+        del ref_cache, quant_cache
+        mx.clear_cache()
+
+    agg = _aggregate_chunks(kls, flips, ref_nlls, quant_nlls)
+    _check_exact_zero(
+        kl_mean=agg.kl.mean,
+        flip_rate=agg.flip_rate,
+        context=(
+            f"quantization did not engage (quantize_start={quantize_start}; chunk may be "
+            "shorter than the keep-first-N boundary, or the quantized cache was bypassed)"
+        ),
+    )
+    return FidelityReport(
+        model_id=model_id,
+        model_revision=model_revision,
+        kv_bits=kv_bits,
+        kv_group_size=kv_group_size,
+        quantize_start=quantize_start,
+        quantize_mode="stress" if quantize_start == 0 else "deployment",
+        kl=agg.kl,
+        flip_rate=agg.flip_rate,
+        perplexity_ref=agg.perplexity_ref,
+        perplexity_quant=agg.perplexity_quant,
+        perplexity_delta=agg.perplexity_quant - agg.perplexity_ref,
+        n_positions=agg.n_positions,
+        n_chunks=len(chunks),
+        corpus=corpus.provenance,
+        mlx_version=importlib.metadata.version("mlx"),
+        mlx_lm_version=importlib.metadata.version("mlx-lm"),
+        peak_memory_bytes=int(mx.get_peak_memory()),
+        cache_supported=True,
+        verdict=verdict_for(agg.kl.mean, agg.kl.p99, agg.flip_rate),
+        warnings=tuple(probe_warnings),
+    )
+
+
 def measure_kv_fidelity(
     model_id: str,
     *,
@@ -128,7 +211,8 @@ def measure_kv_fidelity(
             supported in 0.1.0; any other value raises ``QuantFidelityError``.
         corpus: Pre-built corpus to score. If None, WikiText-2 test split is fetched (requires
             network access and the ``--run-network`` marker in tests).
-        max_chunks: Maximum number of corpus chunks to score.
+        max_chunks: Score at most this many corpus chunks (applies to both the auto-loaded and
+            a caller-provided corpus).
         model_revision: HuggingFace model revision (commit SHA or tag).
 
     Returns:
@@ -140,7 +224,6 @@ def measure_kv_fidelity(
         ExactZeroError: If KLD and flip rate are exactly 0 (quantization did not engage).
     """
     from mlx_lm import load
-    from mlx_lm.models.cache import QuantizedKVCache, make_prompt_cache
 
     if quantize_start != 0:
         raise QuantFidelityError(
@@ -154,13 +237,6 @@ def measure_kv_fidelity(
     install_memory_caps()  # must precede model load
     _loaded = load(model_id, revision=model_revision)  # pragma: no cover
     model, tokenizer = _loaded[0], _loaded[1]  # pragma: no cover
-    probe_warnings: list[str] = []
-    model_type = str(getattr(getattr(model, "args", None), "model_type", "unknown"))
-    head_dim_warning = _head_dim_gate(
-        head_dim=_kv_head_dim(model), kv_group_size=kv_group_size, model_type=model_type
-    )
-    if head_dim_warning is not None:  # pragma: no cover
-        probe_warnings.append(head_dim_warning)
 
     if corpus is None:  # pragma: no cover
         from mlx_quant_fidelity.corpora.wikitext import load_wikitext2
@@ -169,59 +245,13 @@ def measure_kv_fidelity(
         if len(corpus.chunks) == 0:
             raise CorpusError("the evaluation corpus yielded no chunks; at least one is required.")
 
-    probe_cache = make_prompt_cache(model)  # pragma: no cover
-    n_layers = len(probe_cache)  # pragma: no cover
-    _cache_is_quantizable(probe_cache, group_size=kv_group_size, bits=kv_bits)  # pragma: no cover
-    del probe_cache  # pragma: no cover
-
-    kls: list[mx.array] = []  # pragma: no cover
-    flips: list[mx.array] = []  # pragma: no cover
-    ref_nlls: list[mx.array] = []  # pragma: no cover
-    quant_nlls: list[mx.array] = []  # pragma: no cover
-    for ids in corpus.chunks:  # pragma: no cover
-        ref_cache = make_prompt_cache(model)
-        # stress mode (quantize_start=0): QuantizedKVCache from token 0 — validated by the spike.
-        quant_cache: list[object] = [
-            QuantizedKVCache(group_size=kv_group_size, bits=kv_bits) for _ in range(n_layers)
-        ]
-        kl, flip, ref_nll, quant_nll = _score_chunk(model, ids, ref_cache, quant_cache)
-        mx.eval(kl, flip, ref_nll, quant_nll)
-        kls.append(kl)
-        flips.append(flip)
-        ref_nlls.append(ref_nll)
-        quant_nlls.append(quant_nll)
-        del ref_cache, quant_cache  # drop refs before next chunk
-        mx.clear_cache()
-
-    agg = _aggregate_chunks(kls, flips, ref_nlls, quant_nlls)  # pragma: no cover
-    _check_exact_zero(  # pragma: no cover
-        kl_mean=agg.kl.mean,
-        flip_rate=agg.flip_rate,
-        context=(
-            f"quantization did not engage (quantize_start={quantize_start}; chunk may be "
-            "shorter than the keep-first-N boundary, or the quantized cache was bypassed)"
-        ),
-    )
-
-    return FidelityReport(  # pragma: no cover
+    return score_kv_config(  # pragma: no cover
+        model,
+        corpus,
         model_id=model_id,
         model_revision=model_revision,
         kv_bits=kv_bits,
         kv_group_size=kv_group_size,
         quantize_start=quantize_start,
-        quantize_mode="stress" if quantize_start == 0 else "deployment",
-        kl=agg.kl,
-        flip_rate=agg.flip_rate,
-        perplexity_ref=agg.perplexity_ref,
-        perplexity_quant=agg.perplexity_quant,
-        perplexity_delta=agg.perplexity_quant - agg.perplexity_ref,
-        n_positions=agg.n_positions,
-        n_chunks=len(corpus.chunks),
-        corpus=corpus.provenance,
-        mlx_version=importlib.metadata.version("mlx"),
-        mlx_lm_version=importlib.metadata.version("mlx-lm"),
-        peak_memory_bytes=int(mx.get_peak_memory()),
-        cache_supported=True,
-        verdict=verdict_for(agg.kl.mean, agg.kl.p99, agg.flip_rate),
-        warnings=tuple(probe_warnings),
+        max_chunks=max_chunks,
     )
