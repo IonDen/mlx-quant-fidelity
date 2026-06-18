@@ -1,0 +1,177 @@
+{
+  "budget": null,
+  "budget_pick": null,
+  "corpus": {
+    "bos_policy": "none",
+    "chunk_length": 512,
+    "final_chunk_policy": "drop",
+    "n_tokens": 4096,
+    "name": "wikitext-2-raw",
+    "normalization": "raw",
+    "split": "test",
+    "stride": 512,
+    "tokenizer_id": "mlx-community/Qwen2.5-0.5B-Instruct-4bit"
+  },
+  "dominated": [],
+  "frontier": [
+    "4:64",
+    "4:32",
+    "8:64"
+  ],
+  "mlx_lm_version": "0.31.3",
+  "mlx_version": "0.31.2",
+  "mode": "kv",
+  "model": "mlx-community/Qwen2.5-0.5B-Instruct-4bit",
+  "quantize_mode": "stress",
+  "quantize_start": 0,
+  "reference": null,
+  "results": [
+    {
+      "error_type": null,
+      "excluded_reason": null,
+      "label": "4:32",
+      "message": null,
+      "point": {
+        "cost_bytes": 3840,
+        "label": "4:32",
+        "quality": 1.3413157277812757
+      },
+      "report": {
+        "cache_supported": true,
+        "corpus": {
+          "bos_policy": "none",
+          "chunk_length": 512,
+          "final_chunk_policy": "drop",
+          "n_tokens": 4096,
+          "name": "wikitext-2-raw",
+          "normalization": "raw",
+          "split": "test",
+          "stride": 512,
+          "tokenizer_id": "mlx-community/Qwen2.5-0.5B-Instruct-4bit"
+        },
+        "flip_rate": 0.523238747553816,
+        "kl": {
+          "max": 11.730260848999023,
+          "mean": 1.3413157277812757,
+          "median": 0.8463965058326721,
+          "p99": 6.901805596351629
+        },
+        "kv_bits": 4,
+        "kv_group_size": 32,
+        "mlx_lm_version": "0.31.3",
+        "mlx_version": "0.31.2",
+        "model_id": "mlx-community/Qwen2.5-0.5B-Instruct-4bit",
+        "model_revision": null,
+        "n_chunks": 8,
+        "n_positions": 4088,
+        "peak_memory_bytes": 2308146357,
+        "perplexity_delta": 66.48200288025168,
+        "perplexity_quant": 90.8990374971006,
+        "perplexity_ref": 24.417034616848913,
+        "quantize_mode": "stress",
+        "quantize_start": 0,
+        "verdict": "bad",
+        "warnings": []
+      },
+      "status": "ok"
+    },
+    {
+      "error_type": null,
+      "excluded_reason": null,
+      "label": "4:64",
+      "message": null,
+      "point": {
+        "cost_bytes": 3456,
+        "label": "4:64",
+        "quality": 2.5568467373273984
+      },
+      "report": {
+        "cache_supported": true,
+        "corpus": {
+          "bos_policy": "none",
+          "chunk_length": 512,
+          "final_chunk_policy": "drop",
+          "n_tokens": 4096,
+          "name": "wikitext-2-raw",
+          "normalization": "raw",
+          "split": "test",
+          "stride": 512,
+          "tokenizer_id": "mlx-community/Qwen2.5-0.5B-Instruct-4bit"
+        },
+        "flip_rate": 0.7003424657534246,
+        "kl": {
+          "max": 14.945906639099121,
+          "mean": 2.5568467373273984,
+          "median": 2.1252611875534058,
+          "p99": 8.65246841430665
+        },
+        "kv_bits": 4,
+        "kv_group_size": 64,
+        "mlx_lm_version": "0.31.3",
+        "mlx_version": "0.31.2",
+        "model_id": "mlx-community/Qwen2.5-0.5B-Instruct-4bit",
+        "model_revision": null,
+        "n_chunks": 8,
+        "n_positions": 4088,
+        "peak_memory_bytes": 2307949737,
+        "perplexity_delta": 273.2215467417858,
+        "perplexity_quant": 297.6385813586347,
+        "perplexity_ref": 24.417034616848913,
+        "quantize_mode": "stress",
+        "quantize_start": 0,
+        "verdict": "bad",
+        "warnings": []
+      },
+      "status": "ok"
+    },
+    {
+      "error_type": null,
+      "excluded_reason": null,
+      "label": "8:64",
+      "message": null,
+      "point": {
+        "cost_bytes": 6528,
+        "label": "8:64",
+        "quality": 0.030391460653755028
+      },
+      "report": {
+        "cache_supported": true,
+        "corpus": {
+          "bos_policy": "none",
+          "chunk_length": 512,
+          "final_chunk_policy": "drop",
+          "n_tokens": 4096,
+          "name": "wikitext-2-raw",
+          "normalization": "raw",
+          "split": "test",
+          "stride": 512,
+          "tokenizer_id": "mlx-community/Qwen2.5-0.5B-Instruct-4bit"
+        },
+        "flip_rate": 0.08830724070450098,
+        "kl": {
+          "max": 17.14887046813965,
+          "mean": 0.030391460653755028,
+          "median": 0.011213380843400955,
+          "p99": 0.26707647472620016
+        },
+        "kv_bits": 8,
+        "kv_group_size": 64,
+        "mlx_lm_version": "0.31.3",
+        "mlx_version": "0.31.2",
+        "model_id": "mlx-community/Qwen2.5-0.5B-Instruct-4bit",
+        "model_revision": null,
+        "n_chunks": 8,
+        "n_positions": 4088,
+        "peak_memory_bytes": 2309522601,
+        "perplexity_delta": 0.7008378985959318,
+        "perplexity_quant": 25.117872515444844,
+        "perplexity_ref": 24.417034616848913,
+        "quantize_mode": "stress",
+        "quantize_start": 0,
+        "verdict": "bad",
+        "warnings": []
+      },
+      "status": "ok"
+    }
+  ]
+}

@@ -1,0 +1,139 @@
+{
+  "budget": null,
+  "budget_pick": null,
+  "corpus": {
+    "bos_policy": "none",
+    "chunk_length": 512,
+    "final_chunk_policy": "drop",
+    "n_tokens": 4096,
+    "name": "wikitext-2-raw",
+    "normalization": "raw",
+    "split": "test",
+    "stride": 512,
+    "tokenizer_id": "mlx-community/Qwen2.5-0.5B-Instruct-bf16"
+  },
+  "dominated": [],
+  "frontier": [
+    "mlx-community/Qwen2.5-0.5B-Instruct-4bit",
+    "mlx-community/Qwen2.5-0.5B-Instruct-8bit"
+  ],
+  "mlx_lm_version": "0.31.3",
+  "mlx_version": "0.31.2",
+  "mode": "weight",
+  "model": null,
+  "quantize_mode": null,
+  "quantize_start": null,
+  "reference": "mlx-community/Qwen2.5-0.5B-Instruct-bf16",
+  "results": [
+    {
+      "error_type": null,
+      "excluded_reason": null,
+      "label": "mlx-community/Qwen2.5-0.5B-Instruct-4bit",
+      "message": null,
+      "point": {
+        "cost_bytes": 278064920,
+        "label": "mlx-community/Qwen2.5-0.5B-Instruct-4bit",
+        "quality": 0.22488869270491813
+      },
+      "report": {
+        "corpus": {
+          "bos_policy": "none",
+          "chunk_length": 512,
+          "final_chunk_policy": "drop",
+          "n_tokens": 4096,
+          "name": "wikitext-2-raw",
+          "normalization": "raw",
+          "split": "test",
+          "stride": 512,
+          "tokenizer_id": "mlx-community/Qwen2.5-0.5B-Instruct-bf16"
+        },
+        "flip_rate": 0.25587084148727984,
+        "kl": {
+          "max": 7.436882972717285,
+          "mean": 0.22488869270491813,
+          "median": 0.16596011072397232,
+          "p99": 1.3323794627189656
+        },
+        "mlx_lm_version": "0.31.3",
+        "mlx_version": "0.31.2",
+        "n_chunks": 8,
+        "n_positions": 4088,
+        "peak_memory_bytes": 3287954357,
+        "per_layer": false,
+        "perplexity_delta": 4.425910676938827,
+        "perplexity_quant": 24.417034616848913,
+        "perplexity_ref": 19.991123939910086,
+        "quant_bits": 4,
+        "quant_group_size": 64,
+        "quant_mode": "affine",
+        "quant_model_bytes": 278064920,
+        "quant_model_id": "mlx-community/Qwen2.5-0.5B-Instruct-4bit",
+        "quant_revision": null,
+        "reference_bits": null,
+        "reference_model_bytes": 988097734,
+        "reference_model_id": "mlx-community/Qwen2.5-0.5B-Instruct-bf16",
+        "reference_revision": null,
+        "verdict": "bad",
+        "warnings": [
+          "Assumes both repos share a tokenizer; only vocab_size (and bos/eos ids) were checked \u2014 a divergent token map would be measured as quant drift."
+        ]
+      },
+      "status": "ok"
+    },
+    {
+      "error_type": null,
+      "excluded_reason": null,
+      "label": "mlx-community/Qwen2.5-0.5B-Instruct-8bit",
+      "message": null,
+      "point": {
+        "cost_bytes": 525045902,
+        "label": "mlx-community/Qwen2.5-0.5B-Instruct-8bit",
+        "quality": 0.002360260023649466
+      },
+      "report": {
+        "corpus": {
+          "bos_policy": "none",
+          "chunk_length": 512,
+          "final_chunk_policy": "drop",
+          "n_tokens": 4096,
+          "name": "wikitext-2-raw",
+          "normalization": "raw",
+          "split": "test",
+          "stride": 512,
+          "tokenizer_id": "mlx-community/Qwen2.5-0.5B-Instruct-bf16"
+        },
+        "flip_rate": 0.025440313111545987,
+        "kl": {
+          "max": 0.2557442784309387,
+          "mean": 0.002360260023649466,
+          "median": 0.0013922331854701042,
+          "p99": 0.015392606928944598
+        },
+        "mlx_lm_version": "0.31.3",
+        "mlx_version": "0.31.2",
+        "n_chunks": 8,
+        "n_positions": 4088,
+        "peak_memory_bytes": 3534140341,
+        "per_layer": false,
+        "perplexity_delta": -0.042641041628709075,
+        "perplexity_quant": 19.948482898281377,
+        "perplexity_ref": 19.991123939910086,
+        "quant_bits": 8,
+        "quant_group_size": 64,
+        "quant_mode": "affine",
+        "quant_model_bytes": 525045902,
+        "quant_model_id": "mlx-community/Qwen2.5-0.5B-Instruct-8bit",
+        "quant_revision": null,
+        "reference_bits": null,
+        "reference_model_bytes": 988097734,
+        "reference_model_id": "mlx-community/Qwen2.5-0.5B-Instruct-bf16",
+        "reference_revision": null,
+        "verdict": "good",
+        "warnings": [
+          "Assumes both repos share a tokenizer; only vocab_size (and bos/eos ids) were checked \u2014 a divergent token map would be measured as quant drift."
+        ]
+      },
+      "status": "ok"
+    }
+  ]
+}

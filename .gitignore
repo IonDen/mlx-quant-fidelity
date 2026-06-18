@@ -4,7 +4,9 @@ docs/superpowers/
 docs/backlog/
 /CLAUDE.md
 /_spike/
+/_artifacts/compare/
 .coverage
+coverage.json
 .mypy_cache/
 .pytest_cache/
 .ruff_cache/

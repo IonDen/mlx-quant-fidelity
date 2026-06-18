@@ -3,6 +3,23 @@
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0]
+
+Adds a `compare` command that ranks a set of quantizations on a memory-normalized Pareto frontier — quality per byte, not a raw-metric sort.
+
+### Added
+
+- `compare weights <repos...> --reference <ref>` — scores N weight-quant repos against a shared reference, ranks them by quality per byte, and flags any configuration that is both worse quality and more expensive than another on the list.
+- `compare kv <model> --configs b:g,b:g,...` — ranks N KV-cache `(bits, group_size)` configurations on one model, loading the model once, on quality per KV-byte-per-token.
+- Budget filter `--max-kld X` returns the cheapest configuration whose mean KLD stays under threshold; `--min-tier good|marginal|bad` returns the cheapest that meets the verdict tier.
+- Failed or unrankable configurations are reported in isolation rather than aborting the run.
+- `compare_weight_fidelity`, `compare_kv_fidelity`, and `ComparisonReport` Python API.
+- `docs/ranking-principles.md` explains how each axis is computed, what Pareto domination means in practice, and where the ranking has limits.
+
+### Fixed
+
+- KV probe applies `max_chunks` to a caller-provided corpus, matching the weight probe.
+
 ## [0.2.0]
 
 Adds weight-quantization fidelity and hardens the KV probe.
