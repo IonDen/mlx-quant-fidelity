@@ -1,6 +1,5 @@
 import json
 
-import pytest
 from tests.test_compare_report import _wreport
 
 from mlx_quant_fidelity.runners import _worker
@@ -35,16 +34,26 @@ def test_worker_writes_failed_envelope_on_domain_error(tmp_path, monkeypatch):
     assert "vocab_size" in env["message"]
 
 
-def test_worker_propagates_non_domain_error(tmp_path, monkeypatch):
+def test_worker_isolates_non_domain_error(tmp_path, monkeypatch):
+    """A non-QuantFidelityError from measure_weight_fidelity is isolated into a failed envelope.
+
+    The worker writes a failed envelope with the exception's type name and message and returns 0
+    (the same contract as a domain error), so any measurement failure is data, not a crash.
+    KeyboardInterrupt / SystemExit are NOT caught — only Exception subclasses.
+    """
     out = tmp_path / "q.json"
 
     def boom(*a, **k):
         raise RuntimeError("unexpected")
 
     monkeypatch.setattr(_worker, "measure_weight_fidelity", boom)
-    with pytest.raises(RuntimeError, match="unexpected"):
-        _worker.run_weight_worker(["--quant", "q", "--reference", "r", "--out", str(out)])
-    assert not out.exists()  # a non-domain crash writes no envelope; it must propagate
+    rc = _worker.run_weight_worker(["--quant", "q", "--reference", "r", "--out", str(out)])
+    assert rc == 0
+    assert out.exists()
+    env = json.loads(out.read_text())
+    assert env["status"] == "failed"
+    assert env["error_type"] == "RuntimeError"
+    assert "unexpected" in env["message"]
 
 
 def test_worker_forwards_quant_reference_and_max_chunks(tmp_path, monkeypatch):
