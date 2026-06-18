@@ -129,7 +129,7 @@ The weight probe works the same way with two models instead of two caches: a qua
 
 ## Status
 
-0.2.0, released on PyPI as `mlx-quant-fidelity` — KV-cache and weight-quantization fidelity probes (CLI + Python API, JSON and Markdown reports). Downstream-task accuracy, deployment mode, and memory-normalized method ranking are on the [roadmap](ROADMAP.md).
+0.3.0, released on PyPI as `mlx-quant-fidelity` — adds a `compare` command for memory-normalized Pareto ranking of KV-cache and weight quantizations. 0.2.0 added KV-cache and weight-quantization fidelity probes. Downstream-task accuracy, deployment mode, and more are on the [roadmap](ROADMAP.md).
 
 ## License
 
