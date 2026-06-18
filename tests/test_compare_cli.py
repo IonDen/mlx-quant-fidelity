@@ -57,3 +57,81 @@ def test_compare_kv_rejects_bad_config(monkeypatch, capsys):
     rc = cli.main(["compare", "kv", "m", "--configs", "oops"])
     assert rc == 2
     assert "configs" in capsys.readouterr().err.lower()
+
+
+def test_compare_kv_rejects_non_digit_group_size(monkeypatch, capsys):
+    rc = cli.main(["compare", "kv", "m", "--configs", "4:abc"])
+    assert rc == 2
+    assert "configs" in capsys.readouterr().err.lower()
+
+
+def test_compare_kv_rejects_zero_group_size(monkeypatch, capsys):
+    rc = cli.main(["compare", "kv", "m", "--configs", "4:0"])
+    assert rc == 2
+    assert "configs" in capsys.readouterr().err.lower()
+
+
+def test_compare_weights_forwards_filter_kwargs(monkeypatch, capsys):
+    captured = {}
+
+    def fake(quant_ids, reference, **kw):
+        captured["kw"] = kw
+        return _fake_comparison("weight")
+
+    monkeypatch.setattr(cli, "compare_weight_fidelity", fake)
+    rc = cli.main(
+        [
+            "compare",
+            "weights",
+            "q4",
+            "q6",
+            "--reference",
+            "ref",
+            "--min-tier",
+            "good",
+            "--max-kld",
+            "0.5",
+        ]
+    )
+    assert rc == 0
+    assert captured["kw"]["min_tier"] == "good"
+    assert captured["kw"]["max_kld"] == 0.5
+
+
+def test_compare_kv_forwards_filter_kwargs(monkeypatch, capsys):
+    captured = {}
+
+    def fake(model, configs, **kw):
+        captured["kw"] = kw
+        return _fake_comparison("kv")
+
+    monkeypatch.setattr(cli, "compare_kv_fidelity", fake)
+    rc = cli.main(
+        [
+            "compare",
+            "kv",
+            "m",
+            "--configs",
+            "4:32,8:64",
+            "--min-tier",
+            "good",
+            "--max-kld",
+            "0.3",
+            "--quantize-start",
+            "0",
+        ]
+    )
+    assert rc == 0
+    assert captured["kw"]["min_tier"] == "good"
+    assert captured["kw"]["max_kld"] == 0.3
+    assert captured["kw"]["quantize_start"] == 0
+
+
+def test_compare_fn_value_error_surfaces_as_exit_2(monkeypatch, capsys):
+    def boom(quant_ids, reference, **kw):
+        raise ValueError("compare needs at least 2 configs")
+
+    monkeypatch.setattr(cli, "compare_weight_fidelity", boom)
+    rc = cli.main(["compare", "weights", "q4", "--reference", "ref"])
+    assert rc == 2
+    assert "compare needs at least 2 configs" in capsys.readouterr().err
