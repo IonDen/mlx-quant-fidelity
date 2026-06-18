@@ -12,6 +12,7 @@ from pathlib import Path
 
 from mlx_quant_fidelity._memory_caps import install_memory_caps
 from mlx_quant_fidelity.probes.weights import measure_weight_fidelity
+from mlx_quant_fidelity.runners.compare import _PARTIAL_SCHEMA_VERSION
 
 
 def run_weight_worker(argv: list[str] | None = None) -> int:
@@ -23,11 +24,27 @@ def run_weight_worker(argv: list[str] | None = None) -> int:
     parser.add_argument("--max-chunks", type=int, default=None)
     args = parser.parse_args(argv)
     install_memory_caps()  # after arg validation, before any model load
+    run_identity: dict[str, object] = {
+        "mode": "weight",
+        "quant": args.quant,
+        "reference": args.reference,
+        "max_chunks": args.max_chunks,
+        "schema_version": _PARTIAL_SCHEMA_VERSION,
+    }
     try:
         report = measure_weight_fidelity(args.quant, args.reference, max_chunks=args.max_chunks)
-        envelope: dict[str, object] = {"status": "ok", "report": dataclasses.asdict(report)}
+        envelope: dict[str, object] = {
+            "status": "ok",
+            "report": dataclasses.asdict(report),
+            "run_identity": run_identity,
+        }
     except Exception as exc:  # any measurement failure is data, not a crash
-        envelope = {"status": "failed", "error_type": type(exc).__name__, "message": str(exc)}
+        envelope = {
+            "status": "failed",
+            "error_type": type(exc).__name__,
+            "message": str(exc),
+            "run_identity": run_identity,
+        }
     Path(args.out).write_text(json.dumps(envelope))
     return 0
 

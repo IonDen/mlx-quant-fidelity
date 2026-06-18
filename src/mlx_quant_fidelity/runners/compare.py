@@ -27,6 +27,9 @@ if TYPE_CHECKING:
 
 _asdict = _dc.asdict
 
+# Bump when the partial format or a cost formula changes so that old partials are rejected.
+_PARTIAL_SCHEMA_VERSION = 1
+
 
 def _budget_label(max_kld: float | None, min_tier: str | None) -> str | None:
     parts = []
@@ -215,17 +218,18 @@ def compare_weight_fidelity(
                 env = json.loads(partial.read_text())
             except (json.JSONDecodeError, OSError):
                 env = None
-        # Stale-identity guard: a 'failed' partial carries no stored identity — recompute.
-        # An 'ok' partial whose reference_model_id doesn't match — recompute.
-        if env is not None and env.get("status") == "ok":
-            stored_report = env.get("report")
-            if (
-                not isinstance(stored_report, dict)
-                or stored_report.get("reference_model_id") != reference_model_id
-            ):
+        # Full run-identity guard: recompute if the partial is absent, has a non-ok status,
+        # or its stored run_identity doesn't match the current call's full identity.
+        if env is not None:
+            expected_identity: dict[str, object] = {
+                "mode": "weight",
+                "quant": repo,
+                "reference": reference_model_id,
+                "max_chunks": max_chunks,
+                "schema_version": _PARTIAL_SCHEMA_VERSION,
+            }
+            if env.get("run_identity") != expected_identity:
                 env = None
-        elif env is not None:
-            env = None  # failed or unknown status partial — recompute
         if env is None:
             env = _run_weight_target(
                 repo, reference=reference_model_id, partial_path=partial, max_chunks=max_chunks
@@ -385,11 +389,11 @@ def compare_kv_fidelity(
 
     # ── Determine which configs need scoring (resume: skip valid partials) ────
     def _read_partial(bits: int, gs: int) -> dict[str, object] | None:
-        """Return parsed envelope if the partial is valid and measured against this model.
+        """Return parsed envelope if the partial matches the current run's full identity.
 
-        Returns None (recompute) when the partial is absent, corrupt/truncated, a 'failed'
-        envelope, or an 'ok' envelope whose report["model_id"] differs from model_id
-        (stale — measured against a different model).
+        Returns None (recompute) when the partial is absent, corrupt/truncated, has a
+        non-ok status, or its stored run_identity doesn't exactly match the expected
+        identity for this config + current call arguments.
         """
         partial = out_dir / _kv_partial_filename(bits, gs)
         if not partial.exists():
@@ -398,14 +402,19 @@ def compare_kv_fidelity(
             raw: dict[str, object] = json.loads(partial.read_text())
         except (json.JSONDecodeError, OSError):
             return None  # corrupt/truncated — treat as absent, recompute
-        # Stale-identity guard: a 'failed' partial carries no stored identity — recompute.
-        # An 'ok' partial whose model_id doesn't match — recompute.
         if raw.get("status") != "ok":
             return None
-        stored_report = raw.get("report")
-        if not isinstance(stored_report, dict):
-            return None
-        if stored_report.get("model_id") != model_id:
+        expected_identity: dict[str, object] = {
+            "mode": "kv",
+            "model_id": model_id,
+            "model_revision": model_revision,
+            "bits": bits,
+            "group_size": gs,
+            "quantize_start": quantize_start,
+            "max_chunks": max_chunks,
+            "schema_version": _PARTIAL_SCHEMA_VERSION,
+        }
+        if raw.get("run_identity") != expected_identity:
             return None
         return raw
 
@@ -445,10 +454,21 @@ def compare_kv_fidelity(
                     )
                 else:
                     cost = None
+                run_identity: dict[str, object] = {
+                    "mode": "kv",
+                    "model_id": model_id,
+                    "model_revision": model_revision,
+                    "bits": bits,
+                    "group_size": gs,
+                    "quantize_start": quantize_start,
+                    "max_chunks": max_chunks,
+                    "schema_version": _PARTIAL_SCHEMA_VERSION,
+                }
                 envelope: dict[str, object] = {
                     "status": "ok",
                     "report": _asdict(fid_report),
                     "cost": cost,
+                    "run_identity": run_identity,
                 }
             except Exception as exc:  # any config failure is data, not abort
                 envelope = {
