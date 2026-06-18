@@ -5,11 +5,13 @@ from __future__ import annotations
 import dataclasses
 import json
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
+
+from mlx_quant_fidelity.corpora.provenance import CorpusProvenance
+from mlx_quant_fidelity.metrics import ScalarSummary
 
 if TYPE_CHECKING:
-    from mlx_quant_fidelity.corpora.provenance import CorpusProvenance
-    from mlx_quant_fidelity.metrics import ScalarSummary
+    from mlx_quant_fidelity.ranking import RankPoint
 
 
 @dataclass(frozen=True, slots=True)
@@ -115,6 +117,17 @@ def render_weight_markdown(report: WeightFidelityReport) -> str:
     return "\n".join(lines)
 
 
+def fidelity_report_from_dict(d: dict[str, object]) -> FidelityReport:
+    """Rehydrate a FidelityReport from `dataclasses.asdict` output (KV compare partials)."""
+    kl = d["kl"]
+    corpus = d["corpus"]
+    assert isinstance(kl, dict)
+    assert isinstance(corpus, dict)
+    fields = {**d, "kl": ScalarSummary(**kl), "corpus": CorpusProvenance(**corpus)}
+    fields["warnings"] = tuple(cast("list[str]", fields.get("warnings") or []))
+    return FidelityReport(**fields)  # type: ignore[arg-type]
+
+
 def render_markdown(report: FidelityReport) -> str:
     """Human-readable report. Always qualifies the number by corpus + context length."""
     c = report.corpus
@@ -145,3 +158,93 @@ def render_markdown(report: FidelityReport) -> str:
             *([f"\n> Note: {w}" for w in report.warnings]),
         ]
     )
+
+
+@dataclass(frozen=True, slots=True)
+class ComparisonTargetResult:
+    """One target in a comparison: a successful (rankable/unrankable) or failed measurement."""
+
+    label: str
+    status: str  # "ok" | "failed"
+    report: FidelityReport | WeightFidelityReport | None
+    point: RankPoint | None  # set iff status=="ok" AND cost resolved (rankable)
+    excluded_reason: str | None  # e.g. "cost unavailable"; None when ranked
+    error_type: str | None  # set iff status=="failed"
+    message: str | None  # set iff status=="failed"
+
+
+@dataclass(frozen=True, slots=True)
+class ComparisonReport:
+    """A memory-normalized method comparison: ranked frontier + dominated + optional budget pick."""
+
+    mode: str  # "weight" | "kv"
+    reference: str | None  # reference repo (weight) or None (kv)
+    model: str | None  # the single model (kv) or None (weight)
+    corpus: CorpusProvenance | None
+    quantize_start: int | None
+    quantize_mode: str | None
+    budget: str | None  # human description of the applied budget, or None
+    results: tuple[ComparisonTargetResult, ...]
+    frontier: tuple[str, ...]
+    dominated: tuple[tuple[str, str], ...]  # (label, dominator)
+    budget_pick: str | None
+    mlx_version: str
+    mlx_lm_version: str
+
+
+def weight_report_from_dict(d: dict[str, object]) -> WeightFidelityReport:
+    """Rehydrate a WeightFidelityReport from `dataclasses.asdict` output (subprocess partials)."""
+    kl = d["kl"]
+    corpus = d["corpus"]
+    assert isinstance(kl, dict)
+    assert isinstance(corpus, dict)
+    fields = {**d, "kl": ScalarSummary(**kl), "corpus": CorpusProvenance(**corpus)}
+    fields["warnings"] = tuple(cast("list[str]", fields.get("warnings") or []))
+    return WeightFidelityReport(**fields)  # type: ignore[arg-type]
+
+
+def render_comparison_json(report: ComparisonReport) -> str:
+    """Stable, sorted JSON for a comparison report."""
+    return json.dumps(dataclasses.asdict(report), indent=2, sort_keys=True)
+
+
+def _human_bytes(n: int | None) -> str:
+    return f"{n / 1e9:.2f} GB" if n is not None else "—"
+
+
+def render_comparison_markdown(report: ComparisonReport) -> str:
+    """Human-readable comparison: ranked table (cost ascending) + excluded rows + recommendation."""
+    target = report.reference or report.model or "?"
+    lines = [
+        f"# Quant comparison ({report.mode}) vs `{target}`",
+        "",
+        "| target | cost | KL mean | KL p99 | flip | verdict | frontier |",
+        "|---|---|---|---|---|---|---|",
+    ]
+    ranked = [r for r in report.results if r.point is not None]
+    for r in sorted(ranked, key=lambda r: r.point.cost_bytes):  # type: ignore[union-attr]
+        assert r.report is not None
+        assert r.point is not None
+        mark = "✓" if r.label in report.frontier else "✗"
+        lines.append(
+            f"| `{r.label}` | {_human_bytes(r.point.cost_bytes)} | {r.report.kl.mean:.4f} | "
+            f"{r.report.kl.p99:.4f} | {r.report.flip_rate:.4f} | {r.report.verdict} | {mark} |"
+        )
+    excluded = [r for r in report.results if r.point is None]
+    if excluded:
+        lines += ["", "**Excluded (not ranked):**"]
+        for r in excluded:
+            why = r.excluded_reason if r.status == "ok" else f"{r.error_type}: {r.message}"
+            lines.append(f"- `{r.label}` — {why}")
+    lines += [""]
+    if report.budget_pick is not None:
+        lines.append(f"**Recommended** (cheapest clearing {report.budget}): `{report.budget_pick}`")
+    elif report.budget is not None:
+        lines.append(f"No target clears the budget ({report.budget}).")
+    if report.mode == "weight":
+        lines += [
+            "",
+            "> Weight compare reloads the reference once per target — N targets ≈ Nx a "
+            "single `weights` run. Fidelity is corpus- and context-length-specific.",
+        ]
+    return "\n".join(lines)

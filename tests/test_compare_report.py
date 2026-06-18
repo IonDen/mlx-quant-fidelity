@@ -1,0 +1,209 @@
+import dataclasses
+import json
+
+from mlx_quant_fidelity.corpora.provenance import CorpusProvenance
+from mlx_quant_fidelity.metrics import ScalarSummary
+from mlx_quant_fidelity.ranking import RankPoint
+from mlx_quant_fidelity.report import (
+    ComparisonReport,
+    ComparisonTargetResult,
+    FidelityReport,
+    WeightFidelityReport,
+    fidelity_report_from_dict,
+    render_comparison_json,
+    render_comparison_markdown,
+    weight_report_from_dict,
+)
+
+
+def _wreport(label: str, kl_mean: float, cost: int) -> WeightFidelityReport:
+    return WeightFidelityReport(
+        quant_model_id=label,
+        quant_revision=None,
+        reference_model_id="ref",
+        reference_revision=None,
+        quant_bits=4,
+        quant_group_size=64,
+        quant_mode="affine",
+        per_layer=False,
+        reference_bits=None,
+        kl=ScalarSummary(kl_mean, kl_mean, kl_mean, kl_mean),
+        flip_rate=0.02,
+        perplexity_ref=10.0,
+        perplexity_quant=10.1,
+        perplexity_delta=0.1,
+        n_positions=10,
+        n_chunks=2,
+        corpus=CorpusProvenance(
+            "wikitext-2-raw", "test", "ref", 512, 512, "none", "drop", "raw", 10
+        ),
+        mlx_version="0.21",
+        mlx_lm_version="0.31.3",
+        peak_memory_bytes=1,
+        quant_model_bytes=cost,
+        reference_model_bytes=8000,
+        verdict="good",
+        warnings=(),
+    )
+
+
+def _freport() -> FidelityReport:
+    return FidelityReport(
+        model_id="m",
+        model_revision="abc123",
+        kv_bits=4,
+        kv_group_size=64,
+        quantize_start=0,
+        quantize_mode="stress",
+        kl=ScalarSummary(0.02, 0.01, 0.2, 1.5),
+        flip_rate=0.03,
+        perplexity_ref=10.0,
+        perplexity_quant=10.4,
+        perplexity_delta=0.4,
+        n_positions=1000,
+        n_chunks=2,
+        corpus=CorpusProvenance(
+            "wikitext-2-raw", "test", "tok", 512, 512, "none", "drop", "raw", 1024
+        ),
+        mlx_version="0.21",
+        mlx_lm_version="0.31.3",
+        peak_memory_bytes=123,
+        cache_supported=True,
+        verdict="marginal",
+        warnings=("bundles quantized-SDPA numerics",),
+    )
+
+
+def _report() -> ComparisonReport:
+    ok = ComparisonTargetResult(
+        label="q4",
+        status="ok",
+        report=_wreport("q4", 0.09, 4200),
+        point=RankPoint("q4", 0.09, 4200),
+        excluded_reason=None,
+        error_type=None,
+        message=None,
+    )
+    unrankable = ComparisonTargetResult(
+        label="q4-nobytes",
+        status="ok",
+        report=_wreport("q4-nobytes", 0.08, 0),
+        point=None,
+        excluded_reason="cost unavailable",
+        error_type=None,
+        message=None,
+    )
+    failed = ComparisonTargetResult(
+        label="q2",
+        status="failed",
+        report=None,
+        point=None,
+        excluded_reason=None,
+        error_type="ModelMismatchError",
+        message="vocab_size mismatch",
+    )
+    return ComparisonReport(
+        mode="weight",
+        reference="ref",
+        model=None,
+        corpus=_wreport("q4", 0.09, 4200).corpus,
+        quantize_start=None,
+        quantize_mode=None,
+        budget="--min-tier good",
+        results=(ok, unrankable, failed),
+        frontier=("q4",),
+        dominated=(),
+        budget_pick="q4",
+        mlx_version="0.21",
+        mlx_lm_version="0.31.3",
+    )
+
+
+def test_comparison_json_round_trips_status() -> None:
+    out = json.loads(render_comparison_json(_report()))
+    statuses = {r["label"]: r["status"] for r in out["results"]}
+    assert statuses == {"q4": "ok", "q4-nobytes": "ok", "q2": "failed"}
+    assert out["frontier"] == ["q4"]
+    assert out["budget_pick"] == "q4"
+
+
+def test_comparison_markdown_shows_all_three_row_kinds() -> None:
+    md = render_comparison_markdown(_report())
+    assert "q4" in md
+    assert "cost unavailable" in md
+    assert "ModelMismatchError" in md
+    assert "Recommended" in md  # the budget-pick line
+
+
+def test_weight_report_from_dict_round_trip() -> None:
+    original = _wreport("q4", 0.09, 4200)
+    rebuilt = weight_report_from_dict(dataclasses.asdict(original))
+    assert rebuilt == original
+
+
+def test_fidelity_report_from_dict_round_trip() -> None:
+    original = _freport()
+    rebuilt = fidelity_report_from_dict(dataclasses.asdict(original))
+    assert rebuilt == original
+
+
+def test_comparison_markdown_no_budget_pick_shows_no_target_message() -> None:
+    """Covers the `elif budget is not None` branch (budget set, no qualifying pick)."""
+    ok = ComparisonTargetResult(
+        label="q4",
+        status="ok",
+        report=_wreport("q4", 0.09, 4200),
+        point=RankPoint("q4", 0.09, 4200),
+        excluded_reason=None,
+        error_type=None,
+        message=None,
+    )
+    report = ComparisonReport(
+        mode="weight",
+        reference="ref",
+        model=None,
+        corpus=None,
+        quantize_start=None,
+        quantize_mode=None,
+        budget="--min-tier excellent",
+        results=(ok,),
+        frontier=("q4",),
+        dominated=(),
+        budget_pick=None,  # no pick
+        mlx_version="0.21",
+        mlx_lm_version="0.31.3",
+    )
+    md = render_comparison_markdown(report)
+    assert "No target clears the budget" in md
+    assert "--min-tier excellent" in md
+
+
+def test_comparison_markdown_kv_mode_omits_weight_footer() -> None:
+    """Covers the `mode != 'weight'` branch — KV mode has no weight-reload footer."""
+    ok = ComparisonTargetResult(
+        label="kv4",
+        status="ok",
+        report=_wreport("kv4", 0.05, 0),
+        point=RankPoint("kv4", 0.05, 0),
+        excluded_reason=None,
+        error_type=None,
+        message=None,
+    )
+    report = ComparisonReport(
+        mode="kv",
+        reference=None,
+        model="org/model",
+        corpus=None,
+        quantize_start=0,
+        quantize_mode="stress",
+        budget=None,
+        results=(ok,),
+        frontier=("kv4",),
+        dominated=(),
+        budget_pick=None,
+        mlx_version="0.21",
+        mlx_lm_version="0.31.3",
+    )
+    md = render_comparison_markdown(report)
+    assert "Weight compare" not in md
+    assert "kv" in md
