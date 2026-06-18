@@ -27,6 +27,10 @@ def _parse_kv_configs(raw: str) -> list[tuple[int, int]]:
         bits_s, sep, gs_s = item.partition(":")
         if not sep or not bits_s.isdigit() or not gs_s.isdigit():
             raise ValueError(f"--configs entry {item!r} must be 'bits:group_size' (e.g. 4:64).")
+        if int(bits_s) <= 0 or int(gs_s) <= 0:
+            raise ValueError(
+                f"--configs entry {item!r}: bits and group_size must be positive integers."
+            )
         configs.append((int(bits_s), int(gs_s)))
     return configs
 
@@ -106,7 +110,7 @@ def main(argv: list[str] | None = None) -> int:
                 if args.format == "json"
                 else render_comparison_markdown(creport)
             )
-        else:  # compare kv
+        elif args.compare_mode == "kv":
             try:
                 configs = _parse_kv_configs(args.configs)
             except ValueError as exc:
@@ -125,7 +129,11 @@ def main(argv: list[str] | None = None) -> int:
                 if args.format == "json"
                 else render_comparison_markdown(creport)
             )
-    except QuantFidelityError as exc:
+        else:
+            raise AssertionError(  # pragma: no cover
+                f"unhandled compare_mode: {args.compare_mode!r}"
+            )
+    except (QuantFidelityError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
     print(out)

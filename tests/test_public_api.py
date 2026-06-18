@@ -6,3 +6,12 @@ def test_public_exports():
     assert hasattr(qf, "WeightFidelityReport")
     assert "measure_weight_fidelity" in qf.__all__
     assert "WeightFidelityReport" in qf.__all__
+
+
+def test_compare_public_exports():
+    assert hasattr(qf, "compare_weight_fidelity")
+    assert hasattr(qf, "compare_kv_fidelity")
+    assert hasattr(qf, "ComparisonReport")
+    assert "compare_weight_fidelity" in qf.__all__
+    assert "compare_kv_fidelity" in qf.__all__
+    assert "ComparisonReport" in qf.__all__
