@@ -144,3 +144,11 @@ See [docs/measurement-principles.md](docs/measurement-principles.md) for the zer
 ## License
 
 [Apache-2.0](LICENSE).
+
+## Sister projects
+
+Other MLX libraries for Apple Silicon:
+
+- [mlx-taef](https://github.com/IonDen/mlx-taef) — tiny autoencoders for fast diffusion-latent previews and low-memory decode (FLUX / SD).
+- [mlx-teacache](https://github.com/IonDen/mlx-teacache) — TeaCache residual caching to skip redundant FLUX denoising steps.
+- [mlx-model-doctor](https://github.com/IonDen/mlx-model-doctor) — validate an MLX / Hugging Face model repo before you load it (config, tokenizer, safetensors, memory).
