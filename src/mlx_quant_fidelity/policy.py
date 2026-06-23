@@ -43,10 +43,13 @@ def verdict_for(
 
 
 _TIER_RANK = {"bad": 0, "marginal": 1, "good": 2}
+VALID_VERDICTS = frozenset(_TIER_RANK)
 
 
 def tier_rank(verdict: str) -> int:
     """Ordinal rank of a verdict for >= comparisons ('bad' < 'marginal' < 'good')."""
+    if verdict not in _TIER_RANK:
+        raise ValueError(f"unknown verdict {verdict!r}; expected one of {sorted(_TIER_RANK)}")
     return _TIER_RANK[verdict]
 
 

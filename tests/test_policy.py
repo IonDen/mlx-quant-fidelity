@@ -81,3 +81,12 @@ def test_qualifies_anded_and_default_true():
 def test_qualifies_min_tier_marginal_boundary():
     assert qualifies(kl_mean=0.05, verdict="marginal", max_kld=None, min_tier="marginal") is True
     assert qualifies(kl_mean=0.05, verdict="bad", max_kld=None, min_tier="marginal") is False
+
+
+def test_tier_rank_rejects_unknown_verdict():
+    import pytest
+
+    from mlx_quant_fidelity.policy import tier_rank
+
+    with pytest.raises(ValueError, match="unknown verdict"):
+        tier_rank("nonsense")
