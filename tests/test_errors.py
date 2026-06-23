@@ -22,3 +22,10 @@ def test_message_preserved():
 def test_new_errors_are_quant_fidelity_errors():
     assert issubclass(ModelMismatchError, QuantFidelityError)
     assert issubclass(InsufficientMemoryError, QuantFidelityError)
+
+
+def test_compare_config_error_is_quant_fidelity_error():
+    from mlx_quant_fidelity.errors import CompareConfigError, QuantFidelityError
+
+    assert issubclass(CompareConfigError, QuantFidelityError)
+    assert issubclass(CompareConfigError, ValueError)  # documented back-compat contract

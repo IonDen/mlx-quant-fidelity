@@ -27,3 +27,11 @@ class ModelMismatchError(QuantFidelityError):
 
 class InsufficientMemoryError(QuantFidelityError):
     """The two models' combined size exceeds the device's recommended working set."""
+
+
+class CompareConfigError(QuantFidelityError, ValueError):
+    """Invalid `compare` invocation arguments (target/config count, duplicates, malformed ids).
+
+    Subclasses ValueError too, preserving the documented `Raises: ValueError` contract so
+    existing callers that catch ValueError around the public compare functions keep working.
+    """
