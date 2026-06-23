@@ -12,6 +12,7 @@ import mlx.core as mx
 
 from mlx_quant_fidelity._memory_caps import install_memory_caps
 from mlx_quant_fidelity.costs import kv_bytes_per_token
+from mlx_quant_fidelity.errors import CompareConfigError
 from mlx_quant_fidelity.policy import qualifies
 from mlx_quant_fidelity.probes.kv import _kv_head_dim, score_kv_config
 from mlx_quant_fidelity.ranking import RankPoint, budget_pick, dominated_by, pareto_frontier
@@ -100,6 +101,35 @@ def _partial_filename(repo: str) -> str:
     return repo.replace("/", "_") + ".json"
 
 
+def _validate_compare_weights_args(quant_model_ids: list[str]) -> None:
+    """Validate weight-compare arguments. Raise CompareConfigError on bad input."""
+    if len(quant_model_ids) < 2:
+        raise CompareConfigError(
+            "compare needs at least 2 quant targets; use the `weights` probe for one."
+        )
+    labels = [_label_for_repo(r) for r in quant_model_ids]
+    if len(set(labels)) != len(labels):
+        duplicates = [lbl for lbl in labels if labels.count(lbl) > 1]
+        raise CompareConfigError(
+            f"duplicate quant_model_ids produce the same label: {set(duplicates)}"
+        )
+    for repo in quant_model_ids:
+        if "\x00" in repo:
+            raise CompareConfigError(f"repo id contains a NUL byte: {repo!r}")
+        if len(_partial_filename(repo).encode()) > 255:
+            raise CompareConfigError(
+                f"repo id {repo!r} produces a partial filename exceeding 255 bytes"
+            )
+    filenames = [_partial_filename(r) for r in quant_model_ids]
+    seen: dict[str, str] = {}
+    for repo, fname in zip(quant_model_ids, filenames, strict=True):
+        if fname in seen:
+            raise CompareConfigError(
+                f"partial-filename collision: {repo!r} and {seen[fname]!r} both map to {fname!r}"
+            )
+        seen[fname] = repo
+
+
 def _run_weight_target(
     quant: str, reference: str, partial_path: Path, max_chunks: int | None
 ) -> dict[str, object]:  # pragma: no cover - spawns a subprocess; covered by --run-slow
@@ -182,28 +212,12 @@ def compare_weight_fidelity(
 
     Subprocess-per-target (each loads reference + quant); resumes by skipping targets whose
     partial JSON already exists. Mismatched/unrankable targets are isolated, not aborted.
+
+    Raises:
+        CompareConfigError: If fewer than 2 targets, duplicate ids, malformed repo ids, or
+            filename collisions. Subclasses ValueError for backward compatibility.
     """
-    if len(quant_model_ids) < 2:
-        raise ValueError("compare needs at least 2 quant targets; use the `weights` probe for one.")
-    labels = [_label_for_repo(r) for r in quant_model_ids]
-    if len(set(labels)) != len(labels):
-        duplicates = [lbl for lbl in labels if labels.count(lbl) > 1]
-        raise ValueError(f"duplicate quant_model_ids produce the same label: {set(duplicates)}")
-    # fix 5: reject malformed repo ids before any filesystem touch
-    for repo in quant_model_ids:
-        if "\x00" in repo:
-            raise ValueError(f"repo id contains a NUL byte: {repo!r}")
-        if len(_partial_filename(repo).encode()) > 255:
-            raise ValueError(f"repo id {repo!r} produces a partial filename exceeding 255 bytes")
-    # fix 2: filename-collision guard — distinct labels can still map to the same partial file
-    filenames = [_partial_filename(r) for r in quant_model_ids]
-    seen: dict[str, str] = {}
-    for repo, fname in zip(quant_model_ids, filenames, strict=True):
-        if fname in seen:
-            raise ValueError(
-                f"partial-filename collision: {repo!r} and {seen[fname]!r} both map to {fname!r}"
-            )
-        seen[fname] = repo
+    _validate_compare_weights_args(quant_model_ids)
     out_dir = artifacts_dir or Path("_artifacts/compare/weight")
     out_dir.mkdir(parents=True, exist_ok=True)
     results: list[ComparisonTargetResult] = []
@@ -367,7 +381,8 @@ def compare_kv_fidelity(
         A ComparisonReport with Pareto frontier, dominated map, and optional budget pick.
 
     Raises:
-        ValueError: If fewer than 2 configs, quantize_start != 0, max_chunks < 1, or duplicates.
+        CompareConfigError: If fewer than 2 configs, quantize_start != 0, max_chunks < 1,
+            or duplicate configs. Subclasses ValueError for backward compatibility.
     """
     # ── Validation guards (score_kv_config has none; must live here) ──────────
     if len(configs) < 2:

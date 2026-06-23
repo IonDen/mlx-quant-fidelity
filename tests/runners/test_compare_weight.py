@@ -4,6 +4,7 @@ import json
 import pytest
 from tests.test_compare_report import _wreport
 
+from mlx_quant_fidelity.errors import CompareConfigError
 from mlx_quant_fidelity.runners import compare as cmp
 
 
@@ -68,12 +69,12 @@ def test_compare_weight_failed_target_isolated(monkeypatch, tmp_path):
 
 
 def test_compare_weight_requires_two_targets(tmp_path):
-    with pytest.raises(ValueError, match="at least 2"):
+    with pytest.raises(CompareConfigError, match="at least 2"):
         cmp.compare_weight_fidelity(["q8"], "ref", artifacts_dir=tmp_path)
 
 
 def test_compare_weight_rejects_duplicate_ids(tmp_path):
-    with pytest.raises(ValueError, match="duplicate"):
+    with pytest.raises(CompareConfigError, match="duplicate"):
         cmp.compare_weight_fidelity(["q8", "q8"], "ref", artifacts_dir=tmp_path)
 
 
@@ -122,20 +123,20 @@ def test_compare_weight_corrupt_partial_reruns(monkeypatch, tmp_path):
 
 def test_compare_weight_rejects_filename_collision(tmp_path):
     """'a/b' and 'a_b' map to the same partial filename — must raise before any spawn."""
-    with pytest.raises(ValueError, match="collision"):
+    with pytest.raises(CompareConfigError, match="collision"):
         cmp.compare_weight_fidelity(["a/b", "a_b"], "ref", artifacts_dir=tmp_path)
 
 
 def test_compare_weight_rejects_nul_in_repo_id(tmp_path):
     """A NUL byte in a repo id must be rejected up front."""
-    with pytest.raises(ValueError, match="NUL"):
+    with pytest.raises(CompareConfigError, match="NUL"):
         cmp.compare_weight_fidelity(["q8\x00", "q9"], "ref", artifacts_dir=tmp_path)
 
 
 def test_compare_weight_rejects_oversized_filename(tmp_path):
     """A repo id whose partial filename exceeds 255 bytes must be rejected up front."""
     long_repo = "a" * 253  # + ".json" = 258 bytes, over the 255 limit
-    with pytest.raises(ValueError, match="255"):
+    with pytest.raises(CompareConfigError, match="255"):
         cmp.compare_weight_fidelity([long_repo, "q9"], "ref", artifacts_dir=tmp_path)
 
 
@@ -332,3 +333,10 @@ def test_compare_weight_stale_reference_partial_is_recomputed(monkeypatch, tmp_p
 
     # q8 must have been re-run against ref-B
     assert any(quant == "q8" and ref == "ref-B" for quant, ref in calls)
+
+
+def test_validate_compare_weights_args_rejects_single_target():
+    from mlx_quant_fidelity.runners.compare import _validate_compare_weights_args
+
+    with pytest.raises(CompareConfigError, match="at least 2 quant targets"):
+        _validate_compare_weights_args(["only/one"])
