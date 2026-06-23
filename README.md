@@ -1,5 +1,13 @@
 # mlx-quant-fidelity
 
+<p align="center">
+  <img src="docs/assets/mlx-quant-fidelity-logo.png" alt="mlx-quant-fidelity" width="100%">
+</p>
+
+[![PyPI version](https://img.shields.io/pypi/v/mlx-quant-fidelity.svg)](https://pypi.org/project/mlx-quant-fidelity/)
+[![Python versions](https://img.shields.io/pypi/pyversions/mlx-quant-fidelity.svg)](https://pypi.org/project/mlx-quant-fidelity/)
+[![License: Apache-2.0](https://img.shields.io/pypi/l/mlx-quant-fidelity.svg)](https://github.com/IonDen/mlx-quant-fidelity/blob/main/LICENSE)
+
 Measure how much quality a quantization costs on Apple Silicon. `mlx-quant-fidelity` scores a quantized model against a higher-precision reference on the same corpus and reports the drift as numbers you can act on: KL divergence, top-token flip rate, perplexity delta. It measures both **KV-cache quantization** and **weight quantization**. No more choosing a bit-width by file size.
 
 The CUDA/GGUF world has had this for years: llama.cpp's `--kl-divergence-base`, EleutherAI's `lm-evaluation-harness`. MLX had nothing. This is the MLX version, and it covers the KV-cache and attention angle those tools skip.
