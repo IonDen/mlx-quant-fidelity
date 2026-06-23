@@ -346,6 +346,12 @@ def test_weight_envelope_with_invalid_verdict_is_corrupt_partial():
     from mlx_quant_fidelity.runners.compare import _envelope_to_result
 
     env = _weight_ok_envelope_with_identity("q4", 0.09, 4200)
+    # Precondition: the converter must return status=="ok" on the valid (un-tampered) envelope.
+    # If this fails, the test below would be vacuously true (converter always fails).
+    precondition_result = _envelope_to_result("q4", env)
+    assert precondition_result.status == "ok", (
+        f"Precondition failed: expected 'ok' on valid envelope, got {precondition_result.status!r}"
+    )
     env["report"]["verdict"] = "nonsense"
     result = _envelope_to_result("q4", env)
     assert result.status == "failed"

@@ -19,7 +19,7 @@ Both passes receive the same `inp`; only the cache differs. This is teacher-forc
 
 Generation would break this. The moment quantization changes a sampled token, the next pass receives different input, and the divergence compounds. What you end up measuring is trajectory drift, not cache cost. The llama.cpp `--kl-divergence-base` flag works the same way: it scores a forward pass over fixed text, not a generation.
 
-Logits are large. A single position over a 128k-token vocabulary is half a megabyte in fp32. The chunk loop collapses logits to per-position scalars (`kl_divergence`, `top_token_flips`, `token_nll`) and calls `mx.eval` before moving on, letting the vocab-wide tensors go out of scope. Accumulating them across a corpus would require roughly 125 GB — four times the machine. Streaming is not an optimization; it is what makes the measurement possible.
+Logits are large. A single position over a 128k-token vocabulary is half a megabyte in fp32. The chunk loop collapses logits to per-position scalars (`kl_divergence`, `top_token_flips`, `token_nll`) and calls `mx.eval` before moving on, letting the vocab-wide tensors go out of scope. Accumulating them across a corpus would require roughly 125 GB — four times the machine. Holding full next-token distributions for the corpus would require roughly 125 GB in fp32 — four times the machine — so each position is reduced to scalars as the probe goes, keeping memory flat across the corpus.
 
 The KV probe ships only in stress mode (`quantize_start=0`): quantization begins at token 0, so both caches start empty and the probe measures pure quantizer cost from the first position. Deployment mode (`quantize_start > 0`) is not implemented.
 
