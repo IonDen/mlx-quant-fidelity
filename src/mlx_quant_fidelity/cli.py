@@ -133,7 +133,7 @@ def main(argv: list[str] | None = None) -> int:
             raise AssertionError(  # pragma: no cover
                 f"unhandled compare_mode: {args.compare_mode!r}"
             )
-    except (QuantFidelityError, ValueError) as exc:
+    except QuantFidelityError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
     print(out)

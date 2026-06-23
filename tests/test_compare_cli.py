@@ -1,6 +1,10 @@
 import json
+from unittest.mock import patch
+
+import pytest
 
 from mlx_quant_fidelity import cli
+from mlx_quant_fidelity.cli import main
 from mlx_quant_fidelity.report import ComparisonReport
 
 
@@ -127,11 +131,18 @@ def test_compare_kv_forwards_filter_kwargs(monkeypatch, capsys):
     assert captured["kw"]["quantize_start"] == 0
 
 
-def test_compare_fn_value_error_surfaces_as_exit_2(monkeypatch, capsys):
-    def boom(quant_ids, reference, **kw):
-        raise ValueError("compare needs at least 2 configs")
-
-    monkeypatch.setattr(cli, "compare_weight_fidelity", boom)
-    rc = cli.main(["compare", "weights", "q4", "--reference", "ref"])
+def test_compare_weights_invalid_args_exits_2(capsys):
+    rc = main(["compare", "weights", "only/one", "--reference", "ref/repo"])
     assert rc == 2
-    assert "compare needs at least 2 configs" in capsys.readouterr().err
+    assert "at least 2 quant targets" in capsys.readouterr().err
+
+
+def test_compare_does_not_swallow_unexpected_valueerror():
+    with (
+        patch(
+            "mlx_quant_fidelity.cli.compare_weight_fidelity",
+            side_effect=ValueError("unexpected boom"),
+        ),
+        pytest.raises(ValueError, match="unexpected boom"),
+    ):
+        main(["compare", "weights", "a/x-4bit", "b/y-8bit", "--reference", "ref/repo"])
