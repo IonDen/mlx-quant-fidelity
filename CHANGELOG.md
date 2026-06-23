@@ -5,12 +5,12 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [0.3.1]
 
-Hardens `compare` error handling, isolates malformed cached partials, and adds a methodology document.
+Hardens `compare` error handling, isolates cached partials with an invalid stored verdict, and adds a methodology document.
 
 ### Fixed
 
 - `compare` now raises `CompareConfigError` (a package-rooted error, still catchable as `ValueError`) for invalid configurations such as fewer than two targets or duplicate repo IDs, instead of a bare `ValueError`. The CLI no longer catches unexpected errors as configuration mistakes.
-- Malformed persisted comparison partials are isolated as `CorruptPartial` and skipped rather than aborting the rest of a resumed run.
+- A persisted comparison partial whose stored verdict is invalid is isolated as `CorruptPartial` and skipped rather than aborting the rest of a resumed run.
 - `docs/ranking-principles.md` now describes perplexity delta correctly: it is a related but distinct signal from mean KL divergence, not an algebraically identical restatement — it scores the realized next token and can diverge from mean KL when the reference does not concentrate on the observed token.
 
 ### Added
