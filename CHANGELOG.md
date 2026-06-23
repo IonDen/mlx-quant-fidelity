@@ -3,6 +3,20 @@
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.1]
+
+Hardens `compare` error handling, isolates malformed cached partials, and adds a methodology document.
+
+### Fixed
+
+- `compare` now raises `CompareConfigError` (a package-rooted error, still catchable as `ValueError`) for invalid configurations such as fewer than two targets or duplicate repo IDs, instead of a bare `ValueError`. The CLI no longer catches unexpected errors as configuration mistakes.
+- Malformed persisted comparison partials are isolated as `CorruptPartial` and skipped rather than aborting the rest of a resumed run.
+- `docs/ranking-principles.md` now describes perplexity delta correctly: it is a related but distinct signal from mean KL divergence, not an algebraically identical restatement — it scores the realized next token and can diverge from mean KL when the reference does not concentrate on the observed token.
+
+### Added
+
+- `docs/measurement-principles.md` explains what the probe actually measures: teacher-forced paired scoring, why the corpus and chunk length matter, and what the numbers do and do not say about real-world inference quality.
+
 ## [0.3.0]
 
 Adds a `compare` command that ranks a set of quantizations on a memory-normalized Pareto frontier — quality per byte, not a raw-metric sort.
