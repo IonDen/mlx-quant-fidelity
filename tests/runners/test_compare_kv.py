@@ -725,3 +725,15 @@ def test_validate_compare_kv_args_rejects_single_config():
 
     with pytest.raises(CompareConfigError, match="at least 2 KV configs"):
         _validate_compare_kv_args([(4, 64)], quantize_start=0, max_chunks=None)
+
+
+def test_kv_envelope_with_invalid_verdict_is_corrupt_partial():
+    import json
+
+    from mlx_quant_fidelity.runners.compare import _kv_envelope_to_result
+
+    env = json.loads(_kv_partial_with_identity(_fid((4, 64), 0.09), 1234, bits=4, group_size=64))
+    env["report"]["verdict"] = "nonsense"
+    result = _kv_envelope_to_result("4:64", env)
+    assert result.status == "failed"
+    assert result.error_type == "CorruptPartial"
