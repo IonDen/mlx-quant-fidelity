@@ -6,6 +6,7 @@ import types
 
 import pytest
 
+from mlx_quant_fidelity.errors import CompareConfigError
 from mlx_quant_fidelity.runners import compare as cmp
 
 
@@ -120,31 +121,31 @@ def test_compare_kv_isolates_non_domain_error(monkeypatch, tmp_path):
 
 
 def test_compare_kv_requires_two_configs(tmp_path):
-    """Fewer than 2 configs raises ValueError before any model load."""
-    with pytest.raises(ValueError, match="at least 2"):
+    """Fewer than 2 configs raises CompareConfigError before any model load."""
+    with pytest.raises(CompareConfigError, match="at least 2"):
         cmp.compare_kv_fidelity("m", [(4, 64)], artifacts_dir=tmp_path)
 
 
 def test_compare_kv_rejects_deployment_mode(monkeypatch, tmp_path):
-    """quantize_start != 0 raises ValueError (only stress mode in 0.x)."""
+    """quantize_start != 0 raises CompareConfigError (only stress mode in 0.x)."""
     _patch_kv_compare(monkeypatch, {})
-    with pytest.raises(ValueError, match="stress mode"):
+    with pytest.raises(CompareConfigError, match="stress mode"):
         cmp.compare_kv_fidelity(
             "m", [(4, 64), (8, 64)], quantize_start=5000, artifacts_dir=tmp_path
         )
 
 
 def test_compare_kv_rejects_bad_max_chunks(monkeypatch, tmp_path):
-    """max_chunks < 1 raises ValueError."""
+    """max_chunks < 1 raises CompareConfigError."""
     _patch_kv_compare(monkeypatch, {})
-    with pytest.raises(ValueError, match="max_chunks"):
+    with pytest.raises(CompareConfigError, match="max_chunks"):
         cmp.compare_kv_fidelity("m", [(4, 64), (8, 64)], max_chunks=0, artifacts_dir=tmp_path)
 
 
 def test_compare_kv_rejects_duplicate_configs(monkeypatch, tmp_path):
-    """Duplicate (bits, group_size) tuples raise ValueError."""
+    """Duplicate (bits, group_size) tuples raise CompareConfigError."""
     _patch_kv_compare(monkeypatch, {})
-    with pytest.raises(ValueError, match="duplicate"):
+    with pytest.raises(CompareConfigError, match="duplicate"):
         cmp.compare_kv_fidelity("m", [(4, 64), (4, 64), (8, 64)], artifacts_dir=tmp_path)
 
 
@@ -717,3 +718,10 @@ def test_compare_kv_matching_identity_resumes(monkeypatch, tmp_path):
 
     assert (4, 64) not in calls, "(4,64) must be resumed from partial; run_identity matches"
     assert (8, 64) in calls, "(8,64) must be scored (no pre-existing partial)"
+
+
+def test_validate_compare_kv_args_rejects_single_config():
+    from mlx_quant_fidelity.runners.compare import _validate_compare_kv_args
+
+    with pytest.raises(CompareConfigError, match="at least 2 KV configs"):
+        _validate_compare_kv_args([(4, 64)], quantize_start=0, max_chunks=None)

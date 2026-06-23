@@ -276,6 +276,25 @@ def _kv_config_label(bits: int, group_size: int) -> str:
     return f"{bits}:{group_size}"
 
 
+def _validate_compare_kv_args(
+    configs: list[tuple[int, int]], *, quantize_start: int, max_chunks: int | None
+) -> None:
+    """Validate KV-compare arguments. Raise CompareConfigError on bad input."""
+    if len(configs) < 2:
+        raise CompareConfigError("compare needs at least 2 KV configs; use the `kv` probe for one.")
+    if quantize_start != 0:
+        raise CompareConfigError(
+            "deployment mode (quantize_start > 0) is not supported in 0.x; "
+            "use stress mode (quantize_start=0) only."
+        )
+    if max_chunks is not None and max_chunks < 1:
+        raise CompareConfigError(f"max_chunks must be >= 1 (got {max_chunks}).")
+    labels = [_kv_config_label(b, g) for b, g in configs]
+    if len(set(labels)) != len(labels):
+        duplicates = {lbl for lbl in labels if labels.count(lbl) > 1}
+        raise CompareConfigError(f"duplicate configs produce the same label: {duplicates}")
+
+
 def _kv_partial_filename(bits: int, group_size: int) -> str:
     """Filesystem-safe partial JSON filename: ':' sanitized to '_' (e.g. '4_64.json')."""
     return f"{bits}_{group_size}.json"
@@ -385,19 +404,7 @@ def compare_kv_fidelity(
             or duplicate configs. Subclasses ValueError for backward compatibility.
     """
     # ── Validation guards (score_kv_config has none; must live here) ──────────
-    if len(configs) < 2:
-        raise ValueError("compare needs at least 2 KV configs; use the `kv` probe for one.")
-    if quantize_start != 0:
-        raise ValueError(
-            "deployment mode (quantize_start > 0) is not supported in 0.x; "
-            "use stress mode (quantize_start=0) only."
-        )
-    if max_chunks is not None and max_chunks < 1:
-        raise ValueError(f"max_chunks must be >= 1 (got {max_chunks}).")
-    labels = [_kv_config_label(b, g) for b, g in configs]
-    if len(set(labels)) != len(labels):
-        duplicates = {lbl for lbl in labels if labels.count(lbl) > 1}
-        raise ValueError(f"duplicate configs produce the same label: {duplicates}")
+    _validate_compare_kv_args(configs, quantize_start=quantize_start, max_chunks=max_chunks)
 
     out_dir = artifacts_dir or Path("_artifacts/compare/kv")
     out_dir.mkdir(parents=True, exist_ok=True)
