@@ -733,6 +733,12 @@ def test_kv_envelope_with_invalid_verdict_is_corrupt_partial():
     from mlx_quant_fidelity.runners.compare import _kv_envelope_to_result
 
     env = json.loads(_kv_partial_with_identity(_fid((4, 64), 0.09), 1234, bits=4, group_size=64))
+    # Precondition: the converter must return status=="ok" on the valid (un-tampered) envelope.
+    # If this fails, the test below would be vacuously true (converter always fails).
+    precondition_result = _kv_envelope_to_result("4:64", env)
+    assert precondition_result.status == "ok", (
+        f"Precondition failed: expected 'ok' on valid envelope, got {precondition_result.status!r}"
+    )
     env["report"]["verdict"] = "nonsense"
     result = _kv_envelope_to_result("4:64", env)
     assert result.status == "failed"

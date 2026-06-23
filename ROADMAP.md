@@ -4,6 +4,7 @@
 
 ## Released
 
+- **0.3.1** — Hardens `compare` error handling (consistent package-rooted errors; the CLI no longer masks unexpected errors), isolates malformed cached partials, and adds a `measurement-principles.md` methodology document.
 - **0.3.0** — `compare` command: ranks weight-quant repos or KV-cache configs on a memory-normalized Pareto frontier (quality per byte), flags dominated configurations, and supports budget-filter shortcuts.
 - **0.2.0** — Weight-quantization fidelity: a quantized model repo scored against a higher-precision reference on the same corpus, with a compatibility gate and a memory pre-flight for the two-model load. Also fixes the KV cache group-size / head-dimension gate.
 - **0.1.0** — KV-cache quantization fidelity: KL divergence, top-token flip rate, perplexity delta; CLI and Python API; JSON/Markdown reports; WikiText-2 corpus.

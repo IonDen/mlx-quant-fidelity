@@ -121,17 +121,17 @@ A run that returns exactly zero drift raises instead of reporting a silent "perf
 
 The weight probe works the same way with two models instead of two caches: a quantized repo and a reference repo, scored on the same corpus tokens. A compatibility gate refuses a mismatched pair before loading, and a memory pre-flight refuses a pair too large for the device rather than risking a kernel panic.
 
-[docs/measurement-principles.md](docs/measurement-principles.md) covers the zero-probability policy, the exact-zero guard, and how perplexity delta differs from mean KLD.
+See [docs/measurement-principles.md](docs/measurement-principles.md) for the zero-probability policy, the exact-zero guard, and how perplexity delta relates to mean KLD.
 
 ## What the numbers don't say
 
 - A fidelity number is **corpus- and context-length-specific**. WikiText-2 at temperature 0 measures short-prose distributional drift; the paper this builds on, *Accuracy Is Not All You Need*, shows that under-predicts task-specific and long-context degradation. Every report records the corpus and the token count so the number is never read as a bare score.
-- Perplexity delta is reported for continuity with llama.cpp. It correlates with mean KLD by construction, so treat it as a familiar restatement, not independent corroboration.
+- Perplexity delta is reported for continuity with llama.cpp. It is related to but distinct from mean KLD — it scores the realized next token and can diverge from full-vocabulary drift — so it is not independent corroboration.
 - The measured drift bundles the quantizer's error with the quantized-attention kernel's numerics. That is the real end-to-end cost; a quantizer-only control is on the roadmap.
 
 ## Status
 
-0.3.0, released on PyPI as `mlx-quant-fidelity` — adds a `compare` command for memory-normalized Pareto ranking of KV-cache and weight quantizations. 0.2.0 added KV-cache and weight-quantization fidelity probes. Downstream-task accuracy, deployment mode, and more are on the [roadmap](ROADMAP.md).
+0.3.1, released on PyPI as `mlx-quant-fidelity` — hardens `compare` error handling and adds a methodology document (`docs/measurement-principles.md`). 0.3.0 added the `compare` command for memory-normalized Pareto ranking of KV-cache and weight quantizations. Downstream-task accuracy, deployment mode, and more are on the [roadmap](ROADMAP.md).
 
 ## License
 
