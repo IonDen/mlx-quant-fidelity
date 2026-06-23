@@ -13,7 +13,7 @@ import mlx.core as mx
 from mlx_quant_fidelity._memory_caps import install_memory_caps
 from mlx_quant_fidelity.costs import kv_bytes_per_token
 from mlx_quant_fidelity.errors import CompareConfigError
-from mlx_quant_fidelity.policy import qualifies
+from mlx_quant_fidelity.policy import VALID_VERDICTS, qualifies
 from mlx_quant_fidelity.probes.kv import _kv_head_dim, score_kv_config
 from mlx_quant_fidelity.ranking import RankPoint, budget_pick, dominated_by, pareto_frontier
 from mlx_quant_fidelity.report import (
@@ -191,6 +191,16 @@ def _envelope_to_result(label: str, env: dict[str, object]) -> ComparisonTargetR
             env.get("message") or None,  # type: ignore[arg-type]
         )
     report = weight_report_from_dict(env["report"])  # type: ignore[arg-type]
+    if report.verdict not in VALID_VERDICTS:
+        return ComparisonTargetResult(
+            label,
+            "failed",
+            None,
+            None,
+            None,
+            "CorruptPartial",
+            f"partial for {label!r} has an invalid verdict {report.verdict!r}",
+        )
     cost = report.quant_model_bytes
     if cost is None:
         return ComparisonTargetResult(label, "ok", report, None, "cost unavailable", None, None)
@@ -350,6 +360,16 @@ def _kv_envelope_to_result(label: str, env: dict[str, object]) -> ComparisonTarg
             env.get("message") or None,  # type: ignore[arg-type]
         )
     report = fidelity_report_from_dict(env["report"])  # type: ignore[arg-type]
+    if report.verdict not in VALID_VERDICTS:
+        return ComparisonTargetResult(
+            label,
+            "failed",
+            None,
+            None,
+            None,
+            "CorruptPartial",
+            f"partial for {label!r} has an invalid verdict {report.verdict!r}",
+        )
     cost = env.get("cost")
     if cost is None:
         return ComparisonTargetResult(label, "ok", report, None, "cost unavailable", None, None)

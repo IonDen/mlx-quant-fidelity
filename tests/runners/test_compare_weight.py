@@ -340,3 +340,13 @@ def test_validate_compare_weights_args_rejects_single_target():
 
     with pytest.raises(CompareConfigError, match="at least 2 quant targets"):
         _validate_compare_weights_args(["only/one"])
+
+
+def test_weight_envelope_with_invalid_verdict_is_corrupt_partial():
+    from mlx_quant_fidelity.runners.compare import _envelope_to_result
+
+    env = _weight_ok_envelope_with_identity("q4", 0.09, 4200)
+    env["report"]["verdict"] = "nonsense"
+    result = _envelope_to_result("q4", env)
+    assert result.status == "failed"
+    assert result.error_type == "CorruptPartial"
