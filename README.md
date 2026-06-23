@@ -121,6 +121,8 @@ A run that returns exactly zero drift raises instead of reporting a silent "perf
 
 The weight probe works the same way with two models instead of two caches: a quantized repo and a reference repo, scored on the same corpus tokens. A compatibility gate refuses a mismatched pair before loading, and a memory pre-flight refuses a pair too large for the device rather than risking a kernel panic.
 
+[docs/measurement-principles.md](docs/measurement-principles.md) covers the zero-probability policy, the exact-zero guard, and how perplexity delta differs from mean KLD.
+
 ## What the numbers don't say
 
 - A fidelity number is **corpus- and context-length-specific**. WikiText-2 at temperature 0 measures short-prose distributional drift; the paper this builds on, *Accuracy Is Not All You Need*, shows that under-predicts task-specific and long-context degradation. Every report records the corpus and the token count so the number is never read as a bare score.

@@ -70,7 +70,13 @@ To pick a threshold: start by reading the comparison table. If all frontier targ
 
 Fidelity numbers are corpus- and context-length-specific. The measurements use WikiText-2 short prose at temperature 0. The paper this work builds on, *Accuracy Is Not All You Need* (arXiv:2407.09141), documents that short-prose distributional drift under-predicts degradation on long-context tasks and code. Every report records the corpus and token count so the number is not read as a bare score without context.
 
-Perplexity delta is not an independent signal. It correlates with mean KLD by construction (`KL(P‖Q) = H(P,Q) − H(P)`), so when the two metrics agree, that is arithmetic rather than confirmation. Perplexity delta is reported for continuity with llama.cpp; treat it as a restatement of mean KLD.
+Perplexity delta is a related but distinct signal. Mean KL measures full-vocabulary drift
+weighted by the reference distribution at each position; perplexity delta measures how the
+quantized distribution scores the realized next corpus tokens (-log q(target)). On a well-fit
+model the two usually move together, but perplexity delta is not an independent full-vocab
+confirmation of KL and is not algebraically identical to it — they can diverge when the
+reference does not place its mass on the observed token. Perplexity delta is reported for
+continuity with llama.cpp.
 
 In `compare kv`, the quantized run uses `mx.fast.quantized_scaled_dot_product_attention` while the reference uses standard SDPA. The measured drift bundles the quantizer's numerical error with the quantized-attention kernel's numerics. That is the real end-to-end cost of deploying the model — the right thing to measure for a deployment decision — but the report says so explicitly rather than attributing everything to the quantizer alone.
 
