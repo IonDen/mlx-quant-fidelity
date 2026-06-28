@@ -48,3 +48,25 @@ def test_install_memory_caps_swallows_set_limit_failure(monkeypatch):
 
     monkeypatch.setattr(_memory_caps.mx, "set_wired_limit", _boom)
     assert _memory_caps.install_memory_caps() == (0, 0)
+
+
+def test_install_memory_caps_pushes_strict_byte_caps_on_healthy_device(monkeypatch):
+    # The actual safety action, never exercised by the (0, 0) degraded-path tests above:
+    # on a healthy device the GB caps are converted to BYTES and pushed STRICTLY BELOW the
+    # device working-set max. A regression dropping the `* 1024**3` (installing 20 *bytes*
+    # instead of 20 GB) silently disables the kernel-panic guard while still returning (20, 22).
+    max_bytes = 25 * 1024**3
+    monkeypatch.setattr(
+        _memory_caps.mx, "device_info", lambda: {"max_recommended_working_set_size": max_bytes}
+    )
+    seen: dict[str, int] = {}
+    monkeypatch.setattr(_memory_caps.mx, "set_wired_limit", lambda b: seen.__setitem__("wired", b))
+    monkeypatch.setattr(
+        _memory_caps.mx, "set_memory_limit", lambda b: seen.__setitem__("memory", b)
+    )
+
+    assert _memory_caps.install_memory_caps() == (20, 22)
+    assert seen["wired"] == 20 * 1024**3  # bytes, not 20
+    assert seen["memory"] == 22 * 1024**3
+    assert seen["wired"] < max_bytes  # the wired cap is strictly below the device max (the guard)
+    assert seen["memory"] < max_bytes

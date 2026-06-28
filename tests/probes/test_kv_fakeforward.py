@@ -111,6 +111,21 @@ def test_score_chunk_detects_quantized_divergence():
     assert float(quant_nll[0]) < float(ref_nll[0])  # quant peak is ON target 1 -> much lower NLL
 
 
+def test_score_chunk_identical_paths_is_exactly_zero():
+    # full-vs-full through _score_chunk: identical logits on both paths reduce to EXACTLY 0
+    # (KL(P||P)=0 for cache-agnostic identical outputs). _FakeKVModel ignores the cache, so the ref
+    # and quant paths are identical. Paired with test_score_chunk_detects_quantized_divergence this
+    # pins both ends of _score_chunk (the weight probe has the analogous identical-is-zero test).
+    model = _FakeKVModel(peak=1)
+    ids = mx.array([0, 1, 2])
+    ref_cache = [type("C", (), {"bits": None})()]
+    quant_cache = [type("C", (), {"bits": 4})()]
+    kl, flips, ref_nll, quant_nll = _score_chunk(model, ids, ref_cache, quant_cache)
+    mx.eval(kl, flips, ref_nll, quant_nll)
+    assert float(kl.mean()) == 0.0
+    assert int(flips.astype(mx.int32).sum()) == 0
+
+
 # ---------------------------------------------------------------------------
 # Task 4.3 — deployment-mode guard (raises BEFORE any model load)
 # ---------------------------------------------------------------------------
@@ -345,25 +360,6 @@ def _kv_corpus(n_chunks, chunk_len=4):
     return Corpus(chunks=chunks, provenance=prov)
 
 
-def _patch_kv_caches(monkeypatch, n_layers=2):
-    """Patch cache helpers for tests that only need structural coverage (not divergence).
-
-    Uses _FakeLayerCache (no .bits) for both ref and quant paths — KLD will be 0,
-    so _check_exact_zero is silenced here.  Tests that need live KLD use
-    _patch_kv_caches_divergent instead.
-    """
-    monkeypatch.setattr(
-        kvmod,
-        "make_prompt_cache",
-        lambda model: [_FakeLayerCache() for _ in range(n_layers)],
-        raising=False,
-    )
-    monkeypatch.setattr(
-        kvmod, "QuantizedKVCache", lambda group_size, bits: _FakeLayerCache(), raising=False
-    )
-    monkeypatch.setattr(kvmod, "_check_exact_zero", lambda **k: None)
-
-
 def _patch_kv_caches_divergent(monkeypatch, n_layers=2):
     """Patch cache helpers so ref and quant caches are distinguishable by .bits.
 
@@ -445,3 +441,24 @@ def test_score_kv_config_emits_warning_when_head_dim_unknown(monkeypatch):
     report = score_kv_config(_UnknownHeadDimModel(), _kv_corpus(1), model_id="org/m")
     assert len(report.warnings) == 1
     assert "mystery" in report.warnings[0]
+
+
+def test_score_kv_config_raises_exact_zero_when_quant_indistinguishable(monkeypatch):
+    """The exact-zero guard is wired into score_kv_config, not just unit-tested in isolation.
+
+    Both caches are _FakeLayerCache (no .bits), so _FakeDivergentModel returns identical logits
+    on the ref and quant paths -> KLD 0. score_kv_config MUST raise ExactZeroError rather than
+    emit a silent "perfect fidelity" report. Guard mutation: deleting the _check_exact_zero(...)
+    call in score_kv_config makes this return a report instead of raising.
+    """
+    monkeypatch.setattr(
+        kvmod,
+        "make_prompt_cache",
+        lambda model: [_FakeLayerCache(), _FakeLayerCache()],
+        raising=False,
+    )
+    monkeypatch.setattr(
+        kvmod, "QuantizedKVCache", lambda group_size, bits: _FakeLayerCache(), raising=False
+    )
+    with pytest.raises(ExactZeroError):
+        score_kv_config(_FakeDivergentModel(), _kv_corpus(1), model_id="org/m")

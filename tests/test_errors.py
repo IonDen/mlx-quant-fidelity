@@ -2,8 +2,10 @@ import pytest
 
 from mlx_quant_fidelity.errors import (
     CacheNotQuantizableError,
+    CorpusError,
     ExactZeroError,
     InsufficientMemoryError,
+    MemorySafetyError,
     ModelMismatchError,
     QuantFidelityError,
 )
@@ -12,6 +14,10 @@ from mlx_quant_fidelity.errors import (
 def test_subclasses_share_base():
     assert issubclass(CacheNotQuantizableError, QuantFidelityError)
     assert issubclass(ExactZeroError, QuantFidelityError)
+    # CorpusError / MemorySafetyError are raised by the probe + cap paths and must stay catchable
+    # via the CLI's `except QuantFidelityError`; if rebased off Exception this goes red.
+    assert issubclass(CorpusError, QuantFidelityError)
+    assert issubclass(MemorySafetyError, QuantFidelityError)
 
 
 def test_message_preserved():

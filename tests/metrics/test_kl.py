@@ -32,7 +32,9 @@ def test_direction_is_p_ref_to_q_quant():
 def test_zero_prob_is_inf_not_smoothed():
     # P certain where Q impossible -> +inf (honest), not an eps-smoothed near-zero.
     kl = kl_divergence(_logits([[1.0, 0.0, 0.0]]), _logits([[0.0, 1.0, 0.0]]))
-    assert math.isinf(float(kl[0]))
+    # Positive infinity specifically: math.isinf is also True for -inf, which a reversed-direction
+    # SUT (log_q - log_p) would return here, so pin the sign.
+    assert float(kl[0]) == math.inf
 
 
 def test_per_position_shape():

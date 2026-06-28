@@ -14,3 +14,14 @@ def test_summarize_tail_distribution():
     assert math.isclose(s.median, 0.01, abs_tol=1e-9)
     assert math.isclose(s.p99, 2.0, abs_tol=1e-9)
     assert s.max == 2.0
+
+
+def test_summarize_pins_p99_distinct_from_max():
+    # 99 positions at 1.0 + one spike at 100.0: p99 (linear interp) = 1.99, max = 100.0.
+    # The 90/10 fixture above has p99 == max == 2.0, so a `p99 = max(values)` shortcut passes
+    # there; this fixture pins the tail (p99) as a separate quantity from the extreme (max).
+    arr = np.array([1.0] * 99 + [100.0], dtype=np.float64)
+    s = summarize(arr)
+    assert s.max == 100.0
+    assert math.isclose(s.p99, 1.99, abs_tol=1e-6)
+    assert s.p99 < s.max

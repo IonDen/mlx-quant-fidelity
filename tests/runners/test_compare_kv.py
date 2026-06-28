@@ -566,18 +566,15 @@ def test_compare_kv_collect_loop_isolates_bad_cost_partial(monkeypatch, tmp_path
 def test_compare_kv_stale_model_partial_is_recomputed(monkeypatch, tmp_path):
     """A partial measured against model 'A' is not resumed when compare is called with model 'B'.
 
-    Pre-seed a valid ok partial for config (4,64) that records model_id='model-A'.
-    Call compare_kv_fidelity with model_id='model-B' in the same artifacts_dir.
-    Assert that score_kv_config is called for (4,64) — the stale partial is treated as absent.
-    The existing-match resume test (test_compare_kv_resume_skips_existing_partial) uses
-    the SAME model_id and must still pass.
+    Pre-seed a partial whose run_identity is a full, same-shape identity recording
+    model_id='model-A', then call with model_id='model-B'. The two identities differ ONLY in
+    model_id, so the recompute is driven by the model_id field mismatch specifically — a mutation
+    that excluded model_id from the identity comparison would resume the stale partial and go red.
+    (The earlier form wrote no run_identity at all, so it only proved "absent identity recomputes".)
     """
     rep_a = _fid((4, 64), 0.05)
-    # report carries model_id='m'; write it as if it was for 'model-A'
-    rep_dict = dataclasses.asdict(rep_a)
-    rep_dict["model_id"] = "model-A"
     (tmp_path / "4_64.json").write_text(
-        json.dumps({"status": "ok", "report": rep_dict, "cost": 1000})
+        _kv_partial_with_identity(rep_a, 1000, bits=4, group_size=64, model_id="model-A")
     )
 
     # model-B call should recompute (4,64) and also score (8,64)
