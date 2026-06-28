@@ -1,7 +1,7 @@
 # mlx-quant-fidelity
 
 <p align="center">
-  <img src="docs/assets/mlx-quant-fidelity-logo.png" alt="mlx-quant-fidelity" width="100%">
+  <img src="https://raw.githubusercontent.com/IonDen/mlx-quant-fidelity/main/docs/assets/mlx-quant-fidelity-logo.png" alt="mlx-quant-fidelity" width="100%">
 </p>
 
 [![PyPI version](https://img.shields.io/pypi/v/mlx-quant-fidelity.svg)](https://pypi.org/project/mlx-quant-fidelity/)
