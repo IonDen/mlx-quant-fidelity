@@ -53,6 +53,7 @@ def test_render_weight_markdown_qualifies_and_banners_quantized_reference():
     assert "org/m-bf16" in md
     assert "not full precision" in md  # reference-precision banner when reference_bits is set
     assert "tok assumption" in md  # warnings rendered
+    assert "marginal" in md  # the verdict badge is the primary human-facing result
 
 
 def test_render_weight_markdown_no_banner_for_full_precision_reference():

@@ -129,6 +129,58 @@ def test_comparison_json_round_trips_status() -> None:
     assert out["dominated"] == []  # fixture has dominated=()
 
 
+def test_comparison_json_serializes_nested_report() -> None:
+    # The status round-trip test only reads labels+status; a transform that dropped the nested
+    # result["report"] payload would leave it green. Pin the nested report (and that a failed
+    # target legitimately carries none).
+    out = json.loads(render_comparison_json(_report()))
+    q4 = next(r for r in out["results"] if r["label"] == "q4")
+    assert q4["report"]["kl"]["mean"] == 0.09
+    assert q4["report"]["verdict"] == "good"
+    q2 = next(r for r in out["results"] if r["label"] == "q2")
+    assert q2["report"] is None  # the failed target has no report
+
+
+def test_comparison_markdown_renders_distinct_kl_mean_and_p99_columns() -> None:
+    # _wreport sets all four KL fields equal, so no other test can tell the "KL mean" column from
+    # the "KL p99" column. Pin them with distinct values: swapping the two columns (or printing
+    # mean in both) in render_comparison_markdown goes red here.
+    rep = dataclasses.replace(
+        _wreport("q4", 0.05, 4200),
+        kl=ScalarSummary(mean=0.0500, median=0.0300, p99=0.3000, max=0.8000),
+    )
+    result = ComparisonTargetResult(
+        label="q4",
+        status="ok",
+        report=rep,
+        point=RankPoint("q4", 0.05, 4200),
+        excluded_reason=None,
+        error_type=None,
+        message=None,
+    )
+    report = ComparisonReport(
+        mode="weight",
+        reference="ref",
+        model=None,
+        corpus=None,
+        quantize_start=None,
+        quantize_mode=None,
+        budget=None,
+        results=(result,),
+        frontier=("q4",),
+        dominated=(),
+        budget_pick=None,
+        mlx_version="0.21",
+        mlx_lm_version="0.31.3",
+    )
+    md = render_comparison_markdown(report)
+    row = next(line for line in md.splitlines() if "| `q4` |" in line)
+    # columns: target | cost | KL mean | KL p99 | flip | verdict | frontier
+    cells = [c.strip() for c in row.strip().strip("|").split("|")]
+    assert cells[2] == "0.0500"  # KL mean column
+    assert cells[3] == "0.3000"  # KL p99 column — distinct from mean, pins the column order
+
+
 def test_comparison_json_dominated_shape() -> None:
     """asdict serializes tuple-of-tuples as list-of-lists; dominated pair is preserved."""
     cheaper = ComparisonTargetResult(

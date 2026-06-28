@@ -17,6 +17,14 @@ def test_good_boundary_is_inclusive():
     assert verdict_for(kl_mean=0.01, kl_p99=0.10, flip_rate=0.01) == "good"
 
 
+def test_kv_marginal_boundary_is_pinned():
+    # Literal thresholds (not _KV_TIERS.marginal) so the boundary is anchored: at the marginal
+    # ceiling -> marginal; one ulp over the tail -> bad. Catches a relaxed marginal ceiling
+    # (e.g. kl_p99 1.00 -> 1.50 would silently keep a worse measurement at "marginal").
+    assert verdict_for(kl_mean=0.10, kl_p99=1.00, flip_rate=0.05) == "marginal"
+    assert verdict_for(kl_mean=0.10, kl_p99=1.001, flip_rate=0.05) == "bad"
+
+
 def test_weight_verdicts_by_threshold():
     # independent synthetic values bracketing the calibrated weight tiers (not the sample points)
     good = verdict_for(kl_mean=0.005, kl_p99=0.05, flip_rate=0.02, thresholds=_WEIGHT_TIERS_v0_2_0)
@@ -44,6 +52,20 @@ def test_weight_good_requires_kl_mean_and_flip_axes():
     # flip_rate alone over the good ceiling -> not good
     assert (
         verdict_for(kl_mean=0.005, kl_p99=0.05, flip_rate=0.15, thresholds=_WEIGHT_TIERS_v0_2_0)
+        == "marginal"
+    )
+
+
+def test_weight_good_boundary_relaxation_side_is_pinned():
+    # Literal thresholds: at the weight good ceiling -> good; one ulp over the tail -> marginal.
+    # The existing axis tests sit far from the ceiling, so a relaxed good ceiling (kl_p99
+    # 0.10 -> 0.20) would go undetected without this.
+    assert (
+        verdict_for(kl_mean=0.01, kl_p99=0.10, flip_rate=0.05, thresholds=_WEIGHT_TIERS_v0_2_0)
+        == "good"
+    )
+    assert (
+        verdict_for(kl_mean=0.01, kl_p99=0.101, flip_rate=0.05, thresholds=_WEIGHT_TIERS_v0_2_0)
         == "marginal"
     )
 

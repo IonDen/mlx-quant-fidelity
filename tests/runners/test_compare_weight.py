@@ -301,37 +301,29 @@ def test_compare_weight_matching_identity_resumes(monkeypatch, tmp_path):
 
 
 def test_compare_weight_stale_reference_partial_is_recomputed(monkeypatch, tmp_path):
-    """A partial measured against reference 'ref-A' is not resumed when compare is called
-    with reference_model_id='ref-B'.  The stale partial must be treated as absent and
-    _run_weight_target must be called for that target.
+    """A partial whose run_identity records reference='ref-A' must NOT resume for reference 'ref-B'.
 
-    The existing resume test (test_compare_weight_resume_skips_existing_partial) uses
-    a MATCHING reference and must still pass.
+    Uses a full, same-shape run_identity differing ONLY in the reference field, so the recompute
+    is driven by the reference field mismatch specifically — a mutation that excluded reference
+    from the identity comparison would resume the stale partial and go red. (The earlier form wrote
+    no run_identity at all, so it only proved "absent identity recomputes".)
     """
-    from tests.test_compare_report import _wreport
-
-    # Build a valid envelope for q8 that was measured against ref-A
-    rep_a = _wreport("q8", 0.01, 8000)
-    # Patch the reference_model_id in the serialised report to simulate ref-A measurement
-    rep_dict = dataclasses.asdict(rep_a)
-    rep_dict["reference_model_id"] = "ref-A"
-    stale_envelope = {"status": "ok", "report": rep_dict}
-    (tmp_path / "q8.json").write_text(json.dumps(stale_envelope))
+    stale_env = _weight_ok_envelope_with_identity("q8", 0.01, 8000, reference="ref-A")
+    (tmp_path / "q8.json").write_text(json.dumps(stale_env))
 
     calls = []
 
     def _fake_run(quant, reference, partial_path, max_chunks):
         calls.append((quant, reference))
-        env = {"status": "ok", "report": dataclasses.asdict(_wreport(quant, 0.01, 8000))}
+        env = _weight_ok_envelope_with_identity(quant, 0.01, 8000, reference=reference)
         partial_path.write_text(json.dumps(env))
         return env
 
     monkeypatch.setattr(cmp, "_run_weight_target", _fake_run)
 
-    # Call with ref-B — the stale q8 partial (measured against ref-A) must be recomputed
+    # Call with ref-B — the stale q8 partial (run_identity.reference='ref-A') must be recomputed
     cmp.compare_weight_fidelity(["q8", "q9"], "ref-B", artifacts_dir=tmp_path)
 
-    # q8 must have been re-run against ref-B
     assert any(quant == "q8" and ref == "ref-B" for quant, ref in calls)
 
 

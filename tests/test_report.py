@@ -47,3 +47,4 @@ def test_render_markdown_qualifies_by_corpus_and_length():
     assert "stress" in md
     assert "0.0300" in md  # flip rate is rendered (corpus-qualified, not a bare score)
     assert "bundles quantized-SDPA numerics" in md  # warnings are rendered
+    assert "marginal" in md  # the verdict badge is the primary human-facing result
