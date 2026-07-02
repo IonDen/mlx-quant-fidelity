@@ -783,7 +783,7 @@ def _kv_partial_env(bits: int, gs: int, *, kl_mean: float, cost: int) -> dict[st
     }
 
 
-def test_kv_collect_isolates_missing_report_key(monkeypatch, tmp_path):
+def test_kv_collect_isolates_missing_report_key(tmp_path):
     import json
 
     good = _kv_partial_env(4, 64, kl_mean=0.004, cost=100)
@@ -798,7 +798,7 @@ def test_kv_collect_isolates_missing_report_key(monkeypatch, tmp_path):
     assert "4:64" in report.frontier
 
 
-def test_kv_collect_isolates_malformed_report_body(monkeypatch, tmp_path):
+def test_kv_collect_isolates_malformed_report_body(tmp_path):
     import json
 
     good = _kv_partial_env(4, 64, kl_mean=0.004, cost=100)
@@ -817,10 +817,18 @@ def test_kv_collect_isolates_malformed_report_body(monkeypatch, tmp_path):
 
 
 def test_compare_kv_stress_partial_recomputed_for_deployment(monkeypatch, tmp_path):
-    """A cached stress partial (quantize_start=0) must NOT resume a deployment run (start=5)."""
+    """A cached stress partial (quantize_start=0) must NOT resume a deployment run (start=5).
+
+    Both 4_64.json and 8_64.json are seeded as stress partials (quantize_start=0).
+    Correct behaviour: both mismatch the deployment identity → both pending → _load_model
+    fires once → RuntimeError raised → pytest.raises passes.
+    Buggy behaviour (identity ignores quantize_start): both wrongly resumed → pending=[] →
+    _load_model never called → no RuntimeError → pytest.raises fails ("DID NOT RAISE").
+    """
     import json
 
     (tmp_path / "4_64.json").write_text(json.dumps(_kv_partial_env(4, 64, kl_mean=0.004, cost=100)))
+    (tmp_path / "8_64.json").write_text(json.dumps(_kv_partial_env(8, 64, kl_mean=0.001, cost=200)))
     loaded = {"n": 0}
 
     def _fake_load(model_id, revision):
@@ -829,11 +837,10 @@ def test_compare_kv_stress_partial_recomputed_for_deployment(monkeypatch, tmp_pa
             "stop after load"
         )  # identity mismatch → pending non-empty → load attempted
 
+    monkeypatch.setattr(cmp, "install_memory_caps", lambda: (0, 0))
     monkeypatch.setattr(cmp, "_load_model", _fake_load)
     with pytest.raises(RuntimeError, match="stop after load"):
         cmp.compare_kv_fidelity(
             "org/m", [(4, 64), (8, 64)], quantize_start=5, artifacts_dir=tmp_path
         )
-    assert (
-        loaded["n"] == 1
-    )  # the stress partial did not satisfy the deployment identity → recompute
+    assert loaded["n"] == 1  # both stress partials rejected → recompute triggered → load fires once

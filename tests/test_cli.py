@@ -166,7 +166,9 @@ def test_cli_weights_badge_format(monkeypatch, capsys):
     monkeypatch.setattr(cli, "measure_weight_fidelity", lambda *a, **k: _weight_report())
     rc = cli.main(["weights", "q", "--reference", "r", "--format", "badge"])
     assert rc == 0
-    assert capsys.readouterr().out.strip().startswith("![")
+    out = capsys.readouterr().out.strip()
+    assert out.startswith("![")
+    assert "img.shields.io/badge/" in out
 
 
 def test_cli_compare_rejects_badge_format():
