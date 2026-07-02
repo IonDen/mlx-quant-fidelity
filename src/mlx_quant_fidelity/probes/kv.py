@@ -12,7 +12,7 @@ from mlx_quant_fidelity._memory_caps import install_memory_caps
 from mlx_quant_fidelity.errors import (
     CacheNotQuantizableError,
     CorpusError,
-    QuantFidelityError,
+    QuantizeStartError,
 )
 from mlx_quant_fidelity.policy import verdict_for
 from mlx_quant_fidelity.probes._paired import _aggregate_chunks, _check_exact_zero, _reduce_pair
@@ -181,24 +181,49 @@ def score_kv_config(
     _cache_is_quantizable(probe_cache, group_size=kv_group_size, bits=kv_bits)
     del probe_cache
 
+    mode = "stress" if quantize_start == 0 else "deployment"
     chunks = corpus.chunks[:max_chunks] if max_chunks is not None else corpus.chunks
     kls: list[mx.array] = []
     flips: list[mx.array] = []
     ref_nlls: list[mx.array] = []
     quant_nlls: list[mx.array] = []
+    n_scored = 0
     for ids in chunks:
+        if quantize_start > 0 and int(ids.size) < quantize_start + 2:
+            continue  # too short to have a post-boundary position; skip (spec §2.4)
         ref_cache = make_prompt_cache(model)
-        quant_cache: list[object] = [
-            QuantizedKVCache(group_size=kv_group_size, bits=kv_bits) for _ in range(n_layers)
-        ]
-        kl, flip, ref_nll, quant_nll = _score_chunk(model, ids, ref_cache, quant_cache)
+        if quantize_start == 0:
+            quant_cache: list[object] = [
+                QuantizedKVCache(group_size=kv_group_size, bits=kv_bits) for _ in range(n_layers)
+            ]
+            kl, flip, ref_nll, quant_nll = _score_chunk(model, ids, ref_cache, quant_cache)
+        else:
+            quant_cache = make_prompt_cache(model)
+            kl, flip, ref_nll, quant_nll = _score_chunk_deployment(
+                model,
+                ids,
+                ref_cache,
+                quant_cache,
+                quantize_start=quantize_start,
+                group_size=kv_group_size,
+                bits=kv_bits,
+            )
+            kl, flip = kl[quantize_start:], flip[quantize_start:]
+            ref_nll, quant_nll = ref_nll[quantize_start:], quant_nll[quantize_start:]
         mx.eval(kl, flip, ref_nll, quant_nll)
         kls.append(kl)
         flips.append(flip)
         ref_nlls.append(ref_nll)
         quant_nlls.append(quant_nll)
+        n_scored += 1
         del ref_cache, quant_cache
         mx.clear_cache()
+
+    if quantize_start > 0 and (n_scored == 0 or sum(int(k.size) for k in kls) == 0):
+        raise QuantizeStartError(
+            f"quantize_start={quantize_start} exceeds every scored chunk's length "
+            "— no position was quantized; use a smaller boundary or longer chunks."
+        )
 
     agg = _aggregate_chunks(kls, flips, ref_nlls, quant_nlls)
     _check_exact_zero(
@@ -215,14 +240,14 @@ def score_kv_config(
         kv_bits=kv_bits,
         kv_group_size=kv_group_size,
         quantize_start=quantize_start,
-        quantize_mode="stress" if quantize_start == 0 else "deployment",
+        quantize_mode=mode,
         kl=agg.kl,
         flip_rate=agg.flip_rate,
         perplexity_ref=agg.perplexity_ref,
         perplexity_quant=agg.perplexity_quant,
         perplexity_delta=agg.perplexity_quant - agg.perplexity_ref,
         n_positions=agg.n_positions,
-        n_chunks=len(chunks),
+        n_chunks=n_scored,
         corpus=corpus.provenance,
         mlx_version=importlib.metadata.version("mlx"),
         mlx_lm_version=importlib.metadata.version("mlx-lm"),
@@ -249,8 +274,8 @@ def measure_kv_fidelity(
         model_id: HuggingFace model ID (e.g. ``mlx-community/Llama-3.2-1B-Instruct-4bit``).
         kv_bits: KV-cache quantization bits (default 4).
         kv_group_size: KV-cache quantization group size (default 64).
-        quantize_start: Token position where quantization begins. Only 0 (stress mode) is
-            supported in 0.1.0; any other value raises ``QuantFidelityError``.
+        quantize_start: 0 = stress mode (default); ``1 ≤ N ≤ chunk_length-2`` = deployment
+            mode (first N positions full-precision, metrics over the post-boundary region).
         corpus: Pre-built corpus to score. If None, WikiText-2 test split is fetched (requires
             network access and the ``--run-network`` marker in tests).
         max_chunks: Score at most this many corpus chunks (applies to both the auto-loaded and
@@ -261,17 +286,19 @@ def measure_kv_fidelity(
         A :class:`~mlx_quant_fidelity.report.FidelityReport` with all metrics and provenance.
 
     Raises:
-        QuantFidelityError: If ``quantize_start != 0`` (deployment mode, not in 0.1.0).
+        QuantizeStartError: If quantize_start is out of range for the corpus window.
         CacheNotQuantizableError: If the model's KV cache does not support quantization.
         ExactZeroError: If KLD and flip rate are exactly 0 (quantization did not engage).
     """
     from mlx_lm import load
 
     if quantize_start != 0:
-        raise QuantFidelityError(
-            "deployment mode (quantize_start > 0) is not implemented in 0.1.0; "
-            "0.1.0 measures stress mode only (quantize_start=0)."
-        )
+        window = corpus.provenance.chunk_length if corpus is not None else 512  # wikitext default
+        if not (1 <= quantize_start <= window - 2):
+            raise QuantizeStartError(
+                f"quantize_start={quantize_start} must be in [1, {window - 2}] "
+                f"(0 = stress mode; keeps the first N of {window} positions full-precision)."
+            )
     if max_chunks is not None and max_chunks < 1:
         raise CorpusError(f"max_chunks must be >= 1 (got {max_chunks}).")
     if corpus is not None and len(corpus.chunks) == 0:

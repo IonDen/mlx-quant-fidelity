@@ -10,7 +10,6 @@ from mlx_quant_fidelity.errors import (
     CacheNotQuantizableError,
     CorpusError,
     ExactZeroError,
-    QuantFidelityError,
 )
 from mlx_quant_fidelity.probes import kv as kvmod
 from mlx_quant_fidelity.probes.kv import (
@@ -124,16 +123,6 @@ def test_score_chunk_identical_paths_is_exactly_zero():
     mx.eval(kl, flips, ref_nll, quant_nll)
     assert float(kl.mean()) == 0.0
     assert int(flips.astype(mx.int32).sum()) == 0
-
-
-# ---------------------------------------------------------------------------
-# Task 4.3 — deployment-mode guard (raises BEFORE any model load)
-# ---------------------------------------------------------------------------
-
-
-def test_quantize_start_nonzero_raises_before_model_load():
-    with pytest.raises(QuantFidelityError, match="deployment mode"):
-        measure_kv_fidelity("any-string", quantize_start=1)
 
 
 # ---------------------------------------------------------------------------
@@ -398,6 +387,7 @@ def test_score_kv_config_offline_reaches_loop(monkeypatch):
     assert report.cache_supported is True
     assert report.kl.mean > 0  # divergent caches → KLD must be non-zero
     assert report.warnings == ()  # head_dim=64 divides group_size=64 → no warning
+    assert report.quantize_mode == "stress"  # mutation guard: unconditional "deployment" goes RED
 
 
 def test_score_kv_config_caps_provided_corpus(monkeypatch):
@@ -500,3 +490,63 @@ def test_score_chunk_deployment_boundary():
     assert float(kl[:n].max()) == 0.0  # prefix exact-0 (offline)
     assert float(kl[n:].min()) > 0.0  # post-boundary drift engaged
     assert int(kl[n:].shape[0]) == len(ids) - 1 - n  # segment-2 length exactly L-1-N == 3
+
+
+# ---------------------------------------------------------------------------
+# Task 6 — score_kv_config deployment mode (quantize_start > 0)
+# ---------------------------------------------------------------------------
+
+
+def _patch_kv_caches_deployment(monkeypatch, n_layers=1):
+    # Deployment builds BOTH caches from make_prompt_cache; the quant cache converts at the boundary.
+    monkeypatch.setattr(
+        kvmod,
+        "make_prompt_cache",
+        lambda model: [_FakeLayerCachePreQ() for _ in range(n_layers)],
+        raising=False,
+    )
+
+
+def test_score_kv_config_deployment_reports_post_boundary(monkeypatch):
+    _patch_kv_caches_deployment(monkeypatch)
+    report = score_kv_config(
+        _FakeDivergentModel(), _kv_corpus(1, 6), model_id="org/m", quantize_start=2
+    )
+    assert report.quantize_mode == "deployment"
+    assert report.quantize_start == 2
+    assert report.n_positions == 3  # post-boundary [2:5) only, NOT all 5 (pins the slice)
+    assert report.kl.mean > 0
+
+
+def test_score_kv_config_deployment_skips_short_chunk(monkeypatch):
+    # A mixed corpus: one full (len 6) + one short (len 3 < N+2 for N=2). Short is skipped, not fatal.
+    _patch_kv_caches_deployment(monkeypatch)
+    mixed = Corpus(
+        chunks=(mx.arange(6), mx.arange(3)),
+        provenance=CorpusProvenance("x", "test", "org/m", 6, 6, "none", "drop", "raw", 9),
+    )
+    report = score_kv_config(_FakeDivergentModel(), mixed, model_id="org/m", quantize_start=2)
+    assert report.n_positions == 3  # only the full chunk contributed (3 post-boundary)
+    assert report.n_chunks == 1  # the short chunk was skipped
+
+
+def test_score_kv_config_deployment_all_short_raises(monkeypatch):
+    from mlx_quant_fidelity.errors import QuantizeStartError
+
+    _patch_kv_caches_deployment(monkeypatch)
+    short = Corpus(
+        chunks=(mx.arange(3),),
+        provenance=CorpusProvenance("x", "test", "org/m", 6, 6, "none", "drop", "raw", 3),
+    )
+    with pytest.raises(QuantizeStartError, match="no position"):
+        score_kv_config(_FakeDivergentModel(), short, model_id="org/m", quantize_start=2)
+
+
+def test_measure_kv_deployment_boundary_validated_before_load(monkeypatch):
+    from mlx_quant_fidelity.errors import QuantizeStartError
+
+    monkeypatch.setattr(kvmod, "install_memory_caps", lambda: (0, 0))
+    with pytest.raises(QuantizeStartError):
+        measure_kv_fidelity("any-model", quantize_start=511)  # == window-1 → zero quantized
+    with pytest.raises(QuantizeStartError):
+        measure_kv_fidelity("any-model", quantize_start=-1)
