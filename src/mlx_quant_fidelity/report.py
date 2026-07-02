@@ -137,33 +137,38 @@ def fidelity_report_from_dict(d: dict[str, object]) -> FidelityReport:
 def render_markdown(report: FidelityReport) -> str:
     """Human-readable report. Always qualifies the number by corpus + context length."""
     c = report.corpus
-    return "\n".join(
-        [
-            f"# KV-fidelity: `{report.model_id}` @ {report.kv_bits}-bit (group {report.kv_group_size})",
-            "",
-            f"**Verdict:** {report.verdict} · **mode:** {report.quantize_mode} "
-            f"(quantize_start={report.quantize_start})",
-            "",
-            "| metric | value |",
-            "|---|---|",
-            f"| KL mean | {report.kl.mean:.4f} nats |",
-            f"| KL median | {report.kl.median:.4f} nats |",
-            f"| KL p99 | {report.kl.p99:.4f} nats |",
-            f"| KL max | {report.kl.max:.4f} nats |",
-            f"| flip rate | {report.flip_rate:.4f} |",
-            f"| perplexity Δ | {report.perplexity_delta:+.4f} "
-            f"({report.perplexity_ref:.3f} → {report.perplexity_quant:.3f}) |",
-            "",
-            f"Measured on **{c.name}/{c.split}**, {report.n_positions} positions across "
-            f"{report.n_chunks} chunks of length {c.chunk_length} (tokenizer `{c.tokenizer_id}`). "
-            "Fidelity is corpus- and context-length-specific; short-prose temp-0 drift "
-            "under-predicts long-context/code degradation.",
-            "",
-            f"_mlx {report.mlx_version}, mlx-lm {report.mlx_lm_version}, "
-            f"model rev `{report.model_revision}`, peak {report.peak_memory_bytes / 1e9:.2f} GB._",
-            *([f"\n> Note: {w}" for w in report.warnings]),
-        ]
-    )
+    lines = [
+        f"# KV-fidelity: `{report.model_id}` @ {report.kv_bits}-bit (group {report.kv_group_size})",
+        "",
+        f"**Verdict:** {report.verdict} · **mode:** {report.quantize_mode} "
+        f"(quantize_start={report.quantize_start})",
+        "",
+        "| metric | value |",
+        "|---|---|",
+        f"| KL mean | {report.kl.mean:.4f} nats |",
+        f"| KL median | {report.kl.median:.4f} nats |",
+        f"| KL p99 | {report.kl.p99:.4f} nats |",
+        f"| KL max | {report.kl.max:.4f} nats |",
+        f"| flip rate | {report.flip_rate:.4f} |",
+        f"| perplexity Δ | {report.perplexity_delta:+.4f} "
+        f"({report.perplexity_ref:.3f} → {report.perplexity_quant:.3f}) |",
+        "",
+        f"Measured on **{c.name}/{c.split}**, {report.n_positions} positions across "
+        f"{report.n_chunks} chunks of length {c.chunk_length} (tokenizer `{c.tokenizer_id}`). "
+        "Fidelity is corpus- and context-length-specific; short-prose temp-0 drift "
+        "under-predicts long-context/code degradation.",
+        "",
+        f"_mlx {report.mlx_version}, mlx-lm {report.mlx_lm_version}, "
+        f"model rev `{report.model_revision}`, peak {report.peak_memory_bytes / 1e9:.2f} GB._",
+        *([f"\n> Note: {w}" for w in report.warnings]),
+    ]
+    if report.quantize_mode == "deployment":
+        lines.append(
+            f"\n> **Deployment mode:** metrics and the {report.n_positions} positions cover only the "
+            f"post-boundary quantized region; the first {report.quantize_start} positions per window "
+            "are full-precision and excluded. Per-token drift ≈ stress (see docs/measurement-principles.md)."
+        )
+    return "\n".join(lines)
 
 
 @dataclass(frozen=True, slots=True)
@@ -234,9 +239,10 @@ def _human_bytes(n: int | None) -> str:
 def render_comparison_markdown(report: ComparisonReport) -> str:
     """Human-readable comparison: ranked table (cost ascending) + excluded rows + recommendation."""
     target = report.reference or report.model or "?"
-    lines = [
-        f"# Quant comparison ({report.mode}) vs `{target}`",
-        "",
+    lines = [f"# Quant comparison ({report.mode}) vs `{target}`", ""]
+    if report.mode == "kv" and report.quantize_mode == "deployment":
+        lines += [f"_mode: {report.quantize_mode} (quantize_start={report.quantize_start})_", ""]
+    lines += [
         "| target | cost | KL mean | KL p99 | flip | verdict | frontier |",
         "|---|---|---|---|---|---|---|",
     ]
