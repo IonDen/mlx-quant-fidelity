@@ -1,8 +1,17 @@
 import json
 
+import pytest
+
 from mlx_quant_fidelity.corpora.provenance import CorpusProvenance
+from mlx_quant_fidelity.errors import ReportSchemaError
 from mlx_quant_fidelity.metrics import ScalarSummary
-from mlx_quant_fidelity.report import FidelityReport, render_json, render_markdown
+from mlx_quant_fidelity.report import (
+    FidelityReport,
+    fidelity_report_from_dict,
+    render_json,
+    render_markdown,
+    weight_report_from_dict,
+)
 
 
 def _report() -> FidelityReport:
@@ -48,3 +57,18 @@ def test_render_markdown_qualifies_by_corpus_and_length():
     assert "0.0300" in md  # flip rate is rendered (corpus-qualified, not a bare score)
     assert "bundles quantized-SDPA numerics" in md  # warnings are rendered
     assert "marginal" in md  # the verdict badge is the primary human-facing result
+
+
+def test_fidelity_from_dict_missing_kl_raises_report_schema_error():
+    with pytest.raises(ReportSchemaError):
+        fidelity_report_from_dict({"model_id": "m"})  # no "kl"/"corpus"
+
+
+def test_fidelity_from_dict_malformed_kl_subdict_raises_report_schema_error():
+    with pytest.raises(ReportSchemaError):
+        fidelity_report_from_dict({"kl": {"mean": 0.1}, "corpus": {}})  # kl dict missing fields
+
+
+def test_weight_from_dict_missing_kl_raises_report_schema_error():
+    with pytest.raises(ReportSchemaError):
+        weight_report_from_dict({"quant_model_id": "m"})
