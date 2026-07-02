@@ -35,3 +35,16 @@ def test_compare_config_error_is_quant_fidelity_error():
 
     assert issubclass(CompareConfigError, QuantFidelityError)
     assert issubclass(CompareConfigError, ValueError)  # documented back-compat contract
+
+
+def test_report_schema_error_is_quant_fidelity_error():
+    from mlx_quant_fidelity.errors import QuantFidelityError, ReportSchemaError
+
+    assert issubclass(ReportSchemaError, QuantFidelityError)
+
+
+def test_quantize_start_error_is_value_error_too():
+    from mlx_quant_fidelity.errors import QuantFidelityError, QuantizeStartError
+
+    assert issubclass(QuantizeStartError, QuantFidelityError)
+    assert issubclass(QuantizeStartError, ValueError)

@@ -35,3 +35,15 @@ class CompareConfigError(QuantFidelityError, ValueError):
     Subclasses ValueError too, preserving the documented `Raises: ValueError` contract so
     existing callers that catch ValueError around the public compare functions keep working.
     """
+
+
+class ReportSchemaError(QuantFidelityError):
+    """A persisted report dict is structurally malformed (missing key / wrong type)."""
+
+
+class QuantizeStartError(QuantFidelityError, ValueError):
+    """Invalid deployment boundary (`quantize_start`) for the corpus window.
+
+    Subclasses ValueError too, preserving the compare path's documented ValueError
+    contract (matching CompareConfigError).
+    """
