@@ -504,6 +504,37 @@ def test_human_bytes_all_branches() -> None:
     assert _human_bytes(4_200_000_000) == "4.20 GB"
 
 
+def _kv_comparison_report(*, quantize_start: int, quantize_mode: str) -> ComparisonReport:
+    return ComparisonReport(
+        mode="kv",
+        reference=None,
+        model="org/m",
+        corpus=None,
+        quantize_start=quantize_start,
+        quantize_mode=quantize_mode,
+        budget=None,
+        results=(),
+        frontier=(),
+        dominated=(),
+        budget_pick=None,
+        mlx_version="0",
+        mlx_lm_version="0",
+    )
+
+
+def test_render_comparison_markdown_shows_kv_deployment_mode() -> None:
+    md = render_comparison_markdown(
+        _kv_comparison_report(quantize_start=5, quantize_mode="deployment")
+    )
+    assert "deployment" in md
+    assert "5" in md
+
+
+def test_render_comparison_markdown_stress_kv_unchanged() -> None:
+    md = render_comparison_markdown(_kv_comparison_report(quantize_start=0, quantize_mode="stress"))
+    assert "quantize_start" not in md  # stress KV compare gets no mode line (no stale samples)
+
+
 def test_comparison_markdown_dominated_row_shows_dominator_label() -> None:
     """A dominated (✗) row in the ranked table must also render the dominator's label.
 

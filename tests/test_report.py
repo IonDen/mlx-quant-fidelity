@@ -72,3 +72,13 @@ def test_fidelity_from_dict_malformed_kl_subdict_raises_report_schema_error():
 def test_weight_from_dict_missing_kl_raises_report_schema_error():
     with pytest.raises(ReportSchemaError):
         weight_report_from_dict({"quant_model_id": "m"})
+
+
+def test_render_markdown_deployment_states_post_boundary():
+    import dataclasses
+
+    from tests.test_cli import _fake_report
+
+    rep = dataclasses.replace(_fake_report(), quantize_start=5, quantize_mode="deployment")
+    md = render_markdown(rep)
+    assert "post-boundary" in md or "excludes the first" in md  # the NEW exclusion statement
