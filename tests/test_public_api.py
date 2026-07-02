@@ -21,3 +21,9 @@ def test_compare_public_exports():
     assert "compare_weight_fidelity" in qf.__all__
     assert "compare_kv_fidelity" in qf.__all__
     assert "ComparisonReport" in qf.__all__
+
+
+def test_badge_public_exports():
+    for name in ("badge_color", "badge_for_report", "render_badge_markdown"):
+        assert hasattr(qf, name)
+        assert name in qf.__all__

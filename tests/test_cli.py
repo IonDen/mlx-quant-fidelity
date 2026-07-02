@@ -151,3 +151,25 @@ def test_cli_weights_installs_caps_before_measure(monkeypatch: pytest.MonkeyPatc
     rc = cli.main(["weights", "q", "--reference", "r"])
     assert calls == ["caps", "measure"]
     assert rc == 0
+
+
+def test_cli_kv_badge_format(monkeypatch, capsys):
+    monkeypatch.setattr(cli, "measure_kv_fidelity", lambda *a, **k: _fake_report())
+    rc = cli.main(["kv", "mlx-community/x", "--format", "badge"])
+    assert rc == 0
+    out = capsys.readouterr().out.strip()
+    assert out.startswith("![")
+    assert "img.shields.io/badge/" in out
+
+
+def test_cli_weights_badge_format(monkeypatch, capsys):
+    monkeypatch.setattr(cli, "measure_weight_fidelity", lambda *a, **k: _weight_report())
+    rc = cli.main(["weights", "q", "--reference", "r", "--format", "badge"])
+    assert rc == 0
+    assert capsys.readouterr().out.strip().startswith("![")
+
+
+def test_cli_compare_rejects_badge_format():
+    with pytest.raises(SystemExit) as exc:  # argparse rejects an invalid --format choice
+        cli.main(["compare", "kv", "m", "--configs", "4:64,8:64", "--format", "badge"])
+    assert exc.value.code == 2  # argparse usage error exit code
