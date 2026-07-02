@@ -165,7 +165,7 @@ def score_kv_config(
     """Score one KV config on an ALREADY-LOADED model (no load, no caps install).
 
     Shared by ``measure_kv_fidelity`` (load -> delegate) and the KV ``compare`` adapter
-    (load once -> loop configs). Applies ``max_chunks`` to the provided corpus (backlog 0012),
+    (load once -> loop configs). Applies ``max_chunks`` to the provided corpus,
     so a caller-supplied corpus is capped identically to the weight probe.
     """
     probe_warnings: list[str] = []
@@ -190,7 +190,7 @@ def score_kv_config(
     n_scored = 0
     for ids in chunks:
         if quantize_start > 0 and int(ids.size) < quantize_start + 2:
-            continue  # too short to have a post-boundary position; skip (spec §2.4)
+            continue  # too short to have a post-boundary position; skip
         ref_cache = make_prompt_cache(model)
         if quantize_start == 0:
             quant_cache: list[object] = [
@@ -219,7 +219,7 @@ def score_kv_config(
         del ref_cache, quant_cache
         mx.clear_cache()
 
-    if quantize_start > 0 and (n_scored == 0 or sum(int(k.size) for k in kls) == 0):
+    if quantize_start > 0 and n_scored == 0:
         raise QuantizeStartError(
             f"quantize_start={quantize_start} exceeds every scored chunk's length "
             "— no position was quantized; use a smaller boundary or longer chunks."

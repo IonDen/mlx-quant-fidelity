@@ -443,7 +443,8 @@ def compare_kv_fidelity(
     Args:
         model_id: HuggingFace model ID.
         configs: List of (bits, group_size) tuples; must contain at least 2 distinct entries.
-        quantize_start: Must be 0 (stress mode only in 0.x).
+        quantize_start: 0 = stress mode (default); ``1 ≤ N ≤ 510`` = deployment mode
+            (first N positions full-precision, metrics over the post-boundary region).
         max_chunks: Score at most this many corpus chunks (>= 1 if provided).
         max_kld: Optional KLD budget for the recommended pick.
         min_tier: Optional minimum tier for the recommended pick.
@@ -454,8 +455,9 @@ def compare_kv_fidelity(
         A ComparisonReport with Pareto frontier, dominated map, and optional budget pick.
 
     Raises:
-        CompareConfigError: If fewer than 2 configs, quantize_start != 0, max_chunks < 1,
-            or duplicate configs. Subclasses ValueError for backward compatibility.
+        QuantizeStartError: If quantize_start is out of range (not 0 and not in [1, 510]).
+        CompareConfigError: If fewer than 2 configs, max_chunks < 1, or duplicate configs.
+            Subclasses ValueError for backward compatibility.
     """
     # ── Validation guards (score_kv_config has none; must live here) ──────────
     _validate_compare_kv_args(configs, quantize_start=quantize_start, max_chunks=max_chunks)
