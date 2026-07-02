@@ -64,6 +64,31 @@ def test_stress_quantization_engages():
 
 
 @pytest.mark.slow
+def test_deployment_post_boundary_matches_stress():
+    """Deployment reports post-boundary positions only; per-token drift is the same order as stress."""
+    from mlx_lm import load
+
+    from mlx_quant_fidelity.probes.kv import score_kv_config
+
+    model, tok = load(MODEL)
+    corpus = _tiny_corpus(tok, chunk_length=64, n_chunks=2)
+    stress = score_kv_config(model, corpus, model_id=MODEL, kv_bits=4, quantize_start=0)
+    mx.clear_cache()
+    deploy = score_kv_config(model, corpus, model_id=MODEL, kv_bits=4, quantize_start=32)
+    mx.clear_cache()
+    assert deploy.quantize_mode == "deployment"
+    # Aggregation scope pinned deterministically (catches a forgotten post-boundary slice):
+    assert deploy.n_positions == (64 - 1 - 32) * 2  # 62
+    assert stress.n_positions == (64 - 1) * 2  # 126
+    # Per-quantized-token drift ≈ stress (caches differ only by a second-order drift term — spec §1.1).
+    assert deploy.kl.mean > 0
+    assert stress.kl.mean > 0
+    assert (
+        0.3 < deploy.kl.mean / stress.kl.mean < 3.0
+    )  # deliberately loose order-of-magnitude sanity
+
+
+@pytest.mark.slow
 def test_corrupted_cache_kld_rises_and_control_is_zero():
     """Proves the quantized cache is ACTUALLY CONSUMED.
 
