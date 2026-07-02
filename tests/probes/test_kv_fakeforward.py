@@ -347,6 +347,7 @@ class _FakeQuantCache:
     """A quantized cache: has .bits so _FakeDivergentModel returns quant (peak-1) logits."""
 
     bits = 4
+    state = property(lambda self: ())
 
     def to_quantized(self, group_size, bits):
         return self
@@ -462,3 +463,40 @@ def test_score_kv_config_raises_exact_zero_when_quant_indistinguishable(monkeypa
     )
     with pytest.raises(ExactZeroError):
         score_kv_config(_FakeDivergentModel(), _kv_corpus(1), model_id="org/m")
+
+
+# ---------------------------------------------------------------------------
+# Task 5 — _score_chunk_deployment: split-forward scorer for deployment mode
+# ---------------------------------------------------------------------------
+
+
+class _FakeLayerCachePreQ:
+    """A full-precision layer cache (no .bits) whose to_quantized() yields a .bits-bearing cache.
+
+    The existing _FakeLayerCache.to_quantized() returns self (still no .bits), which would make
+    the post-boundary switch invisible to _FakeDivergentModel. `.state` is required because
+    _score_chunk_deployment evals [c.state for c in quant_cache] before the boundary.
+    """
+
+    state = property(lambda self: ())
+
+    def to_quantized(self, group_size, bits):
+        return _FakeQuantCache()
+
+
+def test_score_chunk_deployment_boundary():
+    from mlx_quant_fidelity.probes.kv import _score_chunk_deployment
+
+    model = _FakeDivergentModel()  # peak-0 for no-.bits cache, peak-1 for .bits cache
+    ids = mx.arange(6)  # L=6 → 5 prediction positions
+    n = 2
+    ref_cache = [_FakeLayerCachePreQ()]
+    quant_cache = [_FakeLayerCachePreQ()]  # full-precision; converted at the boundary
+    kl, flips, ref_nll, quant_nll = _score_chunk_deployment(
+        model, ids, ref_cache, quant_cache, quantize_start=n, group_size=64, bits=4
+    )
+    mx.eval(kl, flips, ref_nll, quant_nll)
+    assert kl.shape == (5,)  # all L-1 positions returned
+    assert float(kl[:n].max()) == 0.0  # prefix exact-0 (offline)
+    assert float(kl[n:].min()) > 0.0  # post-boundary drift engaged
+    assert int(kl[n:].shape[0]) == len(ids) - 1 - n  # segment-2 length exactly L-1-N == 3

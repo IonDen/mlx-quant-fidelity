@@ -109,6 +109,48 @@ def _score_chunk(
     return _reduce_pair(ref_logits, quant_logits, targets)
 
 
+def _score_chunk_deployment(
+    model: object,
+    ids: mx.array,
+    ref_cache: list[object],
+    quant_cache: list[object],
+    *,
+    quantize_start: int,
+    group_size: int,
+    bits: int,
+) -> tuple[mx.array, mx.array, mx.array, mx.array]:
+    """Deployment split: first `quantize_start` prediction positions full-precision, rest quantized.
+
+    Returns per-position (kl, flips, ref_nll, quant_nll) over ALL L-1 prediction positions.
+    `quant_cache` starts full-precision (make_prompt_cache) and is converted to quantized at the
+    boundary via `to_quantized` (mirrors mlx-lm's maybe_quantize_kv_cache). The caller aggregates
+    only [quantize_start:] for the reported metrics.
+    """
+    n = quantize_start
+    targets = ids[1:]
+    ref_logits = model(ids[None, :-1], cache=ref_cache)[0].astype(mx.float32)  # type: ignore[operator]
+    mx.eval(ref_logits)
+    # Segment 1: prefix [0:n) through the full-precision quant_cache (identical to ref there).
+    seg1 = model(ids[None, :n], cache=quant_cache)[0].astype(mx.float32)  # type: ignore[operator]
+    kl1, flip1, refnll1, qnll1 = _reduce_pair(ref_logits[:n], seg1, targets[:n])
+    mx.eval(kl1, flip1, refnll1, qnll1)
+    del seg1  # free the prefix logits before the boundary + seg2 forward (one segment live)
+    mx.eval([c.state for c in quant_cache])  # type: ignore[attr-defined]  # collapse seg-1 graph before boundary
+    # Boundary: convert each layer cache (quantizes the stored [0:n) prefix).
+    for i in range(len(quant_cache)):
+        quant_cache[i] = quant_cache[i].to_quantized(group_size=group_size, bits=bits)  # type: ignore[attr-defined]
+    # Segment 2: [n:L-1) through the now-quantized cache. NOTE ids[n:-1], not ids[n:].
+    seg2 = model(ids[None, n:-1], cache=quant_cache)[0].astype(mx.float32)  # type: ignore[operator]
+    kl2, flip2, refnll2, qnll2 = _reduce_pair(ref_logits[n:], seg2, targets[n:])
+    mx.eval(kl2, flip2, refnll2, qnll2)
+    return (
+        mx.concatenate([kl1, kl2]),
+        mx.concatenate([flip1, flip2]),
+        mx.concatenate([refnll1, refnll2]),
+        mx.concatenate([qnll1, qnll2]),
+    )
+
+
 def score_kv_config(
     model: object,
     corpus: Corpus,
