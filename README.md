@@ -26,7 +26,7 @@ Apple Silicon (MLX), Python 3.11+.
 mlx-quant-fidelity kv mlx-community/Llama-3.2-3B-Instruct-4bit --kv-bits 8
 ```
 
-Prints a Markdown report. Add `--format json` for JSON, `--kv-bits 4`, `--kv-group-size 64`, or `--max-chunks N` to bound the corpus.
+Prints a Markdown report. Add `--format json` for JSON, `--format badge` for a shields.io badge line, `--kv-bits 4`, `--kv-group-size 64`, or `--max-chunks N` to bound the corpus.
 
 ```python
 from mlx_quant_fidelity import measure_kv_fidelity
@@ -70,6 +70,22 @@ print(report.kl.mean, report.flip_rate, report.verdict)
 
 Measured on **wikitext-2-raw/test**, 51100 positions across 100 chunks of length 512 ...
 ```
+
+## Badge output
+
+`--format badge` prints a single shields.io Markdown line instead of the full report:
+
+```bash
+mlx-quant-fidelity kv mlx-community/Llama-3.2-3B-Instruct-4bit --kv-bits 8 --format badge
+```
+
+Output:
+
+```
+![KV fidelity](https://img.shields.io/badge/KV_fidelity-good_%C2%B7_8--bit_%C2%B7_wikitext--2--raw%2F512_%C2%B7_stress-brightgreen)
+```
+
+Green for `good`, yellow for `marginal`, red for `bad`. The badge message includes the bit width, corpus, chunk length, and mode so badges from different configurations are distinguishable. Threshold values and the color map are in [docs/threshold-policy.md](docs/threshold-policy.md).
 
 ## How much does KV quantization cost?
 
@@ -123,7 +139,7 @@ Teacher-forced scoring, not generation. For each fixed-length corpus chunk the m
 Two modes:
 
 - **stress** (`--quantize-start 0`, the default): quantize from token 0. The harsh, apples-to-apples quantizer test.
-- **deployment** (`quantize_start > 0`): what mlx-lm users actually run, with the first N tokens kept full-precision. Not available yet — see the [roadmap](ROADMAP.md).
+- **deployment** (`--quantize-start N`): keeps the first N positions full-precision, matching mlx-lm's `--quantized-kv-start` behavior. Metrics cover only the post-boundary region; per-token drift there is close to stress mode because those positions attend through an already-quantized cache. [docs/measurement-principles.md](docs/measurement-principles.md) has the details and why deployment numbers are not a long-context real-deployment average.
 
 A run that returns exactly zero drift raises instead of reporting a silent "perfect fidelity." That almost always means quantization never engaged, not that it was free.
 
