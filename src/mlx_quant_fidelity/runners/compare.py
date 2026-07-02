@@ -12,7 +12,7 @@ import mlx.core as mx
 
 from mlx_quant_fidelity._memory_caps import install_memory_caps
 from mlx_quant_fidelity.costs import kv_bytes_per_token
-from mlx_quant_fidelity.errors import CompareConfigError
+from mlx_quant_fidelity.errors import CompareConfigError, ReportSchemaError
 from mlx_quant_fidelity.policy import VALID_VERDICTS, qualifies
 from mlx_quant_fidelity.probes.kv import _kv_head_dim, score_kv_config
 from mlx_quant_fidelity.ranking import RankPoint, budget_pick, dominated_by, pareto_frontier
@@ -190,7 +190,21 @@ def _envelope_to_result(label: str, env: dict[str, object]) -> ComparisonTargetR
             env.get("error_type") or None,  # type: ignore[arg-type]
             env.get("message") or None,  # type: ignore[arg-type]
         )
-    report = weight_report_from_dict(env["report"])  # type: ignore[arg-type]
+    report_body = env.get("report")
+    if not isinstance(report_body, dict):
+        return ComparisonTargetResult(
+            label,
+            "failed",
+            None,
+            None,
+            None,
+            "CorruptPartial",
+            f"partial for {label!r} has no report body",
+        )
+    try:
+        report = weight_report_from_dict(report_body)
+    except ReportSchemaError as exc:
+        return ComparisonTargetResult(label, "failed", None, None, None, "CorruptPartial", str(exc))
     if report.verdict not in VALID_VERDICTS:
         return ComparisonTargetResult(
             label,
@@ -359,7 +373,21 @@ def _kv_envelope_to_result(label: str, env: dict[str, object]) -> ComparisonTarg
             env.get("error_type") or None,  # type: ignore[arg-type]
             env.get("message") or None,  # type: ignore[arg-type]
         )
-    report = fidelity_report_from_dict(env["report"])  # type: ignore[arg-type]
+    report_body = env.get("report")
+    if not isinstance(report_body, dict):
+        return ComparisonTargetResult(
+            label,
+            "failed",
+            None,
+            None,
+            None,
+            "CorruptPartial",
+            f"partial for {label!r} has no report body",
+        )
+    try:
+        report = fidelity_report_from_dict(report_body)
+    except ReportSchemaError as exc:
+        return ComparisonTargetResult(label, "failed", None, None, None, "CorruptPartial", str(exc))
     if report.verdict not in VALID_VERDICTS:
         return ComparisonTargetResult(
             label,

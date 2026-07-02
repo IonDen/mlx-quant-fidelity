@@ -5,8 +5,10 @@ import json
 import types
 
 import pytest
+from tests.test_cli import _fake_report
 
 from mlx_quant_fidelity.errors import CompareConfigError
+from mlx_quant_fidelity.metrics import ScalarSummary
 from mlx_quant_fidelity.runners import compare as cmp
 
 
@@ -740,3 +742,61 @@ def test_kv_envelope_with_invalid_verdict_is_corrupt_partial():
     result = _kv_envelope_to_result("4:64", env)
     assert result.status == "failed"
     assert result.error_type == "CorruptPartial"
+
+
+# ── Task 2: malformed persisted partials (backlog 0028) ───────────────────────
+
+
+def _kv_partial_env(bits: int, gs: int, *, kl_mean: float, cost: int) -> dict[str, object]:
+    """A cached, identity-valid KV partial envelope (dict) for compare_kv_fidelity('org/m', ...)."""
+    rep = dataclasses.replace(
+        _fake_report(),
+        kv_bits=bits,
+        kv_group_size=gs,
+        kl=ScalarSummary(kl_mean, kl_mean, kl_mean, kl_mean),
+    )
+    return {
+        "status": "ok",
+        "report": dataclasses.asdict(rep),
+        "cost": cost,
+        "run_identity": {
+            "mode": "kv",
+            "model_id": "org/m",
+            "model_revision": None,
+            "bits": bits,
+            "group_size": gs,
+            "quantize_start": 0,
+            "max_chunks": None,
+            "schema_version": cmp._PARTIAL_SCHEMA_VERSION,
+        },
+    }
+
+
+def test_kv_collect_isolates_missing_report_key(monkeypatch, tmp_path):
+    import json
+
+    good = _kv_partial_env(4, 64, kl_mean=0.004, cost=100)
+    bad = _kv_partial_env(8, 64, kl_mean=0.001, cost=200)
+    del bad["report"]  # Fixture A: envelope has no "report" key (today: uncaught KeyError)
+    (tmp_path / "4_64.json").write_text(json.dumps(good))
+    (tmp_path / "8_64.json").write_text(json.dumps(bad))
+    report = cmp.compare_kv_fidelity("org/m", [(4, 64), (8, 64)], artifacts_dir=tmp_path)
+    bad_res = next(r for r in report.results if r.label == "8:64")
+    assert bad_res.status == "failed"
+    assert bad_res.error_type == "CorruptPartial"
+    assert "4:64" in report.frontier
+
+
+def test_kv_collect_isolates_malformed_report_body(monkeypatch, tmp_path):
+    import json
+
+    good = _kv_partial_env(4, 64, kl_mean=0.004, cost=100)
+    bad = _kv_partial_env(8, 64, kl_mean=0.001, cost=200)
+    del bad["report"]["kl"]  # Fixture B: "report" present, body missing "kl"
+    (tmp_path / "4_64.json").write_text(json.dumps(good))
+    (tmp_path / "8_64.json").write_text(json.dumps(bad))
+    report = cmp.compare_kv_fidelity("org/m", [(4, 64), (8, 64)], artifacts_dir=tmp_path)
+    bad_res = next(r for r in report.results if r.label == "8:64")
+    assert bad_res.status == "failed"
+    assert bad_res.error_type == "CorruptPartial"
+    assert "4:64" in report.frontier

@@ -334,6 +334,47 @@ def test_validate_compare_weights_args_rejects_single_target():
         _validate_compare_weights_args(["only/one"])
 
 
+def test_weight_envelope_missing_report_body_is_corrupt_partial():
+    from mlx_quant_fidelity.runners.compare import _envelope_to_result
+
+    env = _weight_ok_envelope_with_identity("q4", 0.09, 4200)
+    del env["report"]  # Layer 1: envelope has no "report" key
+    result = _envelope_to_result("q4", env)
+    assert result.status == "failed"
+    assert result.error_type == "CorruptPartial"
+
+
+def test_weight_envelope_malformed_report_body_is_corrupt_partial():
+    from mlx_quant_fidelity.runners.compare import _envelope_to_result
+
+    env = _weight_ok_envelope_with_identity("q4", 0.09, 4200)
+    del env["report"]["kl"]  # Layer 2: "report" present but body missing "kl"
+    result = _envelope_to_result("q4", env)
+    assert result.status == "failed"
+    assert result.error_type == "CorruptPartial"
+
+
+def test_weight_collect_isolates_malformed_cached_partial(monkeypatch, tmp_path):
+    """All-cached: a pre-seeded partial with a malformed report body is isolated; run completes."""
+    import json
+
+    good = _weight_ok_envelope_with_identity("q8", 0.01, 8000)
+    bad = _weight_ok_envelope_with_identity("q6", 0.04, 6200)
+    del bad["report"]["kl"]  # malformed body; run_identity still valid → no re-run
+    (tmp_path / "q8.json").write_text(json.dumps(good))
+    (tmp_path / "q6.json").write_text(json.dumps(bad))
+
+    def _boom(*a, **k):
+        raise AssertionError("worker must not run for cached partials")
+
+    monkeypatch.setattr(cmp, "_run_weight_target", _boom)
+    report = cmp.compare_weight_fidelity(["q8", "q6"], "ref", artifacts_dir=tmp_path)
+    q6 = next(r for r in report.results if r.label == "q6")
+    assert q6.status == "failed"
+    assert q6.error_type == "CorruptPartial"
+    assert "q8" in report.frontier  # the good target still ranks; no abort
+
+
 def test_weight_envelope_with_invalid_verdict_is_corrupt_partial():
     from mlx_quant_fidelity.runners.compare import _envelope_to_result
 

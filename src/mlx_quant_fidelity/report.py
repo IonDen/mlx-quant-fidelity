@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, cast
 
 from mlx_quant_fidelity.corpora.provenance import CorpusProvenance
+from mlx_quant_fidelity.errors import ReportSchemaError
 from mlx_quant_fidelity.metrics import ScalarSummary
 
 if TYPE_CHECKING:
@@ -119,13 +120,18 @@ def render_weight_markdown(report: WeightFidelityReport) -> str:
 
 def fidelity_report_from_dict(d: dict[str, object]) -> FidelityReport:
     """Rehydrate a FidelityReport from `dataclasses.asdict` output (KV compare partials)."""
-    kl = d["kl"]
-    corpus = d["corpus"]
-    assert isinstance(kl, dict)
-    assert isinstance(corpus, dict)
-    fields = {**d, "kl": ScalarSummary(**kl), "corpus": CorpusProvenance(**corpus)}
-    fields["warnings"] = tuple(cast("list[str]", fields.get("warnings") or []))
-    return FidelityReport(**fields)  # type: ignore[arg-type]
+    try:
+        kl = d["kl"]
+        corpus = d["corpus"]
+        if not isinstance(kl, dict) or not isinstance(corpus, dict):
+            raise ReportSchemaError("persisted report 'kl'/'corpus' must be dicts")
+        fields = {**d, "kl": ScalarSummary(**kl), "corpus": CorpusProvenance(**corpus)}
+        fields["warnings"] = tuple(cast("list[str]", fields.get("warnings") or []))
+        return FidelityReport(**fields)  # type: ignore[arg-type]
+    except ReportSchemaError:
+        raise
+    except (KeyError, TypeError) as exc:
+        raise ReportSchemaError(f"persisted FidelityReport is malformed: {exc}") from exc
 
 
 def render_markdown(report: FidelityReport) -> str:
@@ -194,13 +200,18 @@ class ComparisonReport:
 
 def weight_report_from_dict(d: dict[str, object]) -> WeightFidelityReport:
     """Rehydrate a WeightFidelityReport from `dataclasses.asdict` output (subprocess partials)."""
-    kl = d["kl"]
-    corpus = d["corpus"]
-    assert isinstance(kl, dict)
-    assert isinstance(corpus, dict)
-    fields = {**d, "kl": ScalarSummary(**kl), "corpus": CorpusProvenance(**corpus)}
-    fields["warnings"] = tuple(cast("list[str]", fields.get("warnings") or []))
-    return WeightFidelityReport(**fields)  # type: ignore[arg-type]
+    try:
+        kl = d["kl"]
+        corpus = d["corpus"]
+        if not isinstance(kl, dict) or not isinstance(corpus, dict):
+            raise ReportSchemaError("persisted report 'kl'/'corpus' must be dicts")
+        fields = {**d, "kl": ScalarSummary(**kl), "corpus": CorpusProvenance(**corpus)}
+        fields["warnings"] = tuple(cast("list[str]", fields.get("warnings") or []))
+        return WeightFidelityReport(**fields)  # type: ignore[arg-type]
+    except ReportSchemaError:
+        raise
+    except (KeyError, TypeError) as exc:
+        raise ReportSchemaError(f"persisted WeightFidelityReport is malformed: {exc}") from exc
 
 
 def render_comparison_json(report: ComparisonReport) -> str:
