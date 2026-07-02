@@ -40,3 +40,14 @@ def test_render_badge_markdown_escapes_shields_separators():
     assert "img.shields.io/badge/" in md
     assert "4--bit" in md
     assert "wikitext--2--raw" in md
+
+
+def test_render_badge_markdown_percent_encodes_url_unsafe_chars():
+    md = render_badge_markdown(_fake_report())
+    # the corpus "name/chunk_length" slash must be percent-encoded, not a raw path separator
+    assert "%2F512" in md
+    # the middle-dot separator must be percent-encoded, not a raw non-ASCII byte
+    assert "·" not in md
+    # shields.io field escaping is still intact (dashes doubled, not encoded away)
+    assert "4--bit" in md
+    assert "wikitext--2--raw" in md
