@@ -128,13 +128,24 @@ def test_compare_kv_requires_two_configs(tmp_path):
         cmp.compare_kv_fidelity("m", [(4, 64)], artifacts_dir=tmp_path)
 
 
-def test_compare_kv_rejects_deployment_mode(monkeypatch, tmp_path):
-    """quantize_start != 0 raises CompareConfigError (only stress mode in 0.x)."""
-    _patch_kv_compare(monkeypatch, {})
-    with pytest.raises(CompareConfigError, match="stress mode"):
-        cmp.compare_kv_fidelity(
-            "m", [(4, 64), (8, 64)], quantize_start=5000, artifacts_dir=tmp_path
-        )
+def test_compare_kv_accepts_valid_deployment_start():
+    from mlx_quant_fidelity.runners.compare import _validate_compare_kv_args
+
+    _validate_compare_kv_args([(4, 64), (8, 64)], quantize_start=5, max_chunks=None)  # no raise
+
+
+def test_compare_kv_rejects_out_of_range_start():
+    from mlx_quant_fidelity.errors import QuantizeStartError
+    from mlx_quant_fidelity.runners.compare import _validate_compare_kv_args
+
+    with pytest.raises(QuantizeStartError):
+        _validate_compare_kv_args([(4, 64), (8, 64)], quantize_start=5000, max_chunks=None)
+
+
+def test_compare_kv_still_accepts_stress_zero():
+    from mlx_quant_fidelity.runners.compare import _validate_compare_kv_args
+
+    _validate_compare_kv_args([(4, 64), (8, 64)], quantize_start=0, max_chunks=None)  # no raise
 
 
 def test_compare_kv_rejects_bad_max_chunks(monkeypatch, tmp_path):
@@ -800,3 +811,29 @@ def test_kv_collect_isolates_malformed_report_body(monkeypatch, tmp_path):
     assert bad_res.status == "failed"
     assert bad_res.error_type == "CorruptPartial"
     assert "4:64" in report.frontier
+
+
+# ── Task 7: deployment mode — resume regression ───────────────────────────────
+
+
+def test_compare_kv_stress_partial_recomputed_for_deployment(monkeypatch, tmp_path):
+    """A cached stress partial (quantize_start=0) must NOT resume a deployment run (start=5)."""
+    import json
+
+    (tmp_path / "4_64.json").write_text(json.dumps(_kv_partial_env(4, 64, kl_mean=0.004, cost=100)))
+    loaded = {"n": 0}
+
+    def _fake_load(model_id, revision):
+        loaded["n"] += 1
+        raise RuntimeError(
+            "stop after load"
+        )  # identity mismatch → pending non-empty → load attempted
+
+    monkeypatch.setattr(cmp, "_load_model", _fake_load)
+    with pytest.raises(RuntimeError, match="stop after load"):
+        cmp.compare_kv_fidelity(
+            "org/m", [(4, 64), (8, 64)], quantize_start=5, artifacts_dir=tmp_path
+        )
+    assert (
+        loaded["n"] == 1
+    )  # the stress partial did not satisfy the deployment identity → recompute

@@ -12,7 +12,7 @@ import mlx.core as mx
 
 from mlx_quant_fidelity._memory_caps import install_memory_caps
 from mlx_quant_fidelity.costs import kv_bytes_per_token
-from mlx_quant_fidelity.errors import CompareConfigError, ReportSchemaError
+from mlx_quant_fidelity.errors import CompareConfigError, QuantizeStartError, ReportSchemaError
 from mlx_quant_fidelity.policy import VALID_VERDICTS, qualifies
 from mlx_quant_fidelity.probes.kv import _kv_head_dim, score_kv_config
 from mlx_quant_fidelity.ranking import RankPoint, budget_pick, dominated_by, pareto_frontier
@@ -74,6 +74,13 @@ def assemble_comparison_report(
     }
     budget = _budget_label(max_kld, min_tier)
     pick = budget_pick(points, qualifying=qualifying) if budget is not None else None
+    if mode == "kv":
+        for r in results:
+            if r.status == "ok" and r.report is not None:
+                probe_mode = r.report.quantize_mode  # type: ignore[union-attr]
+                assert probe_mode == quantize_mode, (
+                    f"probe mode {probe_mode!r} disagrees with requested {quantize_mode!r}"
+                )
     return ComparisonReport(
         mode=mode,
         reference=reference,
@@ -306,10 +313,9 @@ def _validate_compare_kv_args(
     """Validate KV-compare arguments. Raise CompareConfigError on bad input."""
     if len(configs) < 2:
         raise CompareConfigError("compare needs at least 2 KV configs; use the `kv` probe for one.")
-    if quantize_start != 0:
-        raise CompareConfigError(
-            "deployment mode (quantize_start > 0) is not supported in 0.x; "
-            "use stress mode (quantize_start=0) only."
+    if quantize_start != 0 and not (1 <= quantize_start <= 510):  # 512-token wikitext window
+        raise QuantizeStartError(
+            f"quantize_start={quantize_start} must be 0 (stress) or in [1, 510] (deployment)."
         )
     if max_chunks is not None and max_chunks < 1:
         raise CompareConfigError(f"max_chunks must be >= 1 (got {max_chunks}).")
