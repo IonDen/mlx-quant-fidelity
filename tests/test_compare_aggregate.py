@@ -1,5 +1,6 @@
 import dataclasses
 
+import pytest
 from tests.test_compare_report import _wreport  # reuse the WeightFidelityReport builder
 
 from mlx_quant_fidelity.ranking import RankPoint
@@ -108,3 +109,77 @@ def test_budget_pick_both_constraints_anded():
     )
     assert r.budget == "--max-kld 0.05 --min-tier good"
     assert r.budget_pick == "q8"
+
+
+# ── Task 7: deployment mode — assemble_comparison_report guards ───────────────
+
+
+def test_assemble_weight_mode_does_not_touch_quantize_mode():
+    """C1 regression: a successful WEIGHT compare must not dereference .quantize_mode (it has none)."""
+    from mlx_quant_fidelity.runners.compare import assemble_comparison_report
+
+    ok = [_ok("q8", 0.01, 8000), _ok("q4", 0.09, 4200)]  # WeightFidelityReport results
+    report = assemble_comparison_report(
+        ok,
+        mode="weight",
+        reference="ref",
+        model=None,
+        corpus=None,
+        quantize_start=None,
+        quantize_mode=None,
+        max_kld=None,
+        min_tier=None,
+        mlx_version="0",
+        mlx_lm_version="0",
+    )
+    assert report.mode == "weight"  # no AttributeError
+
+
+def test_assemble_kv_asserts_mode_consistency():
+    """A KV OK result whose report.quantize_mode disagrees with the requested mode → AssertionError."""
+    from tests.test_cli import _fake_report  # quantize_mode == "stress"
+
+    from mlx_quant_fidelity.report import ComparisonTargetResult
+    from mlx_quant_fidelity.runners.compare import assemble_comparison_report
+
+    rep = dataclasses.replace(_fake_report(), quantize_mode="stress")
+    ok = ComparisonTargetResult("4:64", "ok", rep, None, "cost unavailable", None, None)
+    with pytest.raises(AssertionError):
+        assemble_comparison_report(
+            [ok],
+            mode="kv",
+            reference=None,
+            model="org/m",
+            corpus=None,
+            quantize_start=5,
+            quantize_mode="deployment",
+            max_kld=None,
+            min_tier=None,
+            mlx_version="0",
+            mlx_lm_version="0",
+        )
+
+
+def test_assemble_all_failed_deployment_keeps_mode():
+    """Regression guard: an all-failed deployment compare keeps quantize_mode via passthrough."""
+    from mlx_quant_fidelity.report import ComparisonTargetResult
+    from mlx_quant_fidelity.runners.compare import assemble_comparison_report
+
+    failed = [
+        ComparisonTargetResult("4:64", "failed", None, None, None, "CacheNotQuantizableError", "x"),
+        ComparisonTargetResult("8:64", "failed", None, None, None, "CacheNotQuantizableError", "y"),
+    ]
+    report = assemble_comparison_report(
+        failed,
+        mode="kv",
+        reference=None,
+        model="org/m",
+        corpus=None,
+        quantize_start=5,
+        quantize_mode="deployment",
+        max_kld=None,
+        min_tier=None,
+        mlx_version="0",
+        mlx_lm_version="0",
+    )
+    assert report.quantize_mode == "deployment"
