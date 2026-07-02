@@ -21,7 +21,7 @@ Generation would break this. The moment quantization changes a sampled token, th
 
 Logits are large. A single position over a 128k-token vocabulary is half a megabyte in fp32. The chunk loop collapses logits to per-position scalars (`kl_divergence`, `top_token_flips`, `token_nll`) and calls `mx.eval` before moving on, letting the vocab-wide tensors go out of scope. Accumulating them across a corpus would require roughly 125 GB — four times the machine. Holding full next-token distributions for the corpus would require roughly 125 GB in fp32 — four times the machine — so each position is reduced to scalars as the probe goes, keeping memory flat across the corpus.
 
-The KV probe ships only in stress mode (`quantize_start=0`): quantization begins at token 0, so both caches start empty and the probe measures pure quantizer cost from the first position. Deployment mode (`quantize_start > 0`) is not implemented.
+Two modes are available. Stress mode (`quantize_start=0`, the default): quantization begins at token 0 and both caches start empty, so the probe measures pure quantizer cost from the first position. Deployment mode (`quantize_start > 0`): the first N positions stay full-precision and quantization starts at position N. The section at the end of this document covers what each mode measures and where the numbers stop being comparable.
 
 ## Full-vocab KL divergence and the tail
 
@@ -76,6 +76,16 @@ KLD measures how much the quantized distribution differs from the reference on t
 Perplexity delta is a related but distinct signal: it scores the realized next corpus token (`token_nll = -log softmax(logits)[target]`), while mean KLD measures full-vocabulary drift. They correlate but can diverge when the reference distribution doesn't concentrate on the observed token. See [docs/ranking-principles.md](ranking-principles.md) for how perplexity delta interacts with ranking.
 
 In `compare kv`, the quantized run uses `mx.fast.quantized_scaled_dot_product_attention` while the reference uses standard SDPA. The measured drift bundles the quantizer's numerical error with the quantized-attention kernel's numerics. That is the real end-to-end cost of running the model, but the report says so rather than attributing everything to the quantizer alone. See [docs/ranking-principles.md](ranking-principles.md) for how this interacts with Pareto ranking.
+
+## Stress vs deployment — what each number measures
+
+`--quantize-start N` keeps the first N cache positions full-precision and quantizes everything from position N onward. The reported metrics cover only the post-boundary region: positions before N are excluded because both caches store them identically, so their logits are the same.
+
+Per-token drift in deployment mode is approximately the same as stress mode. A post-boundary position reads through a cache that has been accumulating quantized entries since position N. The full-precision prefix is present but not rescored, so the cache the scored positions read is essentially fully quantized by the time they run. Per-position numbers are close to what stress mode produces for the same model and configuration.
+
+Deployment mode exercises the `to_quantized` conversion path that mlx-lm uses in practice. Stress mode quantizes from an empty cache and never touches the path that converts an existing full-precision cache, so a quantizer that behaves differently when converting pre-filled data is invisible to stress mode. Deployment mode also locks in the actual context state: scored positions attend to the full-precision prefix, matching the state the model is in when mlx-lm's boundary activates.
+
+What these numbers do not cover: the probe's 512-token chunk window is not a long document. mlx-lm's default keeps the first 5000 tokens full-precision to protect attention sinks — the early positions most heads attend to most heavily — from being quantized. The probe measures per-token cost in the post-boundary region one chunk at a time. Deployment numbers are a per-chunk proxy for that post-boundary cost, not a real-deployment average over long-form generation.
 
 ## References
 
