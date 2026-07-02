@@ -155,7 +155,7 @@ See [docs/measurement-principles.md](docs/measurement-principles.md) for the zer
 
 ## Status
 
-0.3.1, released on PyPI as `mlx-quant-fidelity` — hardens `compare` error handling and adds a methodology document (`docs/measurement-principles.md`). 0.3.0 added the `compare` command for memory-normalized Pareto ranking of KV-cache and weight quantizations. Downstream-task accuracy, deployment mode, and more are on the [roadmap](ROADMAP.md).
+0.4.0, released on PyPI as `mlx-quant-fidelity` — adds deployment mode (`--quantize-start`), a shareable fidelity badge (`--format badge`), and isolation of a malformed cached comparison partial. 0.3.x added the `compare` command for memory-normalized Pareto ranking of KV-cache and weight quantizations and hardened its error handling. Downstream-task accuracy and more are on the [roadmap](ROADMAP.md).
 
 ## License
 

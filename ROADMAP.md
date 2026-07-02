@@ -4,6 +4,7 @@
 
 ## Released
 
+- **0.4.0** — Deployment mode (`quantize_start > 0`, the first N positions kept full-precision, metrics over the post-boundary region) and a shareable model-card fidelity badge (`--format badge`) driven by the documented threshold policy; also isolates a structurally malformed cached comparison partial.
 - **0.3.1** — Hardens `compare` error handling (consistent package-rooted errors; the CLI no longer masks unexpected errors), isolates cached partials with an invalid stored verdict, and adds a `measurement-principles.md` methodology document.
 - **0.3.0** — `compare` command: ranks weight-quant repos or KV-cache configs on a memory-normalized Pareto frontier (quality per byte), flags dominated configurations, and supports budget-filter shortcuts.
 - **0.2.0** — Weight-quantization fidelity: a quantized model repo scored against a higher-precision reference on the same corpus, with a compatibility gate and a memory pre-flight for the two-model load. Also fixes the KV cache group-size / head-dimension gate.
@@ -11,8 +12,6 @@
 
 ## Next
 
-- **Deployment mode** — `quantize_start > 0`, matching what mlx-lm users run, with the first N tokens kept full-precision.
 - **Downstream-task accuracy** — EleutherAI's lm-evaluation-harness (MMLU, ARC, HellaSwag, GSM8K, HumanEval) alongside distributional drift.
 - **Quantizer-only control** — an optional dequantize-then-standard-attention path that separates quantizer error from quantized-kernel numerics.
 - **Wider attention coverage** — MLA and sliding-window caches beyond flag-don't-crash.
-- **Fidelity badge** — a model-card badge driven by an explicit, documented threshold policy.

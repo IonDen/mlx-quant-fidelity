@@ -3,6 +3,24 @@
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0]
+
+Adds deployment-mode KV fidelity and a shareable fidelity badge, and isolates a malformed cached comparison partial.
+
+### Added
+
+- Deployment mode for the KV probe: `mlx-quant-fidelity kv <model> --quantize-start N` (and `compare kv ... --quantize-start N`) keeps the first N positions of each window full-precision and quantizes the rest, matching how mlx-lm's `--quantized-kv-start` runs. Reported metrics cover only the post-boundary region, so the number is the per-quantized-token cost — close to stress mode, because a post-boundary token attends to a fully quantized cache. `docs/measurement-principles.md` explains what deployment mode does and does not measure.
+- Fidelity badge: `--format badge` on `kv` and `weights` emits a shields.io model-card badge whose message carries the verdict, bit-width, corpus, context length, and mode, so it cannot read as a bare "fidelity: 0.98". `badge_color`, `badge_for_report`, and `render_badge_markdown` are exported.
+- `docs/threshold-policy.md` documents what good, marginal, and bad mean, why the mean, the tail, and the flip rate must all pass, and how the KV and provisional weight tiers were set.
+
+### Fixed
+
+- A cached comparison partial whose report body is structurally malformed — a missing or wrong-typed field — is isolated as `CorruptPartial` and skipped instead of aborting a resumed run with an uncaught error. This extends the 0.3.1 fix, which covered only an invalid stored verdict.
+
+### Changed
+
+- `fidelity_report_from_dict` and `weight_report_from_dict` raise a package-rooted `ReportSchemaError` on a malformed report dict instead of a bare `KeyError` or `AssertionError`.
+
 ## [0.3.1]
 
 Hardens `compare` error handling, isolates cached partials with an invalid stored verdict, and adds a methodology document.
