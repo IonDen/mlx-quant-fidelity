@@ -1,6 +1,7 @@
 """Policy-driven fidelity badge renderer (shields.io). Consumes the verdict; computes no thresholds."""
 
 from typing import TYPE_CHECKING
+from urllib.parse import quote
 
 if TYPE_CHECKING:
     from mlx_quant_fidelity.report import FidelityReport, WeightFidelityReport
@@ -46,6 +47,7 @@ def _shields_escape(text: str) -> str:
 def render_badge_markdown(report: "FidelityReport | WeightFidelityReport") -> str:
     """A markdown image line with a static img.shields.io/badge URL (fields escaped)."""
     f = badge_for_report(report)
-    label, message = _shields_escape(f["label"]), _shields_escape(f["message"])
+    label = quote(_shields_escape(f["label"]), safe="")
+    message = quote(_shields_escape(f["message"]), safe="")
     url = f"https://img.shields.io/badge/{label}-{message}-{f['color']}"
     return f"![{f['label']}]({url})"
