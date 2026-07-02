@@ -7,6 +7,7 @@ import os
 import sys
 
 from mlx_quant_fidelity._memory_caps import install_memory_caps
+from mlx_quant_fidelity.badge import render_badge_markdown
 from mlx_quant_fidelity.errors import QuantFidelityError
 from mlx_quant_fidelity.probes.kv import measure_kv_fidelity
 from mlx_quant_fidelity.probes.weights import measure_weight_fidelity
@@ -51,13 +52,13 @@ def main(argv: list[str] | None = None) -> int:
     kv.add_argument("--kv-group-size", type=int, default=64)
     kv.add_argument("--quantize-start", type=int, default=0)
     kv.add_argument("--max-chunks", type=int, default=None)
-    kv.add_argument("--format", choices=["json", "md"], default="md")
+    kv.add_argument("--format", choices=["json", "md", "badge"], default="md")
 
     weights = sub.add_parser("weights", help="measure weight-quantization fidelity")
     weights.add_argument("quant_model")
     weights.add_argument("--reference", required=True)
     weights.add_argument("--max-chunks", type=int, default=None)
-    weights.add_argument("--format", choices=["json", "md"], default="md")
+    weights.add_argument("--format", choices=["json", "md", "badge"], default="md")
 
     compare = sub.add_parser("compare", help="rank N quantizations on a memory-normalized Pareto")
     csub = compare.add_subparsers(dest="compare_mode", required=True)
@@ -89,14 +90,24 @@ def main(argv: list[str] | None = None) -> int:
                 quantize_start=args.quantize_start,
                 max_chunks=args.max_chunks,
             )
-            out = render_json(report) if args.format == "json" else render_markdown(report)
+            if args.format == "json":
+                out = render_json(report)
+            elif args.format == "badge":
+                out = render_badge_markdown(report)
+            else:
+                out = render_markdown(report)
         elif args.command == "weights":
             wreport = measure_weight_fidelity(
                 args.quant_model,
                 args.reference,
                 max_chunks=args.max_chunks,
             )
-            out = render_json(wreport) if args.format == "json" else render_weight_markdown(wreport)
+            if args.format == "json":
+                out = render_json(wreport)
+            elif args.format == "badge":
+                out = render_badge_markdown(wreport)
+            else:
+                out = render_weight_markdown(wreport)
         elif args.command == "compare" and args.compare_mode == "weights":
             creport = compare_weight_fidelity(
                 args.quant_models,
