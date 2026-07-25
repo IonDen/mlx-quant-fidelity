@@ -4,7 +4,7 @@
 
 ## Released
 
-- **0.4.0** — Deployment mode (`quantize_start > 0`, the first N positions kept full-precision, metrics over the post-boundary region) and a shareable model-card fidelity badge (`--format badge`) driven by the documented threshold policy; also isolates a structurally malformed cached comparison partial.
+- **0.4.0** — Deployment mode (`quantize_start > 0`: the first N positions are computed with a full-precision cache, then the whole stored cache converts; metrics cover the post-boundary region) and a shareable model-card fidelity badge (`--format badge`) driven by the documented threshold policy; also isolates a structurally malformed cached comparison partial.
 - **0.3.1** — Hardens `compare` error handling (consistent package-rooted errors; the CLI no longer masks unexpected errors), isolates cached partials with an invalid stored verdict, and adds a `measurement-principles.md` methodology document.
 - **0.3.0** — `compare` command: ranks weight-quant repos or KV-cache configs on a memory-normalized Pareto frontier (quality per byte), flags dominated configurations, and supports budget-filter shortcuts.
 - **0.2.0** — Weight-quantization fidelity: a quantized model repo scored against a higher-precision reference on the same corpus, with a compatibility gate and a memory pre-flight for the two-model load. Also fixes the KV cache group-size / head-dimension gate.

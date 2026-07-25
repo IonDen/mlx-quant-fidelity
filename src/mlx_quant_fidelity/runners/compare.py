@@ -444,7 +444,8 @@ def compare_kv_fidelity(
         model_id: HuggingFace model ID.
         configs: List of (bits, group_size) tuples; must contain at least 2 distinct entries.
         quantize_start: 0 = stress mode (default); ``1 ≤ N ≤ 510`` = deployment mode
-            (first N positions full-precision, metrics over the post-boundary region).
+            (first N positions computed with a full-precision cache, then the stored prefix
+            converts too; metrics cover the post-boundary region).
         max_chunks: Score at most this many corpus chunks (>= 1 if provided).
         max_kld: Optional KLD budget for the recommended pick.
         min_tier: Optional minimum tier for the recommended pick.

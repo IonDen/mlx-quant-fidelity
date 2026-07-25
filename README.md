@@ -100,7 +100,7 @@ M1 Max, WikiText-2 test (100 chunks of 512 tokens), stress mode (quantize from t
 | Qwen2.5-7B | 4 | 9.36 | 0.99 | bad |
 | Qwen2.5-7B | 8 | 0.009 | 0.032 | marginal |
 
-8-bit KV is near-lossless on all three models. 4-bit is another matter, and Qwen2.5-7B at 4-bit in stress mode falls apart: nearly every token flips. That is the attention sink at work: stress mode quantizes the cache from token 0, including the first tokens attention leans on most, and Qwen2.5 does not tolerate it. mlx-lm's own default keeps the first 5000 tokens full-precision for exactly this reason. Run the tool first and you see it coming.
+8-bit KV is near-lossless on all three models. 4-bit is another matter, and Qwen2.5-7B at 4-bit in stress mode falls apart: nearly every token flips. This measurement establishes a checkpoint-specific failure, not its cause. mlx-lm's default delays cache conversion until 5000 tokens, so those positions are computed while attention uses a full-precision cache. At the boundary, however, mlx-lm converts the entire stored prefix too. Run the tool first and you see the fidelity risk before deployment.
 
 ## How much does weight quantization cost?
 
@@ -139,7 +139,7 @@ Teacher-forced scoring, not generation. For each fixed-length corpus chunk the m
 Two modes:
 
 - **stress** (`--quantize-start 0`, the default): quantize from token 0. The harsh, apples-to-apples quantizer test.
-- **deployment** (`--quantize-start N`): keeps the first N positions full-precision, matching mlx-lm's `--quantized-kv-start` behavior. Metrics cover only the post-boundary region; per-token drift there is close to stress mode because those positions attend through an already-quantized cache. [docs/measurement-principles.md](docs/measurement-principles.md) has the details and why deployment numbers are not a long-context real-deployment average.
+- **deployment** (`--quantize-start N`): computes the first N positions with a full-precision cache, then converts the entire stored cache and scores only the post-boundary region. This matches mlx-lm's `--quantized-kv-start` conversion behavior; it does not preserve a full-precision prefix in storage. [docs/measurement-principles.md](docs/measurement-principles.md) explains why deployment and stress drift need a matched comparison and why neither is a long-context deployment average.
 
 A run that returns exactly zero drift raises instead of reporting a silent "perfect fidelity." That almost always means quantization never engaged, not that it was free.
 
@@ -152,6 +152,10 @@ See [docs/measurement-principles.md](docs/measurement-principles.md) for the zer
 - A fidelity number is **corpus- and context-length-specific**. WikiText-2 at temperature 0 measures short-prose distributional drift; the paper this builds on, *Accuracy Is Not All You Need*, shows that under-predicts task-specific and long-context degradation. Every report records the corpus and the token count so the number is never read as a bare score.
 - Perplexity delta is reported for continuity with llama.cpp. It is related to but distinct from mean KLD — it scores the realized next token and can diverge from full-vocabulary drift — so it is not independent corroboration.
 - The measured drift bundles the quantizer's error with the quantized-attention kernel's numerics. That is the real end-to-end cost; a quantizer-only control is on the roadmap.
+
+## Research notes
+
+- [Low-bit KV caches on MLX: what exists and what is missing](https://github.com/IonDen/mlx-quant-fidelity/blob/main/docs/papers/low-bit-kv-caches-on-mlx-what-exists-and-what-is-missing.md) — surveys mlx-lm's shipped cache, the measured 8-bit and 4-bit fidelity cost, KIVI/KVQuant-style alternatives, and the remaining MLX layout and kernel gaps.
 
 ## Status
 
