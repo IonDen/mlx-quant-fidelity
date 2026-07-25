@@ -15,4 +15,4 @@ Measured on **wikitext-2-raw/test**, 1020 positions across 4 chunks of length 51
 
 _mlx 0.31.2, mlx-lm 0.31.3, model rev `None`, peak 1.93 GB._
 
-> **Deployment mode:** metrics and the 1020 positions cover only the post-boundary quantized region; the first 256 positions per window are full-precision and excluded. Per-token drift ≈ stress (see docs/measurement-principles.md).
+> **Deployment mode:** metrics and the 1020 positions cover only the post-boundary region. The first 256 positions per window were computed with a full-precision cache and are excluded; at the boundary, their stored K/V entries are converted too. Compare drift with stress only in a matched measurement (see docs/measurement-principles.md).

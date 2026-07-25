@@ -119,7 +119,7 @@ def _score_chunk_deployment(
     group_size: int,
     bits: int,
 ) -> tuple[mx.array, mx.array, mx.array, mx.array]:
-    """Deployment split: first `quantize_start` prediction positions full-precision, rest quantized.
+    """Deployment split: compute the prefix in full precision, then convert the stored cache.
 
     Returns per-position (kl, flips, ref_nll, quant_nll) over ALL L-1 prediction positions.
     `quant_cache` starts full-precision (make_prompt_cache) and is converted to quantized at the
@@ -275,7 +275,8 @@ def measure_kv_fidelity(
         kv_bits: KV-cache quantization bits (default 4).
         kv_group_size: KV-cache quantization group size (default 64).
         quantize_start: 0 = stress mode (default); ``1 ≤ N ≤ chunk_length-2`` = deployment
-            mode (first N positions full-precision, metrics over the post-boundary region).
+            mode (first N positions computed with a full-precision cache, then the stored prefix
+            converts too; metrics cover the post-boundary region).
         corpus: Pre-built corpus to score. If None, WikiText-2 test split is fetched (requires
             network access and the ``--run-network`` marker in tests).
         max_chunks: Score at most this many corpus chunks (applies to both the auto-loaded and
@@ -297,7 +298,8 @@ def measure_kv_fidelity(
         if not (1 <= quantize_start <= window - 2):
             raise QuantizeStartError(
                 f"quantize_start={quantize_start} must be in [1, {window - 2}] "
-                f"(0 = stress mode; keeps the first N of {window} positions full-precision)."
+                f"(0 = stress mode; N computes the first N of {window} positions "
+                "before conversion)."
             )
     if max_chunks is not None and max_chunks < 1:
         raise CorpusError(f"max_chunks must be >= 1 (got {max_chunks}).")

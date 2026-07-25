@@ -164,9 +164,13 @@ def render_markdown(report: FidelityReport) -> str:
     ]
     if report.quantize_mode == "deployment":
         lines.append(
-            f"\n> **Deployment mode:** metrics and the {report.n_positions} positions cover only the "
-            f"post-boundary quantized region; the first {report.quantize_start} positions per window "
-            "are full-precision and excluded. Per-token drift ≈ stress (see docs/measurement-principles.md)."
+            f"\n> **Deployment mode:** metrics and the {report.n_positions} positions "
+            f"cover only the post-boundary region. The first {report.quantize_start} positions "
+            "per window were "
+            "computed with a full-precision cache and are excluded; at the boundary, their stored "
+            "K/V entries are converted too. Compare drift with stress only in a matched "
+            "measurement "
+            "(see docs/measurement-principles.md)."
         )
     return "\n".join(lines)
 

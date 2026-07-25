@@ -1,0 +1,55 @@
+@startuml
+title Why per-channel Key quantization needs a residual buffer
+
+top to bottom direction
+
+skinparam backgroundColor #FFFFFF
+skinparam shadowing false
+skinparam roundCorner 10
+skinparam defaultFontName Helvetica
+skinparam defaultFontColor #111827
+skinparam ArrowColor #4B5563
+skinparam ArrowFontColor #374151
+skinparam rectangle {
+  BorderColor #4B5563
+  FontColor #111827
+  BackgroundColor #F8FAFC
+}
+
+rectangle "mlx-lm today\nper-token groups for K and V" as shipped #EDE9FE {
+  rectangle "New decode token\nK_t and V_t" as token_current #DBEAFE
+  rectangle "Group along head_dim\nThe full group exists\nwhen the token arrives" as token_group #DCFCE7
+  rectangle "Quantize and pack once" as token_pack #DCFCE7
+  rectangle "Append packed K and V\nto the quantized cache" as token_cache #DCFCE7
+
+  token_current -down-> token_group
+  token_group -down-> token_pack
+  token_pack -down-> token_cache
+}
+
+rectangle "KIVI-style asymmetric layout\nnot implemented or validated here" as proposed #FEF3C7 {
+  rectangle "New decode token\nK_t and V_t" as token_kivi #DBEAFE
+  rectangle "Value path\nper-token group is complete" as value_group #DCFCE7
+  rectangle "Quantize V and append" as value_cache #DCFCE7
+
+  rectangle "Key path\nper-channel group spans tokens" as key_group #FDE68A
+  rectangle "Current Key group is incomplete\na direct append would repack it" as incomplete #FECACA
+  rectangle "Keep recent Keys in a\nfull-precision residual buffer" as residual #FEF3C7
+  rectangle "When group_size tokens arrive\nquantize the closed Key block" as close_block #DCFCE7
+  rectangle "Attention reads both\nquantized bulk + residual tail" as mixed_attention #DBEAFE
+
+  token_kivi -down-> key_group : K_t
+  token_kivi -down-> value_group : V_t
+  key_group -[hidden]right- value_group
+  value_group -down-> value_cache
+  key_group -down-> incomplete
+  incomplete -down-> residual
+  residual -down-> close_block : buffer fills
+  close_block -down-> mixed_attention
+  value_cache -down-> mixed_attention
+}
+
+proposed -[hidden]right-> shipped
+
+caption Conceptual decode and storage flow. It explains the layout constraint; it does not report a measured MLX implementation, speedup, or fidelity result.
+@enduml
