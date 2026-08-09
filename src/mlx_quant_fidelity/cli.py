@@ -18,7 +18,24 @@ from mlx_quant_fidelity.report import (
     render_markdown,
     render_weight_markdown,
 )
-from mlx_quant_fidelity.runners.compare import compare_kv_fidelity, compare_weight_fidelity
+from mlx_quant_fidelity.runners.compare import (
+    compare_kv_fidelity,
+    compare_weight_fidelity,
+    filter_configs_by_kv_budget,
+    generate_sweep_configs,
+    kv_geometry_from_config,
+)
+
+
+def _fetch_model_config(model_id: str) -> dict[str, object]:  # pragma: no cover - network
+    """Fetch just ``config.json`` from a HuggingFace repo — no weight download."""
+    import json as _json
+    from pathlib import Path
+
+    from huggingface_hub import hf_hub_download
+
+    with Path(hf_hub_download(model_id, "config.json")).open() as f:
+        return _json.load(f)  # type: ignore[no-any-return]
 
 
 def _parse_kv_configs(raw: str) -> list[tuple[int, int]]:
@@ -74,7 +91,19 @@ def main(argv: list[str] | None = None) -> int:
 
     ck = csub.add_parser("kv", help="rank N (bits:group_size) KV configs on one model")
     ck.add_argument("model")
-    ck.add_argument("--configs", required=True)
+    ck.add_argument("--configs", default=None, help="e.g. '4:32,4:64,8:64'")
+    ck.add_argument(
+        "--sweep",
+        action="store_true",
+        help="auto-generate the config grid from the model's config.json (mutually "
+        "exclusive with --configs)",
+    )
+    ck.add_argument(
+        "--max-kv-bytes-per-token",
+        type=int,
+        default=None,
+        help="--sweep only: drop configs whose KV bytes/token exceed this budget",
+    )
     ck.add_argument("--quantize-start", type=int, default=0)
     ck.add_argument("--max-chunks", type=int, default=None)
     ck.add_argument("--chunk-length", type=int, default=512)
@@ -125,11 +154,58 @@ def main(argv: list[str] | None = None) -> int:
                 else render_comparison_markdown(creport)
             )
         elif args.compare_mode == "kv":
-            try:
-                configs = _parse_kv_configs(args.configs)
-            except ValueError as exc:
-                print(f"error: {exc}", file=sys.stderr)
+            if bool(args.configs) == bool(args.sweep):
+                print("error: exactly one of --configs or --sweep is required", file=sys.stderr)
                 return 2
+            if args.max_kv_bytes_per_token is not None and not args.sweep:
+                print(
+                    "error: --max-kv-bytes-per-token is only valid with --sweep",
+                    file=sys.stderr,
+                )
+                return 2
+            skipped_configs: list[tuple[str, str]] = []
+            if args.sweep:
+                config_json = _fetch_model_config(args.model)
+                n_layers, n_kv_heads, head_dim = kv_geometry_from_config(config_json)
+                if head_dim is None:
+                    print(
+                        "error: cannot derive head_dim from config.json; pass --configs explicitly",
+                        file=sys.stderr,
+                    )
+                    return 2
+                grid, sweep_skipped = generate_sweep_configs(head_dim)
+                if args.max_kv_bytes_per_token is not None:
+                    if n_layers is None or n_kv_heads is None:
+                        print(
+                            "error: cannot apply --max-kv-bytes-per-token: config.json is "
+                            "missing num_hidden_layers/num_key_value_heads",
+                            file=sys.stderr,
+                        )
+                        return 2
+                    kept, budget_skipped = filter_configs_by_kv_budget(
+                        grid,
+                        n_layers=n_layers,
+                        n_kv_heads=n_kv_heads,
+                        head_dim=head_dim,
+                        max_kv_bytes_per_token=args.max_kv_bytes_per_token,
+                    )
+                else:
+                    kept, budget_skipped = grid, []
+                if len(kept) < 2:
+                    print(
+                        "error: fewer than 2 configs remain after "
+                        f"--max-kv-bytes-per-token={args.max_kv_bytes_per_token}",
+                        file=sys.stderr,
+                    )
+                    return 2
+                configs = kept
+                skipped_configs = sweep_skipped + budget_skipped
+            else:
+                try:
+                    configs = _parse_kv_configs(args.configs)
+                except ValueError as exc:
+                    print(f"error: {exc}", file=sys.stderr)
+                    return 2
             creport = compare_kv_fidelity(
                 args.model,
                 configs,
@@ -138,6 +214,7 @@ def main(argv: list[str] | None = None) -> int:
                 chunk_length=args.chunk_length,
                 max_kld=args.max_kld,
                 min_tier=args.min_tier,
+                skipped_configs=skipped_configs,
             )
             out = (
                 render_comparison_json(creport)

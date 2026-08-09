@@ -290,7 +290,7 @@ def render_comparison_markdown(report: ComparisonReport) -> str:
     if excluded:
         lines += ["", "**Excluded (not ranked):**"]
         for r in excluded:
-            why = r.excluded_reason if r.status == "ok" else f"{r.error_type}: {r.message}"
+            why = r.excluded_reason or f"{r.error_type}: {r.message}"
             lines.append(f"- `{r.label}` — {why}")
     lines += [""]
     if report.budget_pick is not None:

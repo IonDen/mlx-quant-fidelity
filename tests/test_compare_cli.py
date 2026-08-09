@@ -146,3 +146,87 @@ def test_compare_does_not_swallow_unexpected_valueerror():
         pytest.raises(ValueError, match="unexpected boom"),
     ):
         main(["compare", "weights", "a/x-4bit", "b/y-8bit", "--reference", "ref/repo"])
+
+
+# ── Task 8 (0035): compare kv --sweep + KV-byte budget filter ─────────────────
+
+_SWEEP_CONFIG_JSON = {
+    "num_hidden_layers": 16,
+    "num_attention_heads": 8,
+    "num_key_value_heads": 8,
+    "hidden_size": 512,
+}  # head_dim = 512 // 8 = 64
+
+
+def test_cli_sweep_and_configs_mutually_exclusive(capsys):
+    assert main(["compare", "kv", "m", "--configs", "4:64,8:64", "--sweep"]) == 2
+
+
+def test_cli_kv_neither_configs_nor_sweep_exits_2(capsys):
+    assert main(["compare", "kv", "m"]) == 2
+
+
+def test_cli_max_kv_bytes_without_sweep_exits_2(capsys):
+    rc = main(["compare", "kv", "m", "--configs", "4:64,8:64", "--max-kv-bytes-per-token", "5000"])
+    assert rc == 2
+    assert "sweep" in capsys.readouterr().err.lower()
+
+
+def test_cli_sweep_dispatches_generated_grid(monkeypatch, capsys):
+    captured = {}
+
+    def fake_compare(model, configs, **kw):
+        captured["args"] = (model, configs, kw)
+        return _fake_comparison("kv")
+
+    monkeypatch.setattr(cli, "compare_kv_fidelity", fake_compare)
+    monkeypatch.setattr(cli, "_fetch_model_config", lambda model_id: _SWEEP_CONFIG_JSON)
+    rc = main(["compare", "kv", "m", "--sweep"])
+    assert rc == 0
+    model, configs, kw = captured["args"]
+    assert model == "m"
+    assert (4, 64) in configs
+    assert len(configs) == 10  # 5 bits x {32, 64}; 128 doesn't divide head_dim=64
+    assert kw["skipped_configs"] == []
+
+
+def test_cli_sweep_head_dim_none_exits_2(monkeypatch, capsys):
+    monkeypatch.setattr(cli, "_fetch_model_config", lambda model_id: {})
+    rc = main(["compare", "kv", "m", "--sweep"])
+    assert rc == 2
+    assert "head_dim" in capsys.readouterr().err.lower()
+
+
+def test_cli_sweep_with_budget_filters_and_names_skips(monkeypatch, capsys):
+    captured = {}
+
+    def fake_compare(model, configs, **kw):
+        captured["args"] = (model, configs, kw)
+        return _fake_comparison("kv")
+
+    monkeypatch.setattr(cli, "compare_kv_fidelity", fake_compare)
+    monkeypatch.setattr(cli, "_fetch_model_config", lambda model_id: _SWEEP_CONFIG_JSON)
+    rc = main(["compare", "kv", "m", "--sweep", "--max-kv-bytes-per-token", "9000"])
+    assert rc == 0
+    _, configs, kw = captured["args"]
+    assert 2 <= len(configs) < 10
+    assert kw["skipped_configs"]  # some configs were pushed to skipped by the budget
+
+
+def test_cli_sweep_budget_below_two_kept_exits_2(monkeypatch, capsys):
+    monkeypatch.setattr(cli, "_fetch_model_config", lambda model_id: _SWEEP_CONFIG_JSON)
+    rc = main(["compare", "kv", "m", "--sweep", "--max-kv-bytes-per-token", "1"])
+    assert rc == 2
+    assert "max-kv-bytes-per-token" in capsys.readouterr().err.lower()
+
+
+def test_cli_sweep_budget_with_incomplete_geometry_exits_2(monkeypatch, capsys):
+    """head_dim is resolvable (explicit key) but n_layers/n_kv_heads are not; the budget
+    can't be costed, so this must exit 2 rather than crash inside filter_configs_by_kv_budget.
+    """
+    monkeypatch.setattr(cli, "_fetch_model_config", lambda model_id: {"head_dim": 64})
+    rc = main(["compare", "kv", "m", "--sweep", "--max-kv-bytes-per-token", "9000"])
+    assert rc == 2
+    err = capsys.readouterr().err.lower()
+    assert "max-kv-bytes-per-token" in err
+    assert "num_hidden_layers" in err or "num_key_value_heads" in err

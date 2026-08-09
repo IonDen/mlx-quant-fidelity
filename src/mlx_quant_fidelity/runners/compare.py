@@ -14,7 +14,12 @@ from mlx_quant_fidelity._memory_caps import install_memory_caps
 from mlx_quant_fidelity.costs import kv_bytes_per_token
 from mlx_quant_fidelity.errors import CompareConfigError, QuantizeStartError, ReportSchemaError
 from mlx_quant_fidelity.policy import VALID_VERDICTS, qualifies
-from mlx_quant_fidelity.probes.kv import MAX_CHUNK_LENGTH, _kv_head_dim, score_kv_config
+from mlx_quant_fidelity.probes.kv import (
+    MAX_CHUNK_LENGTH,
+    _kv_head_dim,
+    packed_width_mismatch,
+    score_kv_config,
+)
 from mlx_quant_fidelity.ranking import RankPoint, budget_pick, dominated_by, pareto_frontier
 from mlx_quant_fidelity.report import (
     ComparisonReport,
@@ -324,6 +329,110 @@ def _kv_config_label(bits: int, group_size: int) -> str:
     return f"{bits}:{group_size}"
 
 
+_SWEEP_BITS: tuple[int, ...] = (2, 3, 4, 6, 8)
+_SWEEP_GROUP_SIZES: tuple[int, ...] = (32, 64, 128)
+
+
+def generate_sweep_configs(head_dim: int) -> tuple[list[tuple[int, int]], list[tuple[str, str]]]:
+    """Auto-generate the (bits, group_size) grid for ``compare kv --sweep``.
+
+    Group sizes are drawn from ``(32, 64, 128)``, filtered to those dividing ``head_dim``;
+    bits are ``(2, 3, 4, 6, 8)``. A combination where :func:`packed_width_mismatch` is True
+    (the upstream mlx-lm ``QuantizedKVCache`` pre-allocation bug — see ``probes/kv.py``) is
+    routed to ``skipped`` with a reason instead of the grid, so a sweep never emits a failed
+    row for a known-broken width.
+
+    Raises:
+        CompareConfigError: If no group size in ``(32, 64, 128)`` divides ``head_dim``.
+    """
+    group_sizes = [gs for gs in _SWEEP_GROUP_SIZES if head_dim % gs == 0]
+    if not group_sizes:
+        raise CompareConfigError(
+            f"head_dim={head_dim} is not divisible by any of {list(_SWEEP_GROUP_SIZES)}; "
+            "pass --configs explicitly with a group size that divides the model's KV head_dim."
+        )
+    grid: list[tuple[int, int]] = []
+    skipped: list[tuple[str, str]] = []
+    for bits in _SWEEP_BITS:
+        for gs in group_sizes:
+            label = _kv_config_label(bits, gs)
+            if packed_width_mismatch(head_dim, bits):
+                skipped.append(
+                    (
+                        label,
+                        f"bits={bits} at head_dim={head_dim} hits an upstream mlx-lm "
+                        "QuantizedKVCache packed-width bug (pre-allocation width disagrees "
+                        "with mx.quantize's packed width); excluded from the sweep.",
+                    )
+                )
+                continue
+            grid.append((bits, gs))
+    return grid, skipped
+
+
+def kv_geometry_from_config(
+    config: dict[str, object],
+) -> tuple[int | None, int | None, int | None]:
+    """Derive ``(n_layers, n_kv_heads, head_dim)`` from a raw HuggingFace ``config.json`` dict.
+
+    Honors ``text_config`` nesting (multimodal configs carry the language-model geometry
+    there). ``head_dim`` falls back to ``hidden_size // num_attention_heads`` when absent;
+    ``num_key_value_heads`` falls back to ``num_attention_heads`` (dense attention). A field
+    that can't be resolved to an int comes back ``None`` rather than raising — the caller
+    decides what's fatal.
+    """
+    nested = config.get("text_config")
+    cfg = nested if isinstance(nested, dict) else config
+
+    def _int_or_none(v: object) -> int | None:
+        return v if isinstance(v, int) else None
+
+    n_layers = _int_or_none(cfg.get("num_hidden_layers"))
+    n_heads = _int_or_none(cfg.get("num_attention_heads"))
+    n_kv_heads = _int_or_none(cfg.get("num_key_value_heads"))
+    if n_kv_heads is None:
+        n_kv_heads = n_heads
+    head_dim = _int_or_none(cfg.get("head_dim"))
+    if head_dim is None:
+        hidden_size = _int_or_none(cfg.get("hidden_size"))
+        if hidden_size is not None and n_heads:
+            head_dim = hidden_size // n_heads
+    return n_layers, n_kv_heads, head_dim
+
+
+def filter_configs_by_kv_budget(
+    configs: list[tuple[int, int]],
+    *,
+    n_layers: int,
+    n_kv_heads: int,
+    head_dim: int,
+    max_kv_bytes_per_token: int,
+) -> tuple[list[tuple[int, int]], list[tuple[str, str]]]:
+    """Partition ``configs`` into ``(kept, skipped)`` by a KV-byte-per-token budget.
+
+    Costed via :func:`~mlx_quant_fidelity.costs.kv_bytes_per_token` — the same denominator
+    ``compare kv`` ranks on.
+    """
+    kept: list[tuple[int, int]] = []
+    skipped: list[tuple[str, str]] = []
+    for bits, gs in configs:
+        cost = kv_bytes_per_token(
+            n_layers=n_layers, n_kv_heads=n_kv_heads, head_dim=head_dim, bits=bits, group_size=gs
+        )
+        label = _kv_config_label(bits, gs)
+        if cost > max_kv_bytes_per_token:
+            skipped.append(
+                (
+                    label,
+                    f"{cost} B/token exceeds the --max-kv-bytes-per-token budget of "
+                    f"{max_kv_bytes_per_token}",
+                )
+            )
+        else:
+            kept.append((bits, gs))
+    return kept, skipped
+
+
 def _validate_compare_kv_args(
     configs: list[tuple[int, int]],
     *,
@@ -475,6 +584,7 @@ def compare_kv_fidelity(
     artifacts_dir: Path | None = None,
     model_revision: str | None = None,
     chunk_length: int = 512,
+    skipped_configs: list[tuple[str, str]] | None = None,
 ) -> ComparisonReport:
     """Rank N (bits, group_size) KV-cache configs on one model, quality-per-KV-byte-per-token.
 
@@ -498,6 +608,11 @@ def compare_kv_fidelity(
         model_revision: HuggingFace model revision.
         chunk_length: Tokens per chunk for the auto-loaded corpus (default 512). Must be in
             ``[2, MAX_CHUNK_LENGTH]``; see :func:`~mlx_quant_fidelity.probes.kv.measure_kv_fidelity`.
+        skipped_configs: ``(label, reason)`` pairs (e.g. from :func:`generate_sweep_configs` or
+            :func:`filter_configs_by_kv_budget`) that were excluded before scoring — from a
+            known-broken packed width or a KV-byte budget. Each becomes a ``"skipped"``
+            :class:`~mlx_quant_fidelity.report.ComparisonTargetResult`, excluded from the
+            frontier and listed under "Excluded (not ranked)" in the markdown render.
 
     Returns:
         A ComparisonReport with Pareto frontier, dominated map, and optional budget pick.
@@ -635,6 +750,11 @@ def compare_kv_fidelity(
         if corpus_prov is None and result.report is not None:
             corpus_prov = result.report.corpus
         results.append(result)
+
+    for skip_label, skip_reason in skipped_configs or []:
+        results.append(
+            ComparisonTargetResult(skip_label, "skipped", None, None, skip_reason, None, None)
+        )
 
     return assemble_comparison_report(
         results,

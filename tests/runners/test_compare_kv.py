@@ -952,3 +952,95 @@ def test_validate_compare_kv_args_quantize_start_bound_follows_chunk_length():
     _validate_compare_kv_args(  # 1022 is the last valid boundary — no raise
         [(4, 64), (8, 64)], quantize_start=1022, max_chunks=None, chunk_length=1024
     )
+
+
+# ── Task 8 (0035): compare kv --sweep + KV-byte budget filter ─────────────────
+
+
+def test_sweep_grid_from_head_dim_64():
+    # 5 widths x {32, 64} (128 does not divide 64) -> 10 configs, hand-listed;
+    # bits 6 has NO packed-width mismatch at head_dim 64, so nothing is skipped
+    grid, skipped = cmp.generate_sweep_configs(64)
+    assert grid == [
+        (2, 32),
+        (2, 64),
+        (3, 32),
+        (3, 64),
+        (4, 32),
+        (4, 64),
+        (6, 32),
+        (6, 64),
+        (8, 32),
+        (8, 64),
+    ]
+    assert skipped == []
+
+
+def test_sweep_grid_head_dim_128_skips_broken_bits6():
+    # packed_width_mismatch(128, 6) is True (the 0031 crash) -> bits-6 combos are
+    # skipped with the upstream reason, never emitted as failed rows
+    grid, skipped = cmp.generate_sweep_configs(128)
+    assert all(bits != 6 for bits, _ in grid)
+    assert {label for label, _ in skipped} == {"6:32", "6:64", "6:128"}
+    assert all("mlx-lm" in reason for _, reason in skipped)
+
+
+def test_sweep_grid_indivisible_head_dim_raises():
+    with pytest.raises(CompareConfigError, match="head_dim=48"):
+        cmp.generate_sweep_configs(48)
+
+
+def test_geometry_from_flat_and_nested_config():
+    flat = {
+        "num_hidden_layers": 16,
+        "num_attention_heads": 32,
+        "num_key_value_heads": 8,
+        "hidden_size": 2048,
+    }
+    assert cmp.kv_geometry_from_config(flat) == (16, 8, 64)
+    assert cmp.kv_geometry_from_config({"text_config": flat}) == (16, 8, 64)
+
+
+def test_geometry_missing_head_dim_and_hidden_size_is_all_none():
+    assert cmp.kv_geometry_from_config({}) == (None, None, None)
+
+
+def test_budget_filter_partitions_and_names_reason():
+    kept, skipped = cmp.filter_configs_by_kv_budget(
+        [(8, 64), (2, 64)],
+        n_layers=16,
+        n_kv_heads=8,
+        head_dim=64,
+        max_kv_bytes_per_token=6000,
+    )
+    # hand-derived via kv_bytes_per_token: elements = 2*16*8*64 = 16384;
+    # 8-bit: 16384*(1 + 4/64) = 17408 (over 6000); 2-bit: 16384*(0.25 + 4/64) = 5120 (under)
+    assert kept == [(2, 64)]
+    assert skipped[0][0] == "8:64"
+    assert "B/token" in skipped[0][1]
+
+
+def test_skipped_configs_appear_in_report_not_frontier(monkeypatch, tmp_path):
+    """skipped_configs entries become 'skipped' results, excluded from the frontier, and
+    listed under **Excluded (not ranked):** with the reason text in the markdown render.
+    """
+    from mlx_quant_fidelity.report import render_comparison_markdown
+
+    reports = {(4, 64): _fid((4, 64), 0.09), (8, 64): _fid((8, 64), 0.01)}
+    _patch_kv_compare(monkeypatch, reports)
+    report = cmp.compare_kv_fidelity(
+        "m",
+        [(4, 64), (8, 64)],
+        artifacts_dir=tmp_path,
+        skipped_configs=[
+            ("6:64", "17408 B/token exceeds the --max-kv-bytes-per-token budget of 1000")
+        ],
+    )
+    skipped_result = next(r for r in report.results if r.label == "6:64")
+    assert skipped_result.status == "skipped"
+    assert skipped_result.point is None
+    assert skipped_result.report is None
+    assert "6:64" not in report.frontier
+    md = render_comparison_markdown(report)
+    assert "**Excluded (not ranked):**" in md
+    assert "`6:64` — 17408 B/token exceeds the --max-kv-bytes-per-token budget of 1000" in md
