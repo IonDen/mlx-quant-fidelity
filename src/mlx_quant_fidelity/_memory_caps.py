@@ -39,15 +39,15 @@ def device_string() -> str | None:
     """
     try:
         info = mx.device_info()
-    except Exception:  # pragma: no cover - defensive: provenance must never break a probe
+        name = info.get("device_name")
+        if not isinstance(name, str) or not name:
+            return None
+        mem = info.get("memory_size")
+        if isinstance(mem, int) and mem > 0:
+            return f"{name}, {round(mem / 1024**3)} GB"
+        return name
+    except Exception:
         return None
-    name = info.get("device_name")
-    if not isinstance(name, str) or not name:
-        return None
-    mem = info.get("memory_size")
-    if isinstance(mem, int) and mem > 0:
-        return f"{name}, {round(mem / 1024**3)} GB"
-    return name
 
 
 def install_memory_caps() -> tuple[int, int]:

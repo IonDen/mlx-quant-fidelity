@@ -16,6 +16,28 @@ def test_device_string_none_when_unreported(monkeypatch):
     assert device_string() is None
 
 
+def test_device_string_none_when_device_info_raises(monkeypatch):
+    def _boom():
+        raise RuntimeError("no metal device")
+
+    monkeypatch.setattr(_memory_caps.mx, "device_info", _boom)
+    assert device_string() is None
+
+
+def test_device_string_name_only_when_memory_size_absent(monkeypatch):
+    monkeypatch.setattr(_memory_caps.mx, "device_info", lambda: {"device_name": "Apple M1 Max"})
+    assert device_string() == "Apple M1 Max"
+
+
+def test_device_string_name_only_when_memory_size_non_positive(monkeypatch):
+    monkeypatch.setattr(
+        _memory_caps.mx,
+        "device_info",
+        lambda: {"device_name": "Apple M1 Max", "memory_size": 0},
+    )
+    assert device_string() == "Apple M1 Max"
+
+
 def test_clamp_uses_desired_on_large_device():
     # 25 GB recommended → desired (20, 22) fits unchanged
     assert _memory_caps._clamp_caps_gb(25) == (20, 22)
