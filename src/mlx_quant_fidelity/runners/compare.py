@@ -186,6 +186,18 @@ def _run_weight_target(
 
 
 def _envelope_to_result(label: str, env: dict[str, object]) -> ComparisonTargetResult:
+    # env is unvalidated json.loads output at the caller; the annotation is a lie mypy
+    # believes but the runtime value may not honor — defend against a non-dict top level.
+    if not isinstance(env, dict):
+        return ComparisonTargetResult(  # type: ignore[unreachable]
+            label,
+            "failed",
+            None,
+            None,
+            None,
+            "CorruptPartial",
+            f"partial for {label!r} is not a JSON object",
+        )
     if env.get("status") == "failed":
         # fix 3: absent keys yield None, not the string "None"
         return ComparisonTargetResult(
@@ -263,6 +275,8 @@ def compare_weight_fidelity(
                 env = json.loads(partial.read_text())
             except (json.JSONDecodeError, OSError):
                 env = None
+            if not isinstance(env, dict):
+                env = None  # valid JSON but not an object — treat as absent, recompute
         # Full run-identity guard: recompute if the partial is absent, has a non-ok status,
         # or its stored run_identity doesn't match the current call's full identity.
         if env is not None:
@@ -369,6 +383,18 @@ def _kv_dims(model: object) -> tuple[int | None, int | None, int | None]:
 
 def _kv_envelope_to_result(label: str, env: dict[str, object]) -> ComparisonTargetResult:
     """Convert a stored KV partial envelope to a ComparisonTargetResult."""
+    # env is unvalidated json.loads output at the caller; the annotation is a lie mypy
+    # believes but the runtime value may not honor — defend against a non-dict top level.
+    if not isinstance(env, dict):
+        return ComparisonTargetResult(  # type: ignore[unreachable]
+            label,
+            "failed",
+            None,
+            None,
+            None,
+            "CorruptPartial",
+            f"partial for {label!r} is not a JSON object",
+        )
     if env.get("status") == "failed":
         return ComparisonTargetResult(
             label,
@@ -481,6 +507,8 @@ def compare_kv_fidelity(
             raw: dict[str, object] = json.loads(partial.read_text())
         except (json.JSONDecodeError, OSError):
             return None  # corrupt/truncated — treat as absent, recompute
+        if not isinstance(raw, dict):
+            return None  # type: ignore[unreachable]  # valid JSON but not an object — recompute
         if raw.get("status") != "ok":
             return None
         expected_identity: dict[str, object] = {

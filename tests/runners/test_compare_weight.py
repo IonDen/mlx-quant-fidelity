@@ -389,3 +389,36 @@ def test_weight_envelope_with_invalid_verdict_is_corrupt_partial():
     result = _envelope_to_result("q4", env)
     assert result.status == "failed"
     assert result.error_type == "CorruptPartial"
+
+
+# ── Task 1 (0030): non-dict top-level partial isolation ───────────────────────
+
+
+def test_weight_envelope_non_dict_is_corrupt_partial():
+    """`_envelope_to_result` on a non-dict envelope is a CorruptPartial, not an
+    AttributeError crash (previously `env.get("status")` raised on an int/list).
+    """
+    from mlx_quant_fidelity.runners.compare import _envelope_to_result
+
+    result = _envelope_to_result("repo/x", 42)  # type: ignore[arg-type]
+    assert (result.status, result.error_type) == ("failed", "CorruptPartial")
+
+
+def test_compare_weight_null_partial_is_recomputed(monkeypatch, tmp_path):
+    """A partial file whose top-level JSON is valid but not an object (`null`) must be
+    treated as absent by the resume loop — the target is recomputed, not a crash.
+    """
+    (tmp_path / "q8.json").write_text("null")
+
+    calls = []
+
+    def _fake_run(quant, reference, partial_path, max_chunks):
+        calls.append(quant)
+        env = _ok_envelope(quant, 0.01, 8000)
+        partial_path.write_text(json.dumps(env))
+        return env
+
+    monkeypatch.setattr(cmp, "_run_weight_target", _fake_run)
+    report = cmp.compare_weight_fidelity(["q8", "q6"], "ref", artifacts_dir=tmp_path)
+    assert "q8" in calls  # non-dict partial triggered a re-run
+    assert len(report.results) == 2

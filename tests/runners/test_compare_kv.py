@@ -844,3 +844,31 @@ def test_compare_kv_stress_partial_recomputed_for_deployment(monkeypatch, tmp_pa
             "org/m", [(4, 64), (8, 64)], quantize_start=5, artifacts_dir=tmp_path
         )
     assert loaded["n"] == 1  # both stress partials rejected → recompute triggered → load fires once
+
+
+# ── Task 1 (0030): non-dict top-level partial isolation ───────────────────────
+
+
+def test_compare_kv_non_dict_toplevel_partial_is_recomputed(monkeypatch, tmp_path):
+    """A partial file whose top-level JSON is valid but not an object (e.g. `[]`) must be
+    treated as absent by `_read_partial` — the config becomes pending and is recomputed,
+    not a crash (previously `raw.get("status")` raised AttributeError on a list).
+    """
+    (tmp_path / "8_64.json").write_text("[]")
+    reports = {(4, 64): _fid((4, 64), 0.09), (8, 64): _fid((8, 64), 0.01)}
+    calls = _patch_kv_compare(monkeypatch, reports)
+    report = cmp.compare_kv_fidelity("m", [(4, 64), (8, 64)], artifacts_dir=tmp_path)
+    # (8, 64) must have been re-scored — the non-dict partial is not resumed
+    assert (8, 64) in calls
+    result_8 = next(r for r in report.results if r.label == "8:64")
+    assert result_8.status == "ok"
+
+
+def test_kv_envelope_non_dict_is_corrupt_partial():
+    """`_kv_envelope_to_result` on a non-dict envelope (collect-time guard) is a CorruptPartial,
+    not an AttributeError crash.
+    """
+    from mlx_quant_fidelity.runners.compare import _kv_envelope_to_result
+
+    result = _kv_envelope_to_result("4:64", [])  # type: ignore[arg-type]
+    assert (result.status, result.error_type) == ("failed", "CorruptPartial")
