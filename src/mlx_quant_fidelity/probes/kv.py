@@ -187,6 +187,8 @@ def score_kv_config(
     )
     if head_dim_warning is not None:
         probe_warnings.append(head_dim_warning)
+    if kv_bits not in (2, 3, 4, 6, 8):
+        raise CacheNotQuantizableError(f"unsupported kv_bits={kv_bits}; MLX supports 2/3/4/6/8.")
     if head_dim is not None and packed_width_mismatch(head_dim, kv_bits):
         raise CacheNotQuantizableError(
             f"kv_bits={kv_bits} cannot append to a fresh QuantizedKVCache at "

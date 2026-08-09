@@ -595,6 +595,22 @@ def test_bits6_head_dim_64_still_measures(monkeypatch):
     assert report.kv_bits == 6
 
 
+def test_bits5_head_dim_128_reports_unsupported_bits_not_packing_bug():
+    # Regression: the packed-width gate must not shadow the unsupported-bits check.
+    # packed_width_mismatch(128, 5) is True (128 // 6 = 21 != 128 * 5 // 32 = 20), but the
+    # message users see must be the "unsupported kv_bits" one, not the mlx-lm packing message.
+    model = _FakeDivergentModel(head_dim=128)
+    with pytest.raises(CacheNotQuantizableError, match="unsupported kv_bits=5"):
+        score_kv_config(model, _kv_corpus(1), model_id="fake", kv_bits=5, kv_group_size=32)
+
+
+def test_bits0_head_dim_128_raises_clean_error_not_zerodivision():
+    # Regression: packed_width_mismatch's `32 // bits` must never run on an unvalidated bits=0.
+    model = _FakeDivergentModel(head_dim=128)
+    with pytest.raises(CacheNotQuantizableError, match="unsupported kv_bits=0"):
+        score_kv_config(model, _kv_corpus(1), model_id="fake", kv_bits=0, kv_group_size=32)
+
+
 class _FakeBroadcastCrashModel:
     """head_dim=64 (agrees at any gated bits) so the early gate does NOT fire; the forward call
     against a quantized cache raises the raw mlx-lm broadcast_shapes ValueError instead, so this
