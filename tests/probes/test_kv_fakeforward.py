@@ -722,19 +722,45 @@ def test_chunk_length_above_ceiling_rejected():
         measure_kv_fidelity("fake", chunk_length=MAX_CHUNK_LENGTH + 1)
 
 
+def test_corpus_chunk_length_above_ceiling_rejected():
+    # A caller-provided corpus bypasses the chunk_length knob entirely (load_wikitext2 is
+    # public with an unbounded chunk_length), so the ceiling must ALSO be enforced against
+    # corpus.provenance.chunk_length directly -- a "warning, not refusal" hole otherwise.
+    # chunk_length stays at its default (512) so this isolates the corpus-path check from the
+    # separate "chunk_length set together with a corpus" mismatch check.
+    corpus = Corpus(
+        chunks=(mx.arange(4),),
+        provenance=CorpusProvenance("x", "test", "t", 8192, 8192, "none", "drop", "raw", 4),
+    )
+    with pytest.raises(CorpusError, match="MAX_CHUNK_LENGTH"):
+        measure_kv_fidelity("fake", corpus=corpus)
+    # No mocked install_memory_caps/load: reaching either would hang/error on a real network
+    # call, so pytest.raises firing fast is itself evidence no scoring was attempted.
+
+
 def test_quantize_start_bound_follows_chunk_length():
-    # window=1024 -> valid boundary up to 1022; 1023 must raise QuantizeStartError
+    # chunk_length=8 -> valid boundary up to 6; quantize_start=7 must raise. A regression that
+    # silently fell back to the old hardcoded window=512 would compute bound=510 and WRONGLY
+    # accept quantize_start=7, so this specific (small chunk_length, near-boundary start) pair
+    # is what actually discriminates the two implementations -- window=1024/start=1023 would
+    # also raise under a hardcoded-512 fallback (1023 > 510 either way).
     from mlx_quant_fidelity.errors import QuantizeStartError
 
     with pytest.raises(QuantizeStartError):
-        measure_kv_fidelity("fake", quantize_start=1023, chunk_length=1024)
+        measure_kv_fidelity("fake", quantize_start=7, chunk_length=8)
 
 
 def test_large_window_emits_memory_warning(monkeypatch):
-    # provenance.chunk_length=8192, model args.vocab_size=128_000 -> paired fp32 logits
-    # peak ~= 2*(8192-1)*128000*4 bytes ~= 8.4 GB > the 4 GiB threshold -> warning fires.
+    # window=4096 (== MAX_CHUNK_LENGTH, so reachable through the public chunk_length knob --
+    # unlike an out-of-ceiling window, which could never reach score_kv_config for real),
+    # vocab=151_936 (Qwen2-class) -> paired fp32 logits peak (two logits arrays + two
+    # log-softmax temporaries, all fp32) ~= 4*(4096-1)*151936*4 bytes ~= 9.3 GiB, over the
+    # 4 GiB threshold -> warning fires.
     _patch_kv_caches_divergent(monkeypatch)
     model = _FakeDivergentModel(head_dim=64)
-    model.args.vocab_size = 128_000
-    report = score_kv_config(model, _kv_corpus(1, chunk_len=8192), model_id="fake")
-    assert any("fp32 logits" in w for w in report.warnings)
+    model.args.vocab_size = 151_936
+    report = score_kv_config(model, _kv_corpus(1, chunk_len=4096), model_id="fake")
+    # Pins the 4x multiplier (2 logits + 2 log-softmax temporaries) and the GiB unit: a
+    # regression back to the old 2x multiplier would compute 4.6 GiB here, not 9.3 GiB.
+    expected_gib = 4 * (4096 - 1) * 151_936 * 4 / 1024**3
+    assert any(f"{expected_gib:.1f} GiB" in w for w in report.warnings)

@@ -199,11 +199,16 @@ def score_kv_config(
         probe_warnings.append(head_dim_warning)
     window = getattr(corpus.provenance, "chunk_length", None)
     vocab = getattr(getattr(model, "args", None), "vocab_size", None)
-    if window and vocab and 2 * (window - 1) * int(vocab) * 4 > 4 * 1024**3:
+    # Multiplier is 4, not 2: _reduce_pair's log-softmax temporaries are also [positions, vocab]
+    # fp32 and live alongside the two raw logits arrays under the lazy graph, so counting only
+    # the logits under-estimates the real peak by ~2x. This is a deliberately upper-bound
+    # estimate — a safety warning must err high, not low — pending the measured-peak
+    # reconciliation a later long-window spike will validate.
+    if window and vocab and 4 * (window - 1) * int(vocab) * 4 > 4 * 1024**3:
         probe_warnings.append(
             f"chunk_length={window}: paired fp32 logits peak ≈ "
-            f"{2 * (window - 1) * int(vocab) * 4 / 1e9:.1f} GB per chunk; "
-            "see docs/measurement-principles.md (drift by depth) for measured ceilings."
+            f"{4 * (window - 1) * int(vocab) * 4 / 1024**3:.1f} GiB per chunk; "
+            "see docs/measurement-principles.md (Drift by position depth) for measured ceilings."
         )
     if kv_bits not in (2, 3, 4, 6, 8):
         raise CacheNotQuantizableError(f"unsupported kv_bits={kv_bits}; MLX supports 2/3/4/6/8.")
@@ -341,6 +346,8 @@ def measure_kv_fidelity(
         corpus: Pre-built corpus to score. If None, WikiText-2 test split is fetched (requires
             network access and the ``--run-network`` marker in tests). ``chunk_length`` must be
             left at its default when a corpus is supplied — the corpus already fixes its window.
+            ``corpus.provenance.chunk_length`` is still checked against ``MAX_CHUNK_LENGTH``
+            (the safety ceiling applies to every window, not only the auto-loaded one).
         max_chunks: Score at most this many corpus chunks (applies to both the auto-loaded and
             a caller-provided corpus).
         model_revision: HuggingFace model revision (commit SHA or tag).
@@ -357,7 +364,8 @@ def measure_kv_fidelity(
         CacheNotQuantizableError: If the model's KV cache does not support quantization.
         ExactZeroError: If KLD and flip rate are exactly 0 (quantization did not engage).
         CorpusError: If chunk_length is out of range, or is set together with a caller-provided
-            corpus, or the corpus/max_chunks combination yields no chunks.
+            corpus, or a caller-provided corpus's own chunk_length exceeds MAX_CHUNK_LENGTH, or
+            the corpus/max_chunks combination yields no chunks.
     """
     from mlx_lm import load
 
@@ -371,8 +379,15 @@ def measure_kv_fidelity(
         raise CorpusError(
             f"chunk_length={chunk_length} must be between 2 and MAX_CHUNK_LENGTH="
             f"{MAX_CHUNK_LENGTH} (a hard safety ceiling — larger windows hold larger paired "
-            "fp32 logits per chunk and risk a kernel panic; see Task 7's measured ceiling "
-            "before raising it)."
+            "fp32 logits per chunk and risk a kernel panic — raising it requires re-validating "
+            "peak memory; see docs/measurement-principles.md)."
+        )
+    if corpus is not None and corpus.provenance.chunk_length > MAX_CHUNK_LENGTH:
+        raise CorpusError(
+            f"corpus.provenance.chunk_length={corpus.provenance.chunk_length} exceeds "
+            f"MAX_CHUNK_LENGTH={MAX_CHUNK_LENGTH} (a hard safety ceiling — larger windows hold "
+            "larger paired fp32 logits per chunk and risk a kernel panic — raising it requires "
+            "re-validating peak memory; see docs/measurement-principles.md)."
         )
     if quantize_start != 0:
         window = corpus.provenance.chunk_length if corpus is not None else chunk_length

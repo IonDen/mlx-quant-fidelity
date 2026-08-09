@@ -65,7 +65,7 @@ def _patch_kv_compare(
     monkeypatch.setattr(
         cmp,
         "_load_corpus_for_kv",
-        lambda tokenizer, model_id, max_chunks, chunk_length=512: object(),
+        lambda tokenizer, model_id, max_chunks, *, chunk_length: object(),
     )
     return calls
 
@@ -133,7 +133,9 @@ def test_compare_kv_requires_two_configs(tmp_path):
 def test_compare_kv_accepts_valid_deployment_start():
     from mlx_quant_fidelity.runners.compare import _validate_compare_kv_args
 
-    _validate_compare_kv_args([(4, 64), (8, 64)], quantize_start=5, max_chunks=None)  # no raise
+    _validate_compare_kv_args(
+        [(4, 64), (8, 64)], quantize_start=5, max_chunks=None, chunk_length=512
+    )  # no raise
 
 
 def test_compare_kv_rejects_out_of_range_start():
@@ -141,13 +143,17 @@ def test_compare_kv_rejects_out_of_range_start():
     from mlx_quant_fidelity.runners.compare import _validate_compare_kv_args
 
     with pytest.raises(QuantizeStartError):
-        _validate_compare_kv_args([(4, 64), (8, 64)], quantize_start=5000, max_chunks=None)
+        _validate_compare_kv_args(
+            [(4, 64), (8, 64)], quantize_start=5000, max_chunks=None, chunk_length=512
+        )
 
 
 def test_compare_kv_still_accepts_stress_zero():
     from mlx_quant_fidelity.runners.compare import _validate_compare_kv_args
 
-    _validate_compare_kv_args([(4, 64), (8, 64)], quantize_start=0, max_chunks=None)  # no raise
+    _validate_compare_kv_args(
+        [(4, 64), (8, 64)], quantize_start=0, max_chunks=None, chunk_length=512
+    )  # no raise
 
 
 def test_compare_kv_rejects_bad_max_chunks(monkeypatch, tmp_path):
@@ -238,7 +244,7 @@ def test_compare_kv_model_loaded_once(monkeypatch, tmp_path):
     # Fix 10: count corpus-build calls with a wrapper, assert exactly once
     corpus_calls: list[object] = []
 
-    def counting_load_corpus(tokenizer, model_id, max_chunks, chunk_length=512):  # type: ignore[return]
+    def counting_load_corpus(tokenizer, model_id, max_chunks, *, chunk_length):  # type: ignore[return]
         corpus_calls.append(model_id)
         return object()
 
@@ -273,7 +279,7 @@ def test_compare_kv_threads_revision_and_tokenizer(monkeypatch, tmp_path):
     corpus_tokenizer_received: list[object] = []
 
     def fake_load_corpus(
-        tokenizer: object, model_id: str, max_chunks: "int | None", chunk_length: int = 512
+        tokenizer: object, model_id: str, max_chunks: "int | None", *, chunk_length: int
     ) -> object:
         corpus_tokenizer_received.append(tokenizer)
         return object()
@@ -405,7 +411,7 @@ def test_compare_kv_corrupt_at_collect_yields_failed_result(monkeypatch, tmp_pat
     monkeypatch.setattr(cmp, "install_memory_caps", lambda: (0, 0))
     monkeypatch.setattr(cmp, "_load_model", lambda model_id, revision: (object(), object()))
     monkeypatch.setattr(cmp, "_kv_dims", lambda model: (16, 8, 64))
-    monkeypatch.setattr(cmp, "_load_corpus_for_kv", lambda tok, mid, mc: object())
+    monkeypatch.setattr(cmp, "_load_corpus_for_kv", lambda tok, mid, mc, *, chunk_length: object())
     # score_kv_config should NOT be called (pending=[]) — use a sentinel that would raise
     score_calls: list[object] = []
     monkeypatch.setattr(cmp, "score_kv_config", lambda *a, **kw: score_calls.append(None))
@@ -455,7 +461,7 @@ def test_compare_kv_all_resumed_skips_model_load(monkeypatch, tmp_path):
     monkeypatch.setattr(cmp, "install_memory_caps", lambda: (0, 0))
     monkeypatch.setattr(cmp, "_load_model", fail_if_loaded)
     monkeypatch.setattr(cmp, "_kv_dims", lambda model: (16, 8, 64))
-    monkeypatch.setattr(cmp, "_load_corpus_for_kv", lambda tok, mid, mc: object())
+    monkeypatch.setattr(cmp, "_load_corpus_for_kv", lambda tok, mid, mc, *, chunk_length: object())
     monkeypatch.setattr(cmp, "score_kv_config", assert_not_scored)
 
     report = cmp.compare_kv_fidelity("m", [(4, 64), (8, 64)], artifacts_dir=tmp_path)
@@ -741,7 +747,7 @@ def test_validate_compare_kv_args_rejects_single_config():
     from mlx_quant_fidelity.runners.compare import _validate_compare_kv_args
 
     with pytest.raises(CompareConfigError, match="at least 2 KV configs"):
-        _validate_compare_kv_args([(4, 64)], quantize_start=0, max_chunks=None)
+        _validate_compare_kv_args([(4, 64)], quantize_start=0, max_chunks=None, chunk_length=512)
 
 
 def test_kv_envelope_with_invalid_verdict_is_corrupt_partial():
@@ -885,6 +891,13 @@ def test_kv_envelope_non_dict_is_corrupt_partial():
 # ── Task 6 (0033 part 3): chunk_length as a first-class knob ──────────────────
 
 
+def test_kv_partial_schema_version_is_2():
+    # Literal pin (mirrors the weight-side == 1 pin in test_compare_weight.py): a future
+    # unrelated edit that accidentally bumps or resets this constant goes red here, not just
+    # against whatever the constant happens to be at the time.
+    assert cmp._KV_PARTIAL_SCHEMA_VERSION == 2
+
+
 def test_kv_partial_identity_includes_chunk_length(monkeypatch, tmp_path):
     """A freshly-scored KV partial's run_identity records chunk_length and the KV schema
     version, so a later run at a different chunk_length is correctly seen as stale.
@@ -894,7 +907,9 @@ def test_kv_partial_identity_includes_chunk_length(monkeypatch, tmp_path):
     cmp.compare_kv_fidelity("m", [(4, 64), (8, 64)], chunk_length=1024, artifacts_dir=tmp_path)
     env = json.loads((tmp_path / "4_64.json").read_text())
     assert env["run_identity"]["chunk_length"] == 1024
-    assert env["run_identity"]["schema_version"] == cmp._KV_PARTIAL_SCHEMA_VERSION
+    # Literal (not compared against the live constant -- see test_kv_partial_schema_version_is_2
+    # for that pin; this asserts the ACTUAL persisted value is the one Task 6 shipped).
+    assert env["run_identity"]["schema_version"] == 2
 
 
 def test_chunk_length_change_invalidates_partials(monkeypatch, tmp_path):

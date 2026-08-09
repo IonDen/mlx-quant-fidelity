@@ -329,7 +329,7 @@ def _validate_compare_kv_args(
     *,
     quantize_start: int,
     max_chunks: int | None,
-    chunk_length: int = 512,
+    chunk_length: int,
 ) -> None:
     """Validate KV-compare arguments. Raise CompareConfigError on bad input."""
     if len(configs) < 2:
@@ -370,7 +370,7 @@ def _load_model(model_id: str, revision: str | None) -> tuple[object, object]:  
 
 
 def _load_corpus_for_kv(
-    tokenizer: object, model_id: str, max_chunks: int | None, chunk_length: int = 512
+    tokenizer: object, model_id: str, max_chunks: int | None, *, chunk_length: int
 ) -> object:  # pragma: no cover
     """Build the WikiText-2 corpus for a KV-compare run.
 
@@ -488,8 +488,8 @@ def compare_kv_fidelity(
     Args:
         model_id: HuggingFace model ID.
         configs: List of (bits, group_size) tuples; must contain at least 2 distinct entries.
-        quantize_start: 0 = stress mode (default); ``1 ≤ N ≤ 510`` = deployment mode
-            (first N positions computed with a full-precision cache, then the stored prefix
+        quantize_start: 0 = stress mode (default); ``1 ≤ N ≤ chunk_length - 2`` = deployment
+            mode (first N positions computed with a full-precision cache, then the stored prefix
             converts too; metrics cover the post-boundary region).
         max_chunks: Score at most this many corpus chunks (>= 1 if provided).
         max_kld: Optional KLD budget for the recommended pick.
@@ -560,7 +560,7 @@ def compare_kv_fidelity(
         install_memory_caps()
         model, tokenizer = _load_model(model_id, model_revision)
         n_layers, n_kv_heads, head_dim = _kv_dims(model)
-        corpus = _load_corpus_for_kv(tokenizer, model_id, max_chunks, chunk_length)
+        corpus = _load_corpus_for_kv(tokenizer, model_id, max_chunks, chunk_length=chunk_length)
         for bits, gs in pending:
             mx.reset_peak_memory()
             partial = out_dir / _kv_partial_filename(bits, gs)
