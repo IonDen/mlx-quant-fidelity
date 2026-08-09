@@ -10,6 +10,7 @@
     "stride": 512,
     "tokenizer_id": "mlx-community/Qwen2.5-7B-Instruct-8bit"
   },
+  "device": "Apple M1 Max, 32 GB",
   "flip_rate": 0.1639334637964775,
   "kl": {
     "max": 6.358877182006836,
@@ -21,7 +22,7 @@
   "mlx_version": "0.31.2",
   "n_chunks": 100,
   "n_positions": 51100,
-  "peak_memory_bytes": 14403887369,
+  "peak_memory_bytes": 14403887373,
   "per_layer": false,
   "perplexity_delta": 0.9011362364514834,
   "perplexity_quant": 10.792949932845536,

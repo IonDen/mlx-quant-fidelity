@@ -4,6 +4,7 @@
 
 ## Released
 
+- **0.5.0** — Depth-resolved KV drift: stress-mode reports over a fixed-window corpus break KLD down by position depth, with a configurable `--chunk-length` (up to 4096) to widen the window. Adds `compare kv --sweep` to auto-generate a config grid from the model's `config.json`, a `--max-kv-bytes-per-token` budget filter, a rejection gate for `(head_dim, bits)` combinations that crash the upstream KV cache, device provenance in every report, and hardening for a malformed cached comparison partial.
 - **0.4.0** — Deployment mode (`quantize_start > 0`: the first N positions are computed with a full-precision cache, then the whole stored cache converts; metrics cover the post-boundary region) and a shareable model-card fidelity badge (`--format badge`) driven by the documented threshold policy; also isolates a structurally malformed cached comparison partial.
 - **0.3.1** — Hardens `compare` error handling (consistent package-rooted errors; the CLI no longer masks unexpected errors), isolates cached partials with an invalid stored verdict, and adds a `measurement-principles.md` methodology document.
 - **0.3.0** — `compare` command: ranks weight-quant repos or KV-cache configs on a memory-normalized Pareto frontier (quality per byte), flags dominated configurations, and supports budget-filter shortcuts.

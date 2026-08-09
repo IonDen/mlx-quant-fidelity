@@ -1,0 +1,98 @@
+{
+  "cache_supported": true,
+  "corpus": {
+    "bos_policy": "none",
+    "chunk_length": 4096,
+    "final_chunk_policy": "drop",
+    "n_tokens": 49152,
+    "name": "wikitext-2-raw",
+    "normalization": "raw",
+    "split": "test",
+    "stride": 4096,
+    "tokenizer_id": "mlx-community/Llama-3.2-1B-Instruct-4bit"
+  },
+  "device": "Apple M1 Max, 32 GB",
+  "flip_rate": 0.19981684981684983,
+  "kl": {
+    "max": 6.424398422241211,
+    "mean": 0.15069580211066075,
+    "median": 0.10152639448642731,
+    "p99": 0.9482488048076635
+  },
+  "kl_by_depth": [
+    {
+      "end": 511,
+      "kl_mean": 0.14845062003893325,
+      "kl_p99": 0.946990771889686,
+      "n_positions": 6132,
+      "start": 0
+    },
+    {
+      "end": 1023,
+      "kl_mean": 0.1455459592161407,
+      "kl_p99": 0.8659090942144366,
+      "n_positions": 6144,
+      "start": 511
+    },
+    {
+      "end": 1535,
+      "kl_mean": 0.15342721362189002,
+      "kl_p99": 0.9328939378261563,
+      "n_positions": 6144,
+      "start": 1023
+    },
+    {
+      "end": 2047,
+      "kl_mean": 0.1479163125032595,
+      "kl_p99": 0.9567516720294896,
+      "n_positions": 6144,
+      "start": 1535
+    },
+    {
+      "end": 2559,
+      "kl_mean": 0.14389677932997813,
+      "kl_p99": 0.9047601085901238,
+      "n_positions": 6144,
+      "start": 2047
+    },
+    {
+      "end": 3071,
+      "kl_mean": 0.15723780226810943,
+      "kl_p99": 0.9834862542152398,
+      "n_positions": 6144,
+      "start": 2559
+    },
+    {
+      "end": 3583,
+      "kl_mean": 0.15368235792724505,
+      "kl_p99": 0.9756630522012659,
+      "n_positions": 6144,
+      "start": 3071
+    },
+    {
+      "end": 4095,
+      "kl_mean": 0.15540498685849613,
+      "kl_p99": 1.0237322044372554,
+      "n_positions": 6144,
+      "start": 3583
+    }
+  ],
+  "kv_bits": 4,
+  "kv_group_size": 64,
+  "mlx_lm_version": "0.31.3",
+  "mlx_version": "0.31.2",
+  "model_id": "mlx-community/Llama-3.2-1B-Instruct-4bit",
+  "model_revision": null,
+  "n_chunks": 12,
+  "n_positions": 49140,
+  "peak_memory_bytes": 14523533185,
+  "perplexity_delta": 3.0694320664428982,
+  "perplexity_quant": 18.509977795441163,
+  "perplexity_ref": 15.440545728998265,
+  "quantize_mode": "stress",
+  "quantize_start": 0,
+  "verdict": "bad",
+  "warnings": [
+    "chunk_length=4096: paired fp32 logits peak \u2248 13.7 GiB per chunk; see docs/measurement-principles.md (Drift by position depth) for measured ceilings."
+  ]
+}

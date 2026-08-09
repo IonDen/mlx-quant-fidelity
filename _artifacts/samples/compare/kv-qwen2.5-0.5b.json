@@ -5,7 +5,7 @@
     "bos_policy": "none",
     "chunk_length": 512,
     "final_chunk_policy": "drop",
-    "n_tokens": 4096,
+    "n_tokens": 51200,
     "name": "wikitext-2-raw",
     "normalization": "raw",
     "split": "test",
@@ -34,7 +34,7 @@
       "point": {
         "cost_bytes": 3840,
         "label": "4:32",
-        "quality": 1.3413157277812757
+        "quality": 1.0966457424523506
       },
       "report": {
         "cache_supported": true,
@@ -42,32 +42,91 @@
           "bos_policy": "none",
           "chunk_length": 512,
           "final_chunk_policy": "drop",
-          "n_tokens": 4096,
+          "n_tokens": 51200,
           "name": "wikitext-2-raw",
           "normalization": "raw",
           "split": "test",
           "stride": 512,
           "tokenizer_id": "mlx-community/Qwen2.5-0.5B-Instruct-4bit"
         },
-        "flip_rate": 0.523238747553816,
+        "device": "Apple M1 Max, 32 GB",
+        "flip_rate": 0.4701761252446184,
         "kl": {
-          "max": 11.730260848999023,
-          "mean": 1.3413157277812757,
-          "median": 0.8463965058326721,
-          "p99": 6.901805596351629
+          "max": 14.67402172088623,
+          "mean": 1.0966457424523506,
+          "median": 0.714741587638855,
+          "p99": 5.8339387512207095
         },
+        "kl_by_depth": [
+          {
+            "end": 63,
+            "kl_mean": 1.1443598407442268,
+            "kl_p99": 6.555768880844117,
+            "n_positions": 6300,
+            "start": 0
+          },
+          {
+            "end": 127,
+            "kl_mean": 1.1850017152409236,
+            "kl_p99": 6.28213663101197,
+            "n_positions": 6400,
+            "start": 63
+          },
+          {
+            "end": 191,
+            "kl_mean": 1.1355584351425114,
+            "kl_p99": 5.716470422744751,
+            "n_positions": 6400,
+            "start": 127
+          },
+          {
+            "end": 255,
+            "kl_mean": 1.1796077277790573,
+            "kl_p99": 6.098188538551341,
+            "n_positions": 6400,
+            "start": 191
+          },
+          {
+            "end": 319,
+            "kl_mean": 1.0870467079985247,
+            "kl_p99": 6.075599288940432,
+            "n_positions": 6400,
+            "start": 255
+          },
+          {
+            "end": 383,
+            "kl_mean": 1.138729413473302,
+            "kl_p99": 5.77082350254059,
+            "n_positions": 6400,
+            "start": 319
+          },
+          {
+            "end": 447,
+            "kl_mean": 0.9887228355460684,
+            "kl_p99": 4.970197858810427,
+            "n_positions": 6400,
+            "start": 383
+          },
+          {
+            "end": 511,
+            "kl_mean": 0.9148847964800007,
+            "kl_p99": 4.928441791534426,
+            "n_positions": 6400,
+            "start": 447
+          }
+        ],
         "kv_bits": 4,
         "kv_group_size": 32,
         "mlx_lm_version": "0.31.3",
         "mlx_version": "0.31.2",
         "model_id": "mlx-community/Qwen2.5-0.5B-Instruct-4bit",
         "model_revision": null,
-        "n_chunks": 8,
-        "n_positions": 4088,
-        "peak_memory_bytes": 2308146357,
-        "perplexity_delta": 66.48200288025168,
-        "perplexity_quant": 90.8990374971006,
-        "perplexity_ref": 24.417034616848913,
+        "n_chunks": 100,
+        "n_positions": 51100,
+        "peak_memory_bytes": 2463738254,
+        "perplexity_delta": 43.25422677420008,
+        "perplexity_quant": 66.39656560552942,
+        "perplexity_ref": 23.142338831329344,
         "quantize_mode": "stress",
         "quantize_start": 0,
         "verdict": "bad",
@@ -83,7 +142,7 @@
       "point": {
         "cost_bytes": 3456,
         "label": "4:64",
-        "quality": 2.5568467373273984
+        "quality": 2.0531492808233915
       },
       "report": {
         "cache_supported": true,
@@ -91,32 +150,91 @@
           "bos_policy": "none",
           "chunk_length": 512,
           "final_chunk_policy": "drop",
-          "n_tokens": 4096,
+          "n_tokens": 51200,
           "name": "wikitext-2-raw",
           "normalization": "raw",
           "split": "test",
           "stride": 512,
           "tokenizer_id": "mlx-community/Qwen2.5-0.5B-Instruct-4bit"
         },
-        "flip_rate": 0.7003424657534246,
+        "device": "Apple M1 Max, 32 GB",
+        "flip_rate": 0.6250489236790606,
         "kl": {
-          "max": 14.945906639099121,
-          "mean": 2.5568467373273984,
-          "median": 2.1252611875534058,
-          "p99": 8.65246841430665
+          "max": 17.261520385742188,
+          "mean": 2.0531492808233915,
+          "median": 1.6641712188720703,
+          "p99": 7.705395193099986
         },
+        "kl_by_depth": [
+          {
+            "end": 63,
+            "kl_mean": 1.990672005909192,
+            "kl_p99": 7.8666133069992075,
+            "n_positions": 6300,
+            "start": 0
+          },
+          {
+            "end": 127,
+            "kl_mean": 2.2260656909825047,
+            "kl_p99": 8.00844442367555,
+            "n_positions": 6400,
+            "start": 63
+          },
+          {
+            "end": 191,
+            "kl_mean": 2.197705441632643,
+            "kl_p99": 8.052743015289307,
+            "n_positions": 6400,
+            "start": 127
+          },
+          {
+            "end": 255,
+            "kl_mean": 2.109210962978723,
+            "kl_p99": 7.524057998657232,
+            "n_positions": 6400,
+            "start": 191
+          },
+          {
+            "end": 319,
+            "kl_mean": 1.9552239117809223,
+            "kl_p99": 7.828185148239145,
+            "n_positions": 6400,
+            "start": 255
+          },
+          {
+            "end": 383,
+            "kl_mean": 1.9891934080784268,
+            "kl_p99": 7.46494350910187,
+            "n_positions": 6400,
+            "start": 319
+          },
+          {
+            "end": 447,
+            "kl_mean": 2.011261671925313,
+            "kl_p99": 7.36264095783234,
+            "n_positions": 6400,
+            "start": 383
+          },
+          {
+            "end": 511,
+            "kl_mean": 1.9448849458788755,
+            "kl_p99": 7.02577442646027,
+            "n_positions": 6400,
+            "start": 447
+          }
+        ],
         "kv_bits": 4,
         "kv_group_size": 64,
         "mlx_lm_version": "0.31.3",
         "mlx_version": "0.31.2",
         "model_id": "mlx-community/Qwen2.5-0.5B-Instruct-4bit",
         "model_revision": null,
-        "n_chunks": 8,
-        "n_positions": 4088,
-        "peak_memory_bytes": 2307949737,
-        "perplexity_delta": 273.2215467417858,
-        "perplexity_quant": 297.6385813586347,
-        "perplexity_ref": 24.417034616848913,
+        "n_chunks": 100,
+        "n_positions": 51100,
+        "peak_memory_bytes": 2308749309,
+        "perplexity_delta": 148.23682941032652,
+        "perplexity_quant": 171.37916824165586,
+        "perplexity_ref": 23.142338831329344,
         "quantize_mode": "stress",
         "quantize_start": 0,
         "verdict": "bad",
@@ -132,7 +250,7 @@
       "point": {
         "cost_bytes": 6528,
         "label": "8:64",
-        "quality": 0.030391460653755028
+        "quality": 0.033580854313654304
       },
       "report": {
         "cache_supported": true,
@@ -140,32 +258,91 @@
           "bos_policy": "none",
           "chunk_length": 512,
           "final_chunk_policy": "drop",
-          "n_tokens": 4096,
+          "n_tokens": 51200,
           "name": "wikitext-2-raw",
           "normalization": "raw",
           "split": "test",
           "stride": 512,
           "tokenizer_id": "mlx-community/Qwen2.5-0.5B-Instruct-4bit"
         },
-        "flip_rate": 0.08830724070450098,
+        "device": "Apple M1 Max, 32 GB",
+        "flip_rate": 0.0862426614481409,
         "kl": {
-          "max": 17.14887046813965,
-          "mean": 0.030391460653755028,
-          "median": 0.011213380843400955,
-          "p99": 0.26707647472620016
+          "max": 18.29922103881836,
+          "mean": 0.033580854313654304,
+          "median": 0.01205007079988718,
+          "p99": 0.33128459393978205
         },
+        "kl_by_depth": [
+          {
+            "end": 63,
+            "kl_mean": 0.06173536988186719,
+            "kl_p99": 0.5491497671604166,
+            "n_positions": 6300,
+            "start": 0
+          },
+          {
+            "end": 127,
+            "kl_mean": 0.04423312416141996,
+            "kl_p99": 0.40632911145687195,
+            "n_positions": 6400,
+            "start": 63
+          },
+          {
+            "end": 191,
+            "kl_mean": 0.03177502493748645,
+            "kl_p99": 0.32827442854642874,
+            "n_positions": 6400,
+            "start": 127
+          },
+          {
+            "end": 255,
+            "kl_mean": 0.028374263402194896,
+            "kl_p99": 0.3154404145479204,
+            "n_positions": 6400,
+            "start": 191
+          },
+          {
+            "end": 319,
+            "kl_mean": 0.023537068128349863,
+            "kl_p99": 0.21787606090307282,
+            "n_positions": 6400,
+            "start": 255
+          },
+          {
+            "end": 383,
+            "kl_mean": 0.02946738776543853,
+            "kl_p99": 0.26289061933755903,
+            "n_positions": 6400,
+            "start": 319
+          },
+          {
+            "end": 447,
+            "kl_mean": 0.026900668901621964,
+            "kl_p99": 0.22892523616552363,
+            "n_positions": 6400,
+            "start": 383
+          },
+          {
+            "end": 511,
+            "kl_mean": 0.023063841636608906,
+            "kl_p99": 0.24415791794657754,
+            "n_positions": 6400,
+            "start": 447
+          }
+        ],
         "kv_bits": 8,
         "kv_group_size": 64,
         "mlx_lm_version": "0.31.3",
         "mlx_version": "0.31.2",
         "model_id": "mlx-community/Qwen2.5-0.5B-Instruct-4bit",
         "model_revision": null,
-        "n_chunks": 8,
-        "n_positions": 4088,
-        "peak_memory_bytes": 2309522601,
-        "perplexity_delta": 0.7008378985959318,
-        "perplexity_quant": 25.117872515444844,
-        "perplexity_ref": 24.417034616848913,
+        "n_chunks": 100,
+        "n_positions": 51100,
+        "peak_memory_bytes": 2464935137,
+        "perplexity_delta": 0.6229315761060086,
+        "perplexity_quant": 23.765270407435352,
+        "perplexity_ref": 23.142338831329344,
         "quantize_mode": "stress",
         "quantize_start": 0,
         "verdict": "bad",

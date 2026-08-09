@@ -1,0 +1,98 @@
+{
+  "cache_supported": true,
+  "corpus": {
+    "bos_policy": "none",
+    "chunk_length": 4096,
+    "final_chunk_policy": "drop",
+    "n_tokens": 49152,
+    "name": "wikitext-2-raw",
+    "normalization": "raw",
+    "split": "test",
+    "stride": 4096,
+    "tokenizer_id": "mlx-community/Llama-3.2-1B-Instruct-4bit"
+  },
+  "device": "Apple M1 Max, 32 GB",
+  "flip_rate": 0.011762311762311762,
+  "kl": {
+    "max": 0.06192117929458618,
+    "mean": 0.00042403281094980044,
+    "median": 0.00026794000586960465,
+    "p99": 0.002909980749245733
+  },
+  "kl_by_depth": [
+    {
+      "end": 511,
+      "kl_mean": 0.000449788272769405,
+      "kl_p99": 0.003078788009006523,
+      "n_positions": 6132,
+      "start": 0
+    },
+    {
+      "end": 1023,
+      "kl_mean": 0.00039378182247860535,
+      "kl_p99": 0.0025843520648777428,
+      "n_positions": 6144,
+      "start": 511
+    },
+    {
+      "end": 1535,
+      "kl_mean": 0.00042470473933193625,
+      "kl_p99": 0.0027733406238257853,
+      "n_positions": 6144,
+      "start": 1023
+    },
+    {
+      "end": 2047,
+      "kl_mean": 0.0004080663969428892,
+      "kl_p99": 0.0024337087175808846,
+      "n_positions": 6144,
+      "start": 1535
+    },
+    {
+      "end": 2559,
+      "kl_mean": 0.0003928777619801917,
+      "kl_p99": 0.0026597424969077056,
+      "n_positions": 6144,
+      "start": 2047
+    },
+    {
+      "end": 3071,
+      "kl_mean": 0.0004330732050325606,
+      "kl_p99": 0.0028755192086100576,
+      "n_positions": 6144,
+      "start": 2559
+    },
+    {
+      "end": 3583,
+      "kl_mean": 0.00044674276150179215,
+      "kl_p99": 0.003353370672557483,
+      "n_positions": 6144,
+      "start": 3071
+    },
+    {
+      "end": 4095,
+      "kl_mean": 0.0004432778311973899,
+      "kl_p99": 0.0033597767446190015,
+      "n_positions": 6144,
+      "start": 3583
+    }
+  ],
+  "kv_bits": 8,
+  "kv_group_size": 64,
+  "mlx_lm_version": "0.31.3",
+  "mlx_version": "0.31.2",
+  "model_id": "mlx-community/Llama-3.2-1B-Instruct-4bit",
+  "model_revision": null,
+  "n_chunks": 12,
+  "n_positions": 49140,
+  "peak_memory_bytes": 14557087617,
+  "perplexity_delta": 0.011519441892639648,
+  "perplexity_quant": 15.452065170890904,
+  "perplexity_ref": 15.440545728998265,
+  "quantize_mode": "stress",
+  "quantize_start": 0,
+  "verdict": "marginal",
+  "warnings": [
+    "chunk_length=4096: paired fp32 logits peak \u2248 13.7 GiB per chunk; see docs/measurement-principles.md (Drift by position depth) for measured ceilings."
+  ]
+}

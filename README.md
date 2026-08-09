@@ -26,7 +26,7 @@ Apple Silicon (MLX), Python 3.11+.
 mlx-quant-fidelity kv mlx-community/Llama-3.2-3B-Instruct-4bit --kv-bits 8
 ```
 
-Prints a Markdown report. Add `--format json` for JSON, `--format badge` for a shields.io badge line, `--kv-bits 4`, `--kv-group-size 64`, or `--max-chunks N` to bound the corpus.
+Prints a Markdown report. Add `--format json` for JSON, `--format badge` for a shields.io badge line, `--kv-bits 4`, `--kv-group-size 64`, `--max-chunks N` to bound the corpus, or `--chunk-length N` (up to 4096, default 512) for a longer window and a depth-resolved drift table.
 
 ```python
 from mlx_quant_fidelity import measure_kv_fidelity
@@ -102,6 +102,23 @@ M1 Max, WikiText-2 test (100 chunks of 512 tokens), stress mode (quantize from t
 
 8-bit KV is near-lossless on all three models. 4-bit is another matter, and Qwen2.5-7B at 4-bit in stress mode falls apart: nearly every token flips. This measurement establishes a checkpoint-specific failure, not its cause. mlx-lm's default delays cache conversion until 5000 tokens, so those positions are computed while attention uses a full-precision cache. At the boundary, however, mlx-lm converts the entire stored prefix too. Run the tool first and you see the fidelity risk before deployment.
 
+## Does drift change with position depth?
+
+`--chunk-length 4096` widens the window and adds a table breaking mean and p99 KLD down by position depth within a chunk. Llama-3.2-1B at 4-bit KV, M1 Max, WikiText-2 test (12 chunks of 4096 tokens, the same ~50k-token corpus coverage as the 512-token samples above):
+
+| positions | KL mean | KL p99 |
+|---|---|---|
+| 0-510 | 0.1485 | 0.9470 |
+| 511-1022 | 0.1455 | 0.8659 |
+| 1023-1534 | 0.1534 | 0.9329 |
+| 1535-2046 | 0.1479 | 0.9568 |
+| 2047-2558 | 0.1439 | 0.9048 |
+| 2559-3070 | 0.1572 | 0.9835 |
+| 3071-3582 | 0.1537 | 0.9757 |
+| 3583-4094 | 0.1554 | 1.0237 |
+
+On this model and corpus, drift at position 4000 looks about the same as drift at position 60 — quantization cost isn't building up across the window at these lengths. That's a narrower claim than it might sound: 4096 tokens is short next to the context lengths where other work has found KV-quantization drift growing with depth. [docs/measurement-principles.md](docs/measurement-principles.md#drift-by-position-depth) covers the measured memory cost of longer windows and why the comparison to longer-context findings elsewhere isn't apples to apples. The full report, including the 8-bit KV counterpart, is under [`_artifacts/samples/`](_artifacts/samples) (`llama-3.2-1b-4bit-kv4-cl4096.md`, `llama-3.2-1b-4bit-kv8-cl4096.md`).
+
 ## How much does weight quantization cost?
 
 Same corpus and recipe, but the comparison is now a quantized model repo against a higher-precision reference repo. Reproduce any row with `mlx-quant-fidelity weights <quant> --reference <reference> --max-chunks 100`; the committed reports are under [`_artifacts/samples/weights/`](_artifacts/samples/weights).
@@ -128,9 +145,12 @@ mlx-quant-fidelity compare weights q4 q6 q8 --reference fp16
 
 # rank KV configs on a single model
 mlx-quant-fidelity compare kv <model> --configs 4:32,4:64,8:64
+
+# or auto-generate the grid from the model's config.json instead of listing configs by hand
+mlx-quant-fidelity compare kv <model> --sweep --max-kv-bytes-per-token 200
 ```
 
-Add `--max-kld 0.05` to get the cheapest configuration whose mean KLD stays under a threshold, or `--min-tier good` to get the cheapest one that passes the good-tier verdict. [docs/ranking-principles.md](docs/ranking-principles.md) explains how each axis is computed, what Pareto domination means in practice, and where the ranking has limits.
+Add `--max-kld 0.05` to get the cheapest configuration whose mean KLD stays under a threshold, or `--min-tier good` to get the cheapest one that passes the good-tier verdict. `--sweep` builds the (bits × group-size) grid from the model's config alone, no weight download needed, and drops any combination that would crash the upstream KV cache implementation; `--max-kv-bytes-per-token` narrows that grid to configurations under a memory budget. Either way, skipped configurations are listed in the report rather than silently dropped. [docs/ranking-principles.md](docs/ranking-principles.md) explains how each axis is computed, what Pareto domination means in practice, and where the ranking has limits.
 
 ## How it works
 
@@ -159,7 +179,7 @@ See [docs/measurement-principles.md](docs/measurement-principles.md) for the zer
 
 ## Status
 
-0.4.0, released on PyPI as `mlx-quant-fidelity` — adds deployment mode (`--quantize-start`), a shareable fidelity badge (`--format badge`), and isolation of a malformed cached comparison partial. 0.3.x added the `compare` command for memory-normalized Pareto ranking of KV-cache and weight quantizations and hardened its error handling. Downstream-task accuracy and more are on the [roadmap](ROADMAP.md).
+0.5.0, released on PyPI as `mlx-quant-fidelity` — adds depth-resolved KV drift over a configurable `--chunk-length`, an auto-generated `compare kv --sweep`, and device provenance in every report. 0.4.0 added deployment mode (`--quantize-start`) and a shareable fidelity badge (`--format badge`). 0.3.x added the `compare` command for memory-normalized Pareto ranking of KV-cache and weight quantizations. Downstream-task accuracy and more are on the [roadmap](ROADMAP.md).
 
 ## License
 

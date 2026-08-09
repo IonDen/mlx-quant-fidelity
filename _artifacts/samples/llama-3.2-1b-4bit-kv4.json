@@ -11,6 +11,7 @@
     "stride": 512,
     "tokenizer_id": "mlx-community/Llama-3.2-1B-Instruct-4bit"
   },
+  "device": "Apple M1 Max, 32 GB",
   "flip_rate": 0.20483365949119373,
   "kl": {
     "max": 6.249123573303223,
@@ -18,15 +19,73 @@
     "median": 0.09692534431815147,
     "p99": 0.9224590277671838
   },
+  "kl_by_depth": [
+    {
+      "end": 63,
+      "kl_mean": 0.1541584697333631,
+      "kl_p99": 0.9355528914928439,
+      "n_positions": 6300,
+      "start": 0
+    },
+    {
+      "end": 127,
+      "kl_mean": 0.1384959363752273,
+      "kl_p99": 0.902255995869637,
+      "n_positions": 6400,
+      "start": 63
+    },
+    {
+      "end": 191,
+      "kl_mean": 0.1424624483899214,
+      "kl_p99": 0.8714102494716667,
+      "n_positions": 6400,
+      "start": 127
+    },
+    {
+      "end": 255,
+      "kl_mean": 0.1533677409502218,
+      "kl_p99": 1.0119587898254412,
+      "n_positions": 6400,
+      "start": 191
+    },
+    {
+      "end": 319,
+      "kl_mean": 0.15081197171960525,
+      "kl_p99": 0.9534982979297655,
+      "n_positions": 6400,
+      "start": 255
+    },
+    {
+      "end": 383,
+      "kl_mean": 0.14905311230685583,
+      "kl_p99": 0.9284314352273941,
+      "n_positions": 6400,
+      "start": 319
+    },
+    {
+      "end": 447,
+      "kl_mean": 0.14697933843826547,
+      "kl_p99": 0.8646195793151868,
+      "n_positions": 6400,
+      "start": 383
+    },
+    {
+      "end": 511,
+      "kl_mean": 0.1466546098284266,
+      "kl_p99": 0.8651563441753406,
+      "n_positions": 6400,
+      "start": 447
+    }
+  ],
   "kv_bits": 4,
   "kv_group_size": 64,
   "mlx_lm_version": "0.31.3",
   "mlx_version": "0.31.2",
   "model_id": "mlx-community/Llama-3.2-1B-Instruct-4bit",
-  "model_revision": "08231374eeacb049a0eade7922910865b8fce912",
+  "model_revision": null,
   "n_chunks": 100,
   "n_positions": 51100,
-  "peak_memory_bytes": 2552171857,
+  "peak_memory_bytes": 2552251573,
   "perplexity_delta": 4.121097638366695,
   "perplexity_quant": 27.06214792192995,
   "perplexity_ref": 22.941050283563253,

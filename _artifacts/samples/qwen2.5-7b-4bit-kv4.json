@@ -11,6 +11,7 @@
     "stride": 512,
     "tokenizer_id": "mlx-community/Qwen2.5-7B-Instruct-4bit"
   },
+  "device": "Apple M1 Max, 32 GB",
   "flip_rate": 0.9922113502935421,
   "kl": {
     "max": 27.01060676574707,
@@ -18,15 +19,73 @@
     "median": 8.843236446380615,
     "p99": 19.377340450286866
   },
+  "kl_by_depth": [
+    {
+      "end": 63,
+      "kl_mean": 7.857455331892258,
+      "kl_p99": 17.63105573654175,
+      "n_positions": 6300,
+      "start": 0
+    },
+    {
+      "end": 127,
+      "kl_mean": 9.159774441770278,
+      "kl_p99": 18.77029319763184,
+      "n_positions": 6400,
+      "start": 63
+    },
+    {
+      "end": 191,
+      "kl_mean": 9.519350442270806,
+      "kl_p99": 19.992881774902344,
+      "n_positions": 6400,
+      "start": 127
+    },
+    {
+      "end": 255,
+      "kl_mean": 9.558964942274615,
+      "kl_p99": 19.393733043670657,
+      "n_positions": 6400,
+      "start": 191
+    },
+    {
+      "end": 319,
+      "kl_mean": 9.656254790853708,
+      "kl_p99": 19.724705257415774,
+      "n_positions": 6400,
+      "start": 255
+    },
+    {
+      "end": 383,
+      "kl_mean": 9.689650162400213,
+      "kl_p99": 19.788083076477065,
+      "n_positions": 6400,
+      "start": 319
+    },
+    {
+      "end": 447,
+      "kl_mean": 9.645250157241826,
+      "kl_p99": 19.56609624862671,
+      "n_positions": 6400,
+      "start": 383
+    },
+    {
+      "end": 511,
+      "kl_mean": 9.756921642096714,
+      "kl_p99": 19.571969966888442,
+      "n_positions": 6400,
+      "start": 447
+    }
+  ],
   "kv_bits": 4,
   "kv_group_size": 64,
   "mlx_lm_version": "0.31.3",
   "mlx_version": "0.31.2",
   "model_id": "mlx-community/Qwen2.5-7B-Instruct-4bit",
-  "model_revision": "c26a38f6a37d0a51b4e9a1eb3026530fa35d9fed",
+  "model_revision": null,
   "n_chunks": 100,
   "n_positions": 51100,
-  "peak_memory_bytes": 6346413085,
+  "peak_memory_bytes": 6346355977,
   "perplexity_delta": 82664.9419639718,
   "perplexity_quant": 82675.73491390464,
   "perplexity_ref": 10.792949932845536,

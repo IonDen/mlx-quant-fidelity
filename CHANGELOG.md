@@ -3,6 +3,26 @@
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-08-10
+
+Adds depth-resolved KV drift over a configurable window, an auto-generated `compare kv` sweep, and device provenance in every report.
+
+### Added
+
+- Stress-mode reports over a fixed-window corpus now carry a "Drift by position depth" table: per-position KLD pooled across chunks into eight equal-width depth buckets. The table is stress-only and requires every scored chunk to be the same length; an unequal-length corpus gets a report warning instead of a misleading number. On the sampled models, the curve is close to flat out to a 4096-token window — the KV quantizer's cost isn't building up across the window at these lengths, though that is narrower than "KV quantization is depth-insensitive": other work has found drift widening at longer context and over long reasoning-style generation (see the citations in `docs/measurement-principles.md`). That document also covers the buckets themselves and the measured memory cost of longer windows.
+- `--chunk-length` on `kv` and `compare kv` (default 512, hard ceiling 4096) widens the scoring window so the depth table has more positions to work with. Paired fp32 logits scale with window length times vocabulary size, so the CLI warns once the estimated footprint for a chosen window passes 4 GiB, calibrated against measured peaks on Llama-3.2-1B-4bit (2.27 GiB at 512 tokens, up to 13.53 GiB at the 4096 ceiling; reproducer: `scripts/spike_long_window_memory.py`).
+- `compare kv --sweep` auto-generates the (bits × group-size) grid from the model's `config.json` alone, no weight download required. `--max-kv-bytes-per-token N` filters the grid to a memory budget. Configurations skipped for either reason are listed in the report rather than silently dropped.
+- Reports now record the measuring device (for example "Apple M1 Max, 32 GB") in both the Markdown footer and the JSON output.
+
+### Fixed
+
+- `(head_dim, bits)` combinations that crash upstream mlx-lm's `QuantizedKVCache` on the very first cache append (bits=6 at head_dim 128 or 96, a packed-width pre-allocation bug) are now rejected up front with a clear, package-rooted error instead of a raw upstream crash. `compare kv --sweep` routes these combinations to its skipped-configuration list rather than emitting a failed row.
+- A cached comparison partial whose top-level JSON is not an object is isolated instead of crashing a resumed run, extending the same isolation the 0.4.0 malformed-report fix added for structurally invalid report bodies.
+
+### Changed
+
+- The KV comparison partial's on-disk schema now records the scoring window. Partials written by 0.4.0 or earlier don't carry it and are treated as absent: a `compare kv` run resumed against them recomputes those configurations rather than reusing a partial from a different window. Weight-comparison partials are unaffected.
+
 ## [0.4.0]
 
 Adds deployment-mode KV fidelity and a shareable fidelity badge, and isolates a malformed cached comparison partial.
