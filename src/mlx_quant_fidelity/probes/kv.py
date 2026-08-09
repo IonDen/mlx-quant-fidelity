@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 import mlx.core as mx
 from mlx_lm.models.cache import QuantizedKVCache, make_prompt_cache
 
-from mlx_quant_fidelity._memory_caps import install_memory_caps
+from mlx_quant_fidelity._memory_caps import device_string, install_memory_caps
 from mlx_quant_fidelity.errors import (
     CacheNotQuantizableError,
     CorpusError,
@@ -283,6 +283,7 @@ def score_kv_config(
         cache_supported=True,
         verdict=verdict_for(agg.kl.mean, agg.kl.p99, agg.flip_rate),
         warnings=tuple(probe_warnings),
+        device=device_string(),
     )
 
 

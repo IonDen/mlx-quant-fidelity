@@ -1,3 +1,4 @@
+import dataclasses
 import json
 
 import pytest
@@ -75,10 +76,24 @@ def test_weight_from_dict_missing_kl_raises_report_schema_error():
 
 
 def test_render_markdown_deployment_states_post_boundary():
-    import dataclasses
-
     from tests.test_cli import _fake_report
 
     rep = dataclasses.replace(_fake_report(), quantize_start=5, quantize_mode="deployment")
     md = render_markdown(rep)
     assert "post-boundary" in md or "excludes the first" in md  # the NEW exclusion statement
+
+
+def test_fidelity_report_defaults_device_none():
+    report = _report()
+    assert report.device is None
+
+
+def test_markdown_includes_device_when_set():
+    report = dataclasses.replace(_report(), device="Apple M1 Max, 32 GB")
+    assert "Apple M1 Max, 32 GB" in render_markdown(report)
+
+
+def test_from_dict_accepts_missing_device():
+    d = dataclasses.asdict(_report())
+    del d["device"]
+    assert fidelity_report_from_dict(d).device is None

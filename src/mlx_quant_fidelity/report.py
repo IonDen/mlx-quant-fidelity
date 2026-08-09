@@ -39,6 +39,7 @@ class FidelityReport:
     cache_supported: bool
     verdict: str
     warnings: tuple[str, ...]
+    device: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,6 +70,7 @@ class WeightFidelityReport:
     reference_model_bytes: int | None
     verdict: str
     warnings: tuple[str, ...]
+    device: str | None = None
 
 
 def render_json(report: FidelityReport | WeightFidelityReport) -> str:
@@ -112,7 +114,8 @@ def render_weight_markdown(report: WeightFidelityReport) -> str:
         "",
         f"_mlx {report.mlx_version}, mlx-lm {report.mlx_lm_version}, "
         f"quant {report.quant_model_bytes} B, reference {report.reference_model_bytes} B, "
-        f"peak {report.peak_memory_bytes / 1e9:.2f} GB._",
+        f"peak {report.peak_memory_bytes / 1e9:.2f} GB"
+        f"{f', on {report.device}' if report.device is not None else ''}._",
         *([f"\n> Note: {w}" for w in report.warnings]),
     ]
     return "\n".join(lines)
@@ -159,7 +162,8 @@ def render_markdown(report: FidelityReport) -> str:
         "under-predicts long-context/code degradation.",
         "",
         f"_mlx {report.mlx_version}, mlx-lm {report.mlx_lm_version}, "
-        f"model rev `{report.model_revision}`, peak {report.peak_memory_bytes / 1e9:.2f} GB._",
+        f"model rev `{report.model_revision}`, peak {report.peak_memory_bytes / 1e9:.2f} GB"
+        f"{f', on {report.device}' if report.device is not None else ''}._",
         *([f"\n> Note: {w}" for w in report.warnings]),
     ]
     if report.quantize_mode == "deployment":

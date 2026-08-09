@@ -31,6 +31,25 @@ def compute_safe_caps_gb() -> tuple[int, int]:
     return _clamp_caps_gb(max_gb)
 
 
+def device_string() -> str | None:
+    """Human-readable chip + unified-memory size (e.g. 'Apple M1 Max, 32 GB'), or None.
+
+    Report provenance only — never used for gating. Returns None when MLX does not
+    report a device name (CI containers, future backends).
+    """
+    try:
+        info = mx.device_info()
+    except Exception:  # pragma: no cover - defensive: provenance must never break a probe
+        return None
+    name = info.get("device_name")
+    if not isinstance(name, str) or not name:
+        return None
+    mem = info.get("memory_size")
+    if isinstance(mem, int) and mem > 0:
+        return f"{name}, {round(mem / 1024**3)} GB"
+    return name
+
+
 def install_memory_caps() -> tuple[int, int]:
     """Apply wired + memory caps for the current device. Idempotent; never raises.
 
@@ -48,4 +67,4 @@ def install_memory_caps() -> tuple[int, int]:
     return (wired_gb, memory_gb)
 
 
-__all__ = ["compute_safe_caps_gb", "install_memory_caps"]
+__all__ = ["compute_safe_caps_gb", "device_string", "install_memory_caps"]
