@@ -14,7 +14,7 @@ from mlx_quant_fidelity._memory_caps import install_memory_caps
 from mlx_quant_fidelity.costs import kv_bytes_per_token
 from mlx_quant_fidelity.errors import CompareConfigError, QuantizeStartError, ReportSchemaError
 from mlx_quant_fidelity.policy import VALID_VERDICTS, qualifies
-from mlx_quant_fidelity.probes.kv import _kv_head_dim, score_kv_config
+from mlx_quant_fidelity.probes.kv import MAX_CHUNK_LENGTH, _kv_head_dim, score_kv_config
 from mlx_quant_fidelity.ranking import RankPoint, budget_pick, dominated_by, pareto_frontier
 from mlx_quant_fidelity.report import (
     ComparisonReport,
@@ -28,8 +28,11 @@ if TYPE_CHECKING:
 
 _asdict = _dc.asdict
 
-# Bump when the partial format or a cost formula changes so that old partials are rejected.
-_PARTIAL_SCHEMA_VERSION = 1
+# Bump the relevant constant when that mode's partial format or cost formula changes, so only
+# that mode's old partials are rejected. The two modes' partials are independent — a KV-only
+# change (e.g. adding chunk_length to the identity) must not force weight partials to recompute.
+_KV_PARTIAL_SCHEMA_VERSION = 2
+_WEIGHT_PARTIAL_SCHEMA_VERSION = 1
 
 
 def _budget_label(max_kld: float | None, min_tier: str | None) -> str | None:
@@ -285,7 +288,7 @@ def compare_weight_fidelity(
                 "quant": repo,
                 "reference": reference_model_id,
                 "max_chunks": max_chunks,
-                "schema_version": _PARTIAL_SCHEMA_VERSION,
+                "schema_version": _WEIGHT_PARTIAL_SCHEMA_VERSION,
             }
             if env.get("run_identity") != expected_identity:
                 env = None
@@ -322,14 +325,24 @@ def _kv_config_label(bits: int, group_size: int) -> str:
 
 
 def _validate_compare_kv_args(
-    configs: list[tuple[int, int]], *, quantize_start: int, max_chunks: int | None
+    configs: list[tuple[int, int]],
+    *,
+    quantize_start: int,
+    max_chunks: int | None,
+    chunk_length: int = 512,
 ) -> None:
     """Validate KV-compare arguments. Raise CompareConfigError on bad input."""
     if len(configs) < 2:
         raise CompareConfigError("compare needs at least 2 KV configs; use the `kv` probe for one.")
-    if quantize_start != 0 and not (1 <= quantize_start <= 510):  # 512-token wikitext window
+    if not (2 <= chunk_length <= MAX_CHUNK_LENGTH):
+        raise CompareConfigError(
+            f"chunk_length={chunk_length} must be between 2 and MAX_CHUNK_LENGTH="
+            f"{MAX_CHUNK_LENGTH} (a hard safety ceiling on the per-chunk paired fp32 logits)."
+        )
+    if quantize_start != 0 and not (1 <= quantize_start <= chunk_length - 2):
         raise QuantizeStartError(
-            f"quantize_start={quantize_start} must be 0 (stress) or in [1, 510] (deployment)."
+            f"quantize_start={quantize_start} must be 0 (stress) or in "
+            f"[1, {chunk_length - 2}] (deployment)."
         )
     if max_chunks is not None and max_chunks < 1:
         raise CompareConfigError(f"max_chunks must be >= 1 (got {max_chunks}).")
@@ -357,7 +370,7 @@ def _load_model(model_id: str, revision: str | None) -> tuple[object, object]:  
 
 
 def _load_corpus_for_kv(
-    tokenizer: object, model_id: str, max_chunks: int | None
+    tokenizer: object, model_id: str, max_chunks: int | None, chunk_length: int = 512
 ) -> object:  # pragma: no cover
     """Build the WikiText-2 corpus for a KV-compare run.
 
@@ -366,7 +379,12 @@ def _load_corpus_for_kv(
     """
     from mlx_quant_fidelity.corpora.wikitext import load_wikitext2
 
-    return load_wikitext2(tokenizer, max_chunks=max_chunks, tokenizer_id=model_id)  # type: ignore[arg-type]
+    return load_wikitext2(
+        tokenizer,  # type: ignore[arg-type]
+        chunk_length=chunk_length,
+        max_chunks=max_chunks,
+        tokenizer_id=model_id,
+    )
 
 
 def _kv_dims(model: object) -> tuple[int | None, int | None, int | None]:
@@ -456,6 +474,7 @@ def compare_kv_fidelity(
     min_tier: str | None = None,
     artifacts_dir: Path | None = None,
     model_revision: str | None = None,
+    chunk_length: int = 512,
 ) -> ComparisonReport:
     """Rank N (bits, group_size) KV-cache configs on one model, quality-per-KV-byte-per-token.
 
@@ -477,17 +496,22 @@ def compare_kv_fidelity(
         min_tier: Optional minimum tier for the recommended pick.
         artifacts_dir: Directory for partial JSON files (default: _artifacts/compare/kv).
         model_revision: HuggingFace model revision.
+        chunk_length: Tokens per chunk for the auto-loaded corpus (default 512). Must be in
+            ``[2, MAX_CHUNK_LENGTH]``; see :func:`~mlx_quant_fidelity.probes.kv.measure_kv_fidelity`.
 
     Returns:
         A ComparisonReport with Pareto frontier, dominated map, and optional budget pick.
 
     Raises:
-        QuantizeStartError: If quantize_start is out of range (not 0 and not in [1, 510]).
-        CompareConfigError: If fewer than 2 configs, max_chunks < 1, or duplicate configs.
-            Subclasses ValueError for backward compatibility.
+        QuantizeStartError: If quantize_start is out of range (not 0 and not in
+            [1, chunk_length - 2]).
+        CompareConfigError: If fewer than 2 configs, max_chunks < 1, duplicate configs, or
+            chunk_length is out of range. Subclasses ValueError for backward compatibility.
     """
     # ── Validation guards (score_kv_config has none; must live here) ──────────
-    _validate_compare_kv_args(configs, quantize_start=quantize_start, max_chunks=max_chunks)
+    _validate_compare_kv_args(
+        configs, quantize_start=quantize_start, max_chunks=max_chunks, chunk_length=chunk_length
+    )
 
     out_dir = artifacts_dir or Path("_artifacts/compare/kv")
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -519,7 +543,8 @@ def compare_kv_fidelity(
             "group_size": gs,
             "quantize_start": quantize_start,
             "max_chunks": max_chunks,
-            "schema_version": _PARTIAL_SCHEMA_VERSION,
+            "chunk_length": chunk_length,
+            "schema_version": _KV_PARTIAL_SCHEMA_VERSION,
         }
         if raw.get("run_identity") != expected_identity:
             return None
@@ -535,7 +560,7 @@ def compare_kv_fidelity(
         install_memory_caps()
         model, tokenizer = _load_model(model_id, model_revision)
         n_layers, n_kv_heads, head_dim = _kv_dims(model)
-        corpus = _load_corpus_for_kv(tokenizer, model_id, max_chunks)
+        corpus = _load_corpus_for_kv(tokenizer, model_id, max_chunks, chunk_length)
         for bits, gs in pending:
             mx.reset_peak_memory()
             partial = out_dir / _kv_partial_filename(bits, gs)
@@ -569,7 +594,8 @@ def compare_kv_fidelity(
                     "group_size": gs,
                     "quantize_start": quantize_start,
                     "max_chunks": max_chunks,
-                    "schema_version": _PARTIAL_SCHEMA_VERSION,
+                    "chunk_length": chunk_length,
+                    "schema_version": _KV_PARTIAL_SCHEMA_VERSION,
                 }
                 envelope: dict[str, object] = {
                     "status": "ok",

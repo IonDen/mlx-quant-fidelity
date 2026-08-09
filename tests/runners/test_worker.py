@@ -60,7 +60,7 @@ def test_worker_ok_envelope_includes_run_identity(tmp_path, monkeypatch):
     """The worker's ok envelope must include a run_identity block with mode, quant, reference,
     max_chunks, and schema_version — so the orchestrator can validate it on resume.
     """
-    from mlx_quant_fidelity.runners.compare import _PARTIAL_SCHEMA_VERSION
+    from mlx_quant_fidelity.runners.compare import _WEIGHT_PARTIAL_SCHEMA_VERSION
 
     out = tmp_path / "q4.json"
     monkeypatch.setattr(
@@ -76,7 +76,7 @@ def test_worker_ok_envelope_includes_run_identity(tmp_path, monkeypatch):
     assert identity["quant"] == "q4"
     assert identity["reference"] == "ref"
     assert identity["max_chunks"] == 7
-    assert identity["schema_version"] == _PARTIAL_SCHEMA_VERSION
+    assert identity["schema_version"] == _WEIGHT_PARTIAL_SCHEMA_VERSION
 
 
 def test_worker_failed_envelope_includes_run_identity(tmp_path, monkeypatch):
@@ -86,7 +86,7 @@ def test_worker_failed_envelope_includes_run_identity(tmp_path, monkeypatch):
     from a stale partial from a different run.
     """
     from mlx_quant_fidelity.errors import ModelMismatchError
-    from mlx_quant_fidelity.runners.compare import _PARTIAL_SCHEMA_VERSION
+    from mlx_quant_fidelity.runners.compare import _WEIGHT_PARTIAL_SCHEMA_VERSION
 
     out = tmp_path / "q2.json"
 
@@ -102,7 +102,7 @@ def test_worker_failed_envelope_includes_run_identity(tmp_path, monkeypatch):
     assert identity["quant"] == "q2"
     assert identity["reference"] == "ref-x"
     assert identity["max_chunks"] is None  # no --max-chunks arg passed
-    assert identity["schema_version"] == _PARTIAL_SCHEMA_VERSION
+    assert identity["schema_version"] == _WEIGHT_PARTIAL_SCHEMA_VERSION
 
 
 def test_worker_forwards_quant_reference_and_max_chunks(tmp_path, monkeypatch):

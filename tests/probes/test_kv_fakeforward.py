@@ -13,6 +13,7 @@ from mlx_quant_fidelity.errors import (
 )
 from mlx_quant_fidelity.probes import kv as kvmod
 from mlx_quant_fidelity.probes.kv import (
+    MAX_CHUNK_LENGTH,
     _aggregate_chunks,
     _cache_is_quantizable,
     _check_exact_zero,
@@ -694,3 +695,46 @@ def test_unequal_chunks_warn_when_depth_suppressed(monkeypatch):
     report = score_kv_config(_FakeDivergentModel(), corpus, model_id="org/m")
     assert report.kl_by_depth is None
     assert any("depth table omitted" in w for w in report.warnings)
+
+
+# ---------------------------------------------------------------------------
+# Task 6 (0033 part 3) — chunk_length as a first-class knob + memory warning
+# ---------------------------------------------------------------------------
+
+
+def test_chunk_length_rejected_with_provided_corpus():
+    corpus = Corpus(
+        chunks=(mx.arange(4),),
+        provenance=CorpusProvenance("x", "test", "t", 4, 4, "none", "drop", "raw", 4),
+    )
+    with pytest.raises(CorpusError, match="provided corpus"):
+        measure_kv_fidelity("fake", corpus=corpus, chunk_length=1024)
+
+
+def test_chunk_length_below_two_rejected():
+    with pytest.raises(CorpusError, match="chunk_length"):
+        measure_kv_fidelity("fake", chunk_length=1)
+
+
+def test_chunk_length_above_ceiling_rejected():
+    # the ceiling is a hard refusal (kernel-panic surface), not a warning
+    with pytest.raises(CorpusError, match=r"MAX_CHUNK_LENGTH|maximum"):
+        measure_kv_fidelity("fake", chunk_length=MAX_CHUNK_LENGTH + 1)
+
+
+def test_quantize_start_bound_follows_chunk_length():
+    # window=1024 -> valid boundary up to 1022; 1023 must raise QuantizeStartError
+    from mlx_quant_fidelity.errors import QuantizeStartError
+
+    with pytest.raises(QuantizeStartError):
+        measure_kv_fidelity("fake", quantize_start=1023, chunk_length=1024)
+
+
+def test_large_window_emits_memory_warning(monkeypatch):
+    # provenance.chunk_length=8192, model args.vocab_size=128_000 -> paired fp32 logits
+    # peak ~= 2*(8192-1)*128000*4 bytes ~= 8.4 GB > the 4 GiB threshold -> warning fires.
+    _patch_kv_caches_divergent(monkeypatch)
+    model = _FakeDivergentModel(head_dim=64)
+    model.args.vocab_size = 128_000
+    report = score_kv_config(model, _kv_corpus(1, chunk_len=8192), model_id="fake")
+    assert any("fp32 logits" in w for w in report.warnings)

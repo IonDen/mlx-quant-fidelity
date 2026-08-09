@@ -52,6 +52,7 @@ def main(argv: list[str] | None = None) -> int:
     kv.add_argument("--kv-group-size", type=int, default=64)
     kv.add_argument("--quantize-start", type=int, default=0)
     kv.add_argument("--max-chunks", type=int, default=None)
+    kv.add_argument("--chunk-length", type=int, default=512)
     kv.add_argument("--format", choices=["json", "md", "badge"], default="md")
 
     weights = sub.add_parser("weights", help="measure weight-quantization fidelity")
@@ -76,6 +77,7 @@ def main(argv: list[str] | None = None) -> int:
     ck.add_argument("--configs", required=True)
     ck.add_argument("--quantize-start", type=int, default=0)
     ck.add_argument("--max-chunks", type=int, default=None)
+    ck.add_argument("--chunk-length", type=int, default=512)
     ck.add_argument("--max-kld", type=float, default=None)
     ck.add_argument("--min-tier", choices=["good", "marginal", "bad"], default=None)
     ck.add_argument("--format", choices=["json", "md"], default="md")
@@ -89,6 +91,7 @@ def main(argv: list[str] | None = None) -> int:
                 kv_group_size=args.kv_group_size,
                 quantize_start=args.quantize_start,
                 max_chunks=args.max_chunks,
+                chunk_length=args.chunk_length,
             )
             if args.format == "json":
                 out = render_json(report)
@@ -132,6 +135,7 @@ def main(argv: list[str] | None = None) -> int:
                 configs,
                 quantize_start=args.quantize_start,
                 max_chunks=args.max_chunks,
+                chunk_length=args.chunk_length,
                 max_kld=args.max_kld,
                 min_tier=args.min_tier,
             )

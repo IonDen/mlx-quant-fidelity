@@ -12,7 +12,7 @@ from pathlib import Path
 
 from mlx_quant_fidelity._memory_caps import install_memory_caps
 from mlx_quant_fidelity.probes.weights import measure_weight_fidelity
-from mlx_quant_fidelity.runners.compare import _PARTIAL_SCHEMA_VERSION
+from mlx_quant_fidelity.runners.compare import _WEIGHT_PARTIAL_SCHEMA_VERSION
 
 
 def run_weight_worker(argv: list[str] | None = None) -> int:
@@ -29,7 +29,7 @@ def run_weight_worker(argv: list[str] | None = None) -> int:
         "quant": args.quant,
         "reference": args.reference,
         "max_chunks": args.max_chunks,
-        "schema_version": _PARTIAL_SCHEMA_VERSION,
+        "schema_version": _WEIGHT_PARTIAL_SCHEMA_VERSION,
     }
     try:
         report = measure_weight_fidelity(args.quant, args.reference, max_chunks=args.max_chunks)

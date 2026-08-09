@@ -207,11 +207,13 @@ def _weight_ok_envelope_with_identity(
     """Build a weight partial envelope with a run_identity block.
 
     quant defaults to label (the common case).
-    schema_version defaults to _PARTIAL_SCHEMA_VERSION from the live module.
+    schema_version defaults to _WEIGHT_PARTIAL_SCHEMA_VERSION from the live module.
     """
     import mlx_quant_fidelity.runners.compare as compare_mod
 
-    sv = schema_version if schema_version is not None else compare_mod._PARTIAL_SCHEMA_VERSION
+    sv = (
+        schema_version if schema_version is not None else compare_mod._WEIGHT_PARTIAL_SCHEMA_VERSION
+    )
     identity: dict[str, object] = {
         "mode": "weight",
         "quant": quant if quant is not None else label,
@@ -422,3 +424,31 @@ def test_compare_weight_null_partial_is_recomputed(monkeypatch, tmp_path):
     report = cmp.compare_weight_fidelity(["q8", "q6"], "ref", artifacts_dir=tmp_path)
     assert "q8" in calls  # non-dict partial triggered a re-run
     assert len(report.results) == 2
+
+
+# ── Task 6 (0033 part 3): the schema-version constant split ───────────────────
+
+
+def test_weight_partials_survive_the_kv_schema_bump(monkeypatch, tmp_path):
+    """The KV partial schema bumps (Task 6 adds chunk_length to KV identities); the weight
+    schema constant is untouched (still 1) so a pre-existing weight partial keeps resuming
+    without a forced recompute.
+    """
+    assert cmp._WEIGHT_PARTIAL_SCHEMA_VERSION == 1
+
+    matching_env = _weight_ok_envelope_with_identity("q8", 0.01, 8000, schema_version=1)
+    (tmp_path / "q8.json").write_text(json.dumps(matching_env))
+
+    calls = []
+
+    def _fake_run(quant, reference, partial_path, max_chunks):
+        calls.append(quant)
+        env = _weight_ok_envelope_with_identity(quant, 0.04, 6200)
+        partial_path.write_text(json.dumps(env))
+        return env
+
+    monkeypatch.setattr(cmp, "_run_weight_target", _fake_run)
+
+    cmp.compare_weight_fidelity(["q8", "q9"], "ref", artifacts_dir=tmp_path)
+
+    assert "q8" not in calls, "q8 must resume: the weight schema version (1) did not change"

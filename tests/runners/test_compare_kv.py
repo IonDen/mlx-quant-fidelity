@@ -63,7 +63,9 @@ def _patch_kv_compare(
 
     monkeypatch.setattr(cmp, "score_kv_config", fake_score)
     monkeypatch.setattr(
-        cmp, "_load_corpus_for_kv", lambda tokenizer, model_id, max_chunks: object()
+        cmp,
+        "_load_corpus_for_kv",
+        lambda tokenizer, model_id, max_chunks, chunk_length=512: object(),
     )
     return calls
 
@@ -236,7 +238,7 @@ def test_compare_kv_model_loaded_once(monkeypatch, tmp_path):
     # Fix 10: count corpus-build calls with a wrapper, assert exactly once
     corpus_calls: list[object] = []
 
-    def counting_load_corpus(tokenizer, model_id, max_chunks):  # type: ignore[return]
+    def counting_load_corpus(tokenizer, model_id, max_chunks, chunk_length=512):  # type: ignore[return]
         corpus_calls.append(model_id)
         return object()
 
@@ -270,7 +272,9 @@ def test_compare_kv_threads_revision_and_tokenizer(monkeypatch, tmp_path):
 
     corpus_tokenizer_received: list[object] = []
 
-    def fake_load_corpus(tokenizer: object, model_id: str, max_chunks: "int | None") -> object:
+    def fake_load_corpus(
+        tokenizer: object, model_id: str, max_chunks: "int | None", chunk_length: int = 512
+    ) -> object:
         corpus_tokenizer_received.append(tokenizer)
         return object()
 
@@ -539,7 +543,8 @@ def test_compare_kv_collect_loop_isolates_bad_cost_partial(monkeypatch, tmp_path
         "group_size": 64,
         "quantize_start": 0,
         "max_chunks": None,
-        "schema_version": compare_mod._PARTIAL_SCHEMA_VERSION,
+        "chunk_length": 512,
+        "schema_version": compare_mod._KV_PARTIAL_SCHEMA_VERSION,
     }
     (tmp_path / "4_64.json").write_text(
         json.dumps(
@@ -644,16 +649,17 @@ def _kv_partial_with_identity(
     group_size: int,
     quantize_start: int = 0,
     max_chunks: int | None = None,
+    chunk_length: int = 512,
     schema_version: int | None = None,
 ) -> str:
     """Build a KV partial JSON with a run_identity block.
 
-    schema_version defaults to _PARTIAL_SCHEMA_VERSION (the live constant).
+    schema_version defaults to _KV_PARTIAL_SCHEMA_VERSION (the live constant).
     Pass a different integer to simulate a version mismatch.
     """
     import mlx_quant_fidelity.runners.compare as compare_mod
 
-    sv = schema_version if schema_version is not None else compare_mod._PARTIAL_SCHEMA_VERSION
+    sv = schema_version if schema_version is not None else compare_mod._KV_PARTIAL_SCHEMA_VERSION
     identity = {
         "mode": "kv",
         "model_id": model_id,
@@ -662,6 +668,7 @@ def _kv_partial_with_identity(
         "group_size": group_size,
         "quantize_start": quantize_start,
         "max_chunks": max_chunks,
+        "chunk_length": chunk_length,
         "schema_version": sv,
     }
     return json.dumps(
@@ -778,7 +785,8 @@ def _kv_partial_env(bits: int, gs: int, *, kl_mean: float, cost: int) -> dict[st
             "group_size": gs,
             "quantize_start": 0,
             "max_chunks": None,
-            "schema_version": cmp._PARTIAL_SCHEMA_VERSION,
+            "chunk_length": 512,
+            "schema_version": cmp._KV_PARTIAL_SCHEMA_VERSION,
         },
     }
 
@@ -872,3 +880,60 @@ def test_kv_envelope_non_dict_is_corrupt_partial():
 
     result = _kv_envelope_to_result("4:64", [])  # type: ignore[arg-type]
     assert (result.status, result.error_type) == ("failed", "CorruptPartial")
+
+
+# ── Task 6 (0033 part 3): chunk_length as a first-class knob ──────────────────
+
+
+def test_kv_partial_identity_includes_chunk_length(monkeypatch, tmp_path):
+    """A freshly-scored KV partial's run_identity records chunk_length and the KV schema
+    version, so a later run at a different chunk_length is correctly seen as stale.
+    """
+    reports = {(4, 64): _fid((4, 64), 0.09), (8, 64): _fid((8, 64), 0.01)}
+    _patch_kv_compare(monkeypatch, reports)
+    cmp.compare_kv_fidelity("m", [(4, 64), (8, 64)], chunk_length=1024, artifacts_dir=tmp_path)
+    env = json.loads((tmp_path / "4_64.json").read_text())
+    assert env["run_identity"]["chunk_length"] == 1024
+    assert env["run_identity"]["schema_version"] == cmp._KV_PARTIAL_SCHEMA_VERSION
+
+
+def test_chunk_length_change_invalidates_partials(monkeypatch, tmp_path):
+    """A partial written at chunk_length=512 must NOT resume a chunk_length=1024 run."""
+    rep = _fid((4, 64), 0.09)
+    (tmp_path / "4_64.json").write_text(
+        _kv_partial_with_identity(rep, 1000, bits=4, group_size=64, chunk_length=512)
+    )
+    reports = {(4, 64): _fid((4, 64), 0.09), (8, 64): _fid((8, 64), 0.01)}
+    calls = _patch_kv_compare(monkeypatch, reports)
+
+    cmp.compare_kv_fidelity("m", [(4, 64), (8, 64)], chunk_length=1024, artifacts_dir=tmp_path)
+
+    assert (4, 64) in calls, "(4,64) must be re-scored; stale chunk_length=512 must not resume"
+
+
+def test_validate_compare_kv_args_rejects_chunk_length_above_ceiling():
+    from mlx_quant_fidelity.errors import CompareConfigError
+    from mlx_quant_fidelity.probes.kv import MAX_CHUNK_LENGTH
+    from mlx_quant_fidelity.runners.compare import _validate_compare_kv_args
+
+    with pytest.raises(CompareConfigError, match="MAX_CHUNK_LENGTH"):
+        _validate_compare_kv_args(
+            [(4, 64), (8, 64)],
+            quantize_start=0,
+            max_chunks=None,
+            chunk_length=MAX_CHUNK_LENGTH + 1,
+        )
+
+
+def test_validate_compare_kv_args_quantize_start_bound_follows_chunk_length():
+    from mlx_quant_fidelity.errors import QuantizeStartError
+    from mlx_quant_fidelity.runners.compare import _validate_compare_kv_args
+
+    # window=1024 -> valid boundary up to 1022; 1023 must raise
+    with pytest.raises(QuantizeStartError):
+        _validate_compare_kv_args(
+            [(4, 64), (8, 64)], quantize_start=1023, max_chunks=None, chunk_length=1024
+        )
+    _validate_compare_kv_args(  # 1022 is the last valid boundary — no raise
+        [(4, 64), (8, 64)], quantize_start=1022, max_chunks=None, chunk_length=1024
+    )

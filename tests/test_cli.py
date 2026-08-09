@@ -175,3 +175,77 @@ def test_cli_compare_rejects_badge_format():
     with pytest.raises(SystemExit) as exc:  # argparse rejects an invalid --format choice
         cli.main(["compare", "kv", "m", "--configs", "4:64,8:64", "--format", "badge"])
     assert exc.value.code == 2  # argparse usage error exit code
+
+
+# ── Task 6 (0033 part 3): --chunk-length CLI plumbing ──────────────────────────
+
+
+def test_kv_cli_passes_chunk_length(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_measure(model: str, **kw: object) -> FidelityReport:
+        captured["kw"] = kw
+        return _fake_report()
+
+    monkeypatch.setattr(cli, "measure_kv_fidelity", fake_measure)
+    rc = cli.main(["kv", "m", "--chunk-length", "1024"])
+    assert rc == 0
+    assert captured["kw"]["chunk_length"] == 1024
+
+
+def test_kv_cli_chunk_length_defaults_to_512(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_measure(model: str, **kw: object) -> FidelityReport:
+        captured["kw"] = kw
+        return _fake_report()
+
+    monkeypatch.setattr(cli, "measure_kv_fidelity", fake_measure)
+    rc = cli.main(["kv", "m"])
+    assert rc == 0
+    assert captured["kw"]["chunk_length"] == 512
+
+
+def _fake_comparison_report() -> object:
+    from mlx_quant_fidelity.report import ComparisonReport
+
+    return ComparisonReport(
+        mode="kv",
+        reference=None,
+        model="m",
+        corpus=None,
+        quantize_start=0,
+        quantize_mode="stress",
+        budget=None,
+        results=(),
+        frontier=(),
+        dominated=(),
+        budget_pick=None,
+        mlx_version="0.21",
+        mlx_lm_version="0.31.3",
+    )
+
+
+def test_compare_kv_cli_passes_chunk_length(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_compare(model: str, configs: object, **kw: object) -> object:
+        captured["kw"] = kw
+        return _fake_comparison_report()
+
+    monkeypatch.setattr(cli, "compare_kv_fidelity", fake_compare)
+    rc = cli.main(
+        [
+            "compare",
+            "kv",
+            "m",
+            "--configs",
+            "4:64,8:64",
+            "--chunk-length",
+            "1024",
+            "--format",
+            "json",
+        ]
+    )
+    assert rc == 0
+    assert captured["kw"]["chunk_length"] == 1024
