@@ -753,14 +753,14 @@ def test_quantize_start_bound_follows_chunk_length():
 def test_large_window_emits_memory_warning(monkeypatch):
     # window=4096 (== MAX_CHUNK_LENGTH, so reachable through the public chunk_length knob --
     # unlike an out-of-ceiling window, which could never reach score_kv_config for real),
-    # vocab=151_936 (Qwen2-class) -> paired fp32 logits peak (two logits arrays + two
-    # log-softmax temporaries, all fp32) ~= 4*(4096-1)*151936*4 bytes ~= 9.3 GiB, over the
-    # 4 GiB threshold -> warning fires.
+    # vocab=151_936 (Qwen2-class) -> paired fp32 logits peak ~= 7*(4096-1)*151936*4 bytes
+    # ~= 16.2 GiB, over the 4 GiB threshold -> warning fires.
     _patch_kv_caches_divergent(monkeypatch)
     model = _FakeDivergentModel(head_dim=64)
     model.args.vocab_size = 151_936
     report = score_kv_config(model, _kv_corpus(1, chunk_len=4096), model_id="fake")
-    # Pins the 4x multiplier (2 logits + 2 log-softmax temporaries) and the GiB unit: a
-    # regression back to the old 2x multiplier would compute 4.6 GiB here, not 9.3 GiB.
-    expected_gib = 4 * (4096 - 1) * 151_936 * 4 / 1024**3
+    # Pins the 7x multiplier, calibrated against the 2026-08-09 measured long-window spike
+    # (docs/measurement-principles.md): a regression back to the old 4x multiplier would
+    # compute 9.3 GiB here, not 16.2 GiB.
+    expected_gib = 7 * (4096 - 1) * 151_936 * 4 / 1024**3
     assert any(f"{expected_gib:.1f} GiB" in w for w in report.warnings)

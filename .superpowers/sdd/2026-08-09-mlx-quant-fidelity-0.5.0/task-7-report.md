@@ -95,3 +95,44 @@ exact hash.
   re-verified against the Hub in this dispatch (no network access permitted here).
 - `MAX_CHUNK_LENGTH = 4096` in `src/mlx_quant_fidelity/probes/kv.py` remains unchanged (still the
   provisional ceiling from Task 6) pending the real spike run.
+
+## Follow-up: measured-peak reconciliation (post-spike)
+
+After the controller ran the spike on the main session (all four lanes clean; measured peaks:
+512→2,435,507,673 B, 1024→4,149,720,041 B, 2048→7,607,472,105 B, 4096→14,522,976,233 B ≈ 13.5
+GiB, comfortably under the wired cap), two follow-up edits landed in this dispatch:
+
+1. **`MAX_CHUNK_LENGTH` comment** in `src/mlx_quant_fidelity/probes/kv.py` — rewritten from
+   "provisional pending the spike" to record the 2026-08-09 validation and the measured ~13.5
+   GiB peak at chunk_length=4096. The constant itself (`4096`) is unchanged.
+
+2. **Memory-warning multiplier calibrated from 4x to 7x** in `score_kv_config` (same file). The
+   measured slope between the 2048 and 4096 lanes is `(14522976233 - 7607472105) / 2048 ≈
+   3.377e6 B/token ≈ 6.58` `[positions, vocab]` fp32-array-equivalents per window (vocab=128256
+   for Llama-3.2-1B, one array = `vocab * 4` bytes = 513,024 B). The old 4x estimate
+   under-predicted the measured total peak by ~1.7x. Rounded 6.58 up to 7 so the estimate keeps
+   erring high (a safety warning must err high, not low); the 4 GiB threshold and the warning
+   message text are otherwise unchanged. Comment rewritten to state the calibration source and
+   note that the slope excludes the model-weight/KV-cache intercept, so small models fire the
+   warning slightly early — the right direction for a safety warning.
+
+**TDD sequence followed:** updated `tests/probes/test_kv_fakeforward.py::test_large_window_emits_memory_warning`
+first to expect `expected_gib = 7 * (4096 - 1) * 151_936 * 4 / 1024**3` (≈16.2 GiB); ran it alone
+and confirmed RED against the still-4x implementation (`assert False`); then changed the
+multiplier in `probes/kv.py` from 4 to 7 in both the threshold check and the warning-message
+f-string; reran the same test and confirmed GREEN.
+
+**Gate results (this follow-up):**
+- `uv run ruff check src/mlx_quant_fidelity/probes/kv.py tests/probes/test_kv_fakeforward.py` →
+  `All checks passed!`
+- `uv run ruff format --check src/mlx_quant_fidelity/probes/kv.py tests/probes/test_kv_fakeforward.py`
+  → `2 files already formatted`
+- `uv run mypy` → `Success: no issues found in 26 source files`
+- `uv run pytest -q` (offline/default lane) → `314 passed, 9 skipped in 0.40s` (same skip set as
+  before — no lane changed shape)
+- `uv run pytest --cov=mlx_quant_fidelity --cov-report=term-missing --cov-fail-under=85 -q` →
+  `Required test coverage of 85% reached. Total coverage: 99.54%`
+
+**Commit:** `Calibrate the long-window memory estimate against measured peaks` — SHA recorded by
+the `bash-git-ops` agent that performed the commit; see the parent session's final report for the
+exact hash.

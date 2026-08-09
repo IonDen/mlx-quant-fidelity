@@ -24,11 +24,11 @@ if TYPE_CHECKING:
     from mlx_quant_fidelity.corpora.provenance import Corpus
 
 
-# Provisional hard ceiling on chunk_length (kernel-panic safety surface — paired fp32 logits
-# scale with window x vocab, see the memory warning in score_kv_config). Task 7's spike
-# (docs/measurement-principles.md) measures the real ceiling on real hardware; if the 4096
-# lane fails that spike, lower this constant to the largest validated window in the same
-# commit as the spike results.
+# Hard ceiling on chunk_length (kernel-panic safety surface — paired fp32 logits scale with
+# window x vocab, see the memory warning in score_kv_config). Validated 2026-08-09 by the
+# long-window memory spike (docs/measurement-principles.md, scripts/spike_long_window_memory.py):
+# measured peak at chunk_length=4096 on Llama-3.2-1B-4bit was ~13.5 GiB, comfortably under the
+# device wired cap, so 4096 stands.
 MAX_CHUNK_LENGTH = 4096
 
 
@@ -199,15 +199,17 @@ def score_kv_config(
         probe_warnings.append(head_dim_warning)
     window = getattr(corpus.provenance, "chunk_length", None)
     vocab = getattr(getattr(model, "args", None), "vocab_size", None)
-    # Multiplier is 4, not 2: _reduce_pair's log-softmax temporaries are also [positions, vocab]
-    # fp32 and live alongside the two raw logits arrays under the lazy graph, so counting only
-    # the logits under-estimates the real peak by ~2x. This is a deliberately upper-bound
-    # estimate — a safety warning must err high, not low — pending the measured-peak
-    # reconciliation a later long-window spike will validate.
-    if window and vocab and 4 * (window - 1) * int(vocab) * 4 > 4 * 1024**3:
+    # Multiplier is 7, calibrated against the 2026-08-09 measured long-window spike
+    # (docs/measurement-principles.md): the measured peak slope between the 2048 and 4096
+    # chunk_length lanes on Llama-3.2-1B-4bit is ~6.6 [positions, vocab] fp32-array-equivalents
+    # per window (raw logits + log-softmax temporaries under the lazy graph), rounded up to 7
+    # so the estimate keeps erring high. The slope excludes the model-weight/KV-cache memory
+    # intercept, so small models fire this warning slightly early -- the right direction for a
+    # safety warning.
+    if window and vocab and 7 * (window - 1) * int(vocab) * 4 > 4 * 1024**3:
         probe_warnings.append(
             f"chunk_length={window}: paired fp32 logits peak ≈ "
-            f"{4 * (window - 1) * int(vocab) * 4 / 1024**3:.1f} GiB per chunk; "
+            f"{7 * (window - 1) * int(vocab) * 4 / 1024**3:.1f} GiB per chunk; "
             "see docs/measurement-principles.md (Drift by position depth) for measured ceilings."
         )
     if kv_bits not in (2, 3, 4, 6, 8):
