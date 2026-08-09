@@ -60,6 +60,17 @@ def _head_dim_gate(*, head_dim: int | None, kv_group_size: int, model_type: str)
     return None
 
 
+def packed_width_mismatch(head_dim: int, bits: int) -> bool:
+    """True when mlx-lm's QuantizedKVCache pre-allocation disagrees with mx.quantize.
+
+    The cache pre-allocates packed buffers of width ``head_dim // (32 // bits)``
+    (el_per_int truncation, mlx-lm models/cache.py) while ``mx.quantize`` packs to
+    ``head_dim * bits // 32``; a first append with mismatched widths dies in
+    broadcast_shapes. Affects bits=6 at e.g. head_dim=128 on mlx-lm 0.31.x.
+    """
+    return head_dim // (32 // bits) != head_dim * bits // 32
+
+
 def _cache_is_quantizable(cache: list[object], *, group_size: int, bits: int) -> bool:
     """Return True if every layer cache has a NON-RAISING to_quantized; else raise, naming the type.
 
@@ -170,11 +181,18 @@ def score_kv_config(
     """
     probe_warnings: list[str] = []
     model_type = str(getattr(getattr(model, "args", None), "model_type", "unknown"))
+    head_dim = _kv_head_dim(model)
     head_dim_warning = _head_dim_gate(
-        head_dim=_kv_head_dim(model), kv_group_size=kv_group_size, model_type=model_type
+        head_dim=head_dim, kv_group_size=kv_group_size, model_type=model_type
     )
     if head_dim_warning is not None:
         probe_warnings.append(head_dim_warning)
+    if head_dim is not None and packed_width_mismatch(head_dim, kv_bits):
+        raise CacheNotQuantizableError(
+            f"kv_bits={kv_bits} cannot append to a fresh QuantizedKVCache at "
+            f"head_dim={head_dim} on this mlx-lm version (packed-width truncation bug); "
+            "use bits 2/3/4/8 or a group-compatible head_dim."
+        )
 
     probe_cache = make_prompt_cache(model)
     n_layers = len(probe_cache)
@@ -196,7 +214,15 @@ def score_kv_config(
             quant_cache: list[object] = [
                 QuantizedKVCache(group_size=kv_group_size, bits=kv_bits) for _ in range(n_layers)
             ]
-            kl, flip, ref_nll, quant_nll = _score_chunk(model, ids, ref_cache, quant_cache)
+            try:
+                kl, flip, ref_nll, quant_nll = _score_chunk(model, ids, ref_cache, quant_cache)
+            except ValueError as exc:
+                if "broadcast_shapes" in str(exc):
+                    raise CacheNotQuantizableError(
+                        f"kv_bits={kv_bits} crashed appending to a fresh QuantizedKVCache "
+                        f"(mlx-lm packed-width truncation bug): {exc}"
+                    ) from exc
+                raise
         else:
             quant_cache = make_prompt_cache(model)
             kl, flip, ref_nll, quant_nll = _score_chunk_deployment(

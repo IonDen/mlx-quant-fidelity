@@ -20,6 +20,7 @@ from mlx_quant_fidelity.probes.kv import (
     _kv_head_dim,
     _score_chunk,
     measure_kv_fidelity,
+    packed_width_mismatch,
     score_kv_config,
 )
 
@@ -308,13 +309,13 @@ class _FakeDivergentModel:
     head_dim=64, kv_group_size default 64: 64 % 64 == 0 so no head_dim warning fires.
     """
 
-    def __init__(self):
+    def __init__(self, head_dim=64):
         self.args = type(
             "A",
             (),
             {
                 "model_type": "llama",
-                "head_dim": 64,
+                "head_dim": head_dim,
                 "hidden_size": None,
                 "num_attention_heads": None,
             },
@@ -550,3 +551,92 @@ def test_measure_kv_deployment_boundary_validated_before_load(monkeypatch):
         measure_kv_fidelity("any-model", quantize_start=511)  # == window-1 → zero quantized
     with pytest.raises(QuantizeStartError):
         measure_kv_fidelity("any-model", quantize_start=-1)
+
+
+# ---------------------------------------------------------------------------
+# 0031 — bits=6 packed-width mismatch gate (mlx-lm QuantizedKVCache append crash)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("head_dim", "bits", "expected"),
+    [
+        (128, 6, True),  # 128 // 5 = 25  vs  128 * 6 // 32 = 24 — the 0031 crash
+        (96, 6, True),  # 96 // 5 = 19   vs  96 * 6 // 32 = 18
+        (64, 6, False),  # 12 == 12
+        (128, 3, False),  # 128 // 10 = 12 vs  128 * 3 // 32 = 12
+        (128, 2, False),
+        (128, 4, False),
+        (128, 8, False),
+    ],
+)
+def test_packed_width_mismatch(head_dim, bits, expected):
+    assert packed_width_mismatch(head_dim, bits) is expected
+
+
+def test_bits6_head_dim_128_rejected_package_rooted():
+    # head_dim=128 % kv_group_size=32 == 0 (no head_dim warning); the packed-width gate fires
+    # before make_prompt_cache / any forward, so a bare args stub is enough.
+    model = _FakeDivergentModel(head_dim=128)
+    with pytest.raises(CacheNotQuantizableError, match="mlx-lm"):
+        score_kv_config(model, _kv_corpus(1), model_id="fake", kv_bits=6, kv_group_size=32)
+
+
+def test_bits6_head_dim_64_still_measures(monkeypatch):
+    # head_dim=64 agrees at bits=6 (12 == 12) so the gate does not fire — scoring proceeds.
+    _patch_kv_caches_divergent(monkeypatch)
+    report = score_kv_config(
+        _FakeDivergentModel(head_dim=64),
+        _kv_corpus(2),
+        model_id="fake",
+        kv_bits=6,
+        kv_group_size=32,
+    )
+    assert report.kv_bits == 6
+
+
+class _FakeBroadcastCrashModel:
+    """head_dim=64 (agrees at any gated bits) so the early gate does NOT fire; the forward call
+    against a quantized cache raises the raw mlx-lm broadcast_shapes ValueError instead, so this
+    exercises the belt catch inside the stress-mode chunk loop.
+    """
+
+    def __init__(self):
+        self.args = type(
+            "A",
+            (),
+            {
+                "model_type": "llama",
+                "head_dim": 64,
+                "hidden_size": None,
+                "num_attention_heads": None,
+            },
+        )()
+
+    def __call__(self, inp, cache=None):
+        if cache is not None and getattr(cache[0], "bits", None) is not None:
+            raise ValueError("[broadcast_shapes] Shapes (1,4,25) and (1,4,24) cannot be broadcast.")
+        return mx.zeros((1, inp.shape[1], 3))
+
+
+def test_score_kv_config_wraps_broadcast_shapes_crash(monkeypatch):
+    _patch_kv_caches_divergent(monkeypatch)
+    with pytest.raises(CacheNotQuantizableError, match="broadcast_shapes"):
+        score_kv_config(_FakeBroadcastCrashModel(), _kv_corpus(1), model_id="fake")
+
+
+class _FakeUnrelatedValueErrorModel(_FakeBroadcastCrashModel):
+    """Same shape as _FakeBroadcastCrashModel but the quant-pass ValueError is unrelated to the
+    packed-width bug — the belt catch must not swallow it into a misleading CacheNotQuantizableError.
+    """
+
+    def __call__(self, inp, cache=None):
+        if cache is not None and getattr(cache[0], "bits", None) is not None:
+            raise ValueError("some unrelated numerical error")
+        return mx.zeros((1, inp.shape[1], 3))
+
+
+def test_score_kv_config_reraises_unrelated_value_error(monkeypatch):
+    _patch_kv_caches_divergent(monkeypatch)
+    with pytest.raises(ValueError, match="unrelated numerical error"):
+        score_kv_config(_FakeUnrelatedValueErrorModel(), _kv_corpus(1), model_id="fake")
