@@ -6,6 +6,7 @@ import importlib.metadata
 from typing import TYPE_CHECKING
 
 import mlx.core as mx
+import numpy as np
 from mlx_lm.models.cache import QuantizedKVCache, make_prompt_cache
 
 from mlx_quant_fidelity._memory_caps import device_string, install_memory_caps
@@ -14,6 +15,7 @@ from mlx_quant_fidelity.errors import (
     CorpusError,
     QuantizeStartError,
 )
+from mlx_quant_fidelity.metrics import bucket_by_depth
 from mlx_quant_fidelity.policy import verdict_for
 from mlx_quant_fidelity.probes._paired import _aggregate_chunks, _check_exact_zero, _reduce_pair
 from mlx_quant_fidelity.report import FidelityReport
@@ -262,6 +264,18 @@ def score_kv_config(
             "shorter than the keep-first-N boundary, or the quantized cache was bypassed)"
         ),
     )
+
+    kl_by_depth = None
+    if mode == "stress" and kls:
+        arrays = [np.asarray(k, dtype=np.float64) for k in kls]
+        if len({a.shape[0] for a in arrays}) == 1:  # uniform windows only
+            kl_by_depth = bucket_by_depth(arrays)
+        else:
+            probe_warnings.append(
+                "depth table omitted: scored chunks have unequal lengths "
+                "(drift-by-depth requires a fixed-window corpus)."
+            )
+
     return FidelityReport(
         model_id=model_id,
         model_revision=model_revision,
@@ -284,6 +298,7 @@ def score_kv_config(
         verdict=verdict_for(agg.kl.mean, agg.kl.p99, agg.flip_rate),
         warnings=tuple(probe_warnings),
         device=device_string(),
+        kl_by_depth=kl_by_depth,
     )
 
 

@@ -656,3 +656,41 @@ def test_score_kv_config_reraises_unrelated_value_error(monkeypatch):
     _patch_kv_caches_divergent(monkeypatch)
     with pytest.raises(ValueError, match="unrelated numerical error"):
         score_kv_config(_FakeUnrelatedValueErrorModel(), _kv_corpus(1), model_id="fake")
+
+
+# ---------------------------------------------------------------------------
+# Task 5 — score_kv_config populates kl_by_depth in stress mode only
+# ---------------------------------------------------------------------------
+
+
+def test_stress_report_carries_depth_buckets(monkeypatch):
+    # _kv_corpus(2) -> 2 chunks of chunk_len=4 -> 3 scored (teacher-forced) positions each.
+    _patch_kv_caches_divergent(monkeypatch)
+    report = score_kv_config(_FakeDivergentModel(), _kv_corpus(2), model_id="fake")
+    assert report.kl_by_depth is not None
+    assert sum(b.n_positions for b in report.kl_by_depth) == report.n_positions
+    assert report.kl_by_depth[0].start == 0
+    assert report.kl_by_depth[-1].end == 3  # scored positions per chunk (chunk_len-1)
+
+
+def test_deployment_report_has_no_depth_buckets(monkeypatch):
+    # Same shape as the deployment tests above (quantize_start > 0): kl_by_depth is stress-only.
+    _patch_kv_caches_deployment(monkeypatch)
+    report = score_kv_config(
+        _FakeDivergentModel(), _kv_corpus(1, 6), model_id="fake", quantize_start=2
+    )
+    assert report.quantize_mode == "deployment"
+    assert report.kl_by_depth is None
+
+
+def test_unequal_chunks_warn_when_depth_suppressed(monkeypatch):
+    # A corpus with a shorter final chunk (drop_final_partial=False is a supported Corpus
+    # shape) -> per-chunk scored-position counts differ -> depth bucketing is skipped, and the
+    # omission is reported as a warning, never silent.
+    _patch_kv_caches_divergent(monkeypatch)
+    chunks = (mx.arange(4), mx.arange(3))
+    prov = CorpusProvenance("x", "test", "org/m", 4, 4, "none", "keep", "raw", 7)
+    corpus = Corpus(chunks=chunks, provenance=prov)
+    report = score_kv_config(_FakeDivergentModel(), corpus, model_id="org/m")
+    assert report.kl_by_depth is None
+    assert any("depth table omitted" in w for w in report.warnings)
