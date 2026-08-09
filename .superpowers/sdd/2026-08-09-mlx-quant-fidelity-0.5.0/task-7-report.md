@@ -79,6 +79,67 @@ Both collect the same single test; neither invocation executed it (`--co` is col
 `bash-git-ops` agent that performed the commit; see the parent session's final report for the
 exact hash.
 
+## Follow-up 2: task-review findings (resume-skip bug + gitignore)
+
+Task review returned one Important finding and one same-area Minor on
+`scripts/spike_long_window_memory.py`. Both fixed in this follow-up.
+
+**IMPORTANT — resume-skip didn't distinguish success from failure.** The original `main()` loop
+did `if out.exists(): skip`, so a length whose artifact recorded a watchdog abort (`returncode
+3`) or a wall-clock timeout (`returncode -1`) would be skipped on every subsequent run, printing
+the same `"skip {length} (exists)"` a clean lane gets — silently treating a failed run as done
+forever.
+
+Fix: added `_recorded_returncode(path: Path) -> int | None`, which reads and parses the existing
+artifact and returns its `returncode` field, or `None` if the file is missing, unreadable, not
+valid JSON, not a dict, or has a non-int `returncode` (defensive guard: a corrupt/unreadable
+artifact counts as failed, so the lane re-runs). `_lane_is_complete(path: Path) -> bool` wraps
+that as `_recorded_returncode(path) == 0` — the pure predicate the review suggested extracting.
+`main()` now skips a length only when `recorded_rc == 0` (printing `"skip {length} (exists,
+rc=0)"`), and otherwise — if an artifact exists but isn't a recorded success — prints the
+recorded rc before re-running and overwriting it (e.g. `"4096: existing artifact recorded rc=3
+(not a success) -> re-running"`).
+
+**MINOR — added `/_artifacts/spike_long_window/` to `.gitignore`**, mirroring the existing
+`/_artifacts/compare/` entry, so the run artifacts can't be accidentally staged by `git add -A`.
+
+**TDD sequence:** wrote `tests/test_spike_long_window_resume.py` first (six cases: missing
+artifact, `rc=0` success, `rc=3` watchdog abort, `rc=-1` wall timeout, corrupt/non-JSON content,
+JSON missing the `returncode` field — all asserting `_lane_is_complete`), confirmed RED
+(`ImportError: cannot import name '_lane_is_complete'`), then implemented the two helpers and
+wired them into `main()`, confirmed GREEN (`6 passed`). The script has no coverage requirement
+(`[tool.coverage.run].source = ["mlx_quant_fidelity"]` doesn't include `scripts/`), so this stays
+a small, proportionate offline unit test rather than a full harness.
+
+**Verification (no heavy runs, no model load):**
+- The new pytest cases exercise the predicate directly against synthetic tmp_path artifacts.
+- A throwaway `python3 -c` check confirmed the same behavior end-to-end
+  (`_lane_is_complete` on a synthetic `rc=3` artifact → `False`; on `rc=0` → `True`;
+  `_recorded_returncode` on a missing path → `None`).
+- Read (not modified) the four real files in `_artifacts/spike_long_window/` and confirmed all
+  four (`512.json`, `1024.json`, `2048.json`, `4096.json`) still record `returncode: 0` —
+  untouched, per the coordinator's instruction not to delete or regenerate them.
+- `git check-ignore -v _artifacts/spike_long_window/512.json` confirms the new `.gitignore` line
+  matches.
+
+**Gate results (this follow-up):**
+- `uv run ruff check scripts/spike_long_window_memory.py tests/test_spike_long_window_resume.py`
+  → `All checks passed!`
+- `uv run ruff format --check scripts/spike_long_window_memory.py
+  tests/test_spike_long_window_resume.py` → `2 files already formatted` (one auto-reformat
+  applied via `ruff format` before this, matching CI's formatter)
+- `uv run mypy` → `Success: no issues found in 26 source files` (`scripts/` still out of mypy's
+  configured scope; kept the new helpers fully annotated regardless)
+- `uv run pytest -q` (offline/default lane) → `320 passed, 9 skipped in 0.41s` (314 → 320: the
+  six new resume-predicate tests; same skip set as before)
+- `uv run pytest --cov=mlx_quant_fidelity --cov-report=term-missing --cov-fail-under=85 -q` →
+  `Required test coverage of 85% reached. Total coverage: 99.54%` (unchanged — new files aren't
+  instrumented source)
+
+**Commit:** plain message `Fix resume-skip to check returncode, not just file existence` — SHA
+recorded by the `bash-git-ops` agent that performed the commit; see the parent session's final
+report for the exact hash.
+
 ## Not done in this dispatch (by design)
 
 - Did not run `scripts/spike_long_window_memory.py` (Step 2).
