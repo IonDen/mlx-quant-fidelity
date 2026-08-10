@@ -15,7 +15,7 @@
 
 Measured on **wikitext-2-raw/test**, 51100 positions across 100 chunks of length 512 (tokenizer `mlx-community/Qwen2.5-7B-Instruct-8bit`). Fidelity is corpus- and context-length-specific; short-prose temp-0 drift under-predicts long-context/code degradation.
 
-_mlx 0.31.2, mlx-lm 0.31.3, quant 4284346255 B, reference 8091987725 B, peak 14.40 GB, on Apple M1 Max, 32 GB._
+_mlx 0.31.2, mlx-lm 0.31.3, quant 4284346255 B, reference 8091987725 B, peak 14.56 GB, on Apple M1 Max, 32 GB._
 
 > Note: Assumes both repos share a tokenizer; only vocab_size (and bos/eos ids) were checked — a divergent token map would be measured as quant drift.
 

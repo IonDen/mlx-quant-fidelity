@@ -82,7 +82,7 @@
   "mlx_lm_version": "0.31.3",
   "mlx_version": "0.31.2",
   "model_id": "mlx-community/Qwen2.5-7B-Instruct-4bit",
-  "model_revision": null,
+  "model_revision": "c26a38f6a37d0a51b4e9a1eb3026530fa35d9fed",
   "n_chunks": 100,
   "n_positions": 51100,
   "peak_memory_bytes": 6353696009,
