@@ -20,7 +20,13 @@ _REVISION = "08231374eeacb049a0eade7922910865b8fce912"
 @pytest.mark.slow
 @pytest.mark.network
 def test_long_window_stress_run_fits_and_buckets() -> None:
-    """chunk_length=2048 stays under the device wired cap and reports depth buckets."""
+    """chunk_length=2048 stays under the INSTALLED wired cap and reports depth buckets.
+
+    The bound is ``compute_safe_caps_gb()[0]`` (the cap the probe actually installs, 20 GiB on
+    a 32 GB M1 Max), not the device's ``max_recommended_working_set_size`` (~26.8 GiB) — a run
+    peaking at 24 GiB would pass the latter while blowing the cap that is really in force.
+    The recorded measured peak for this lane is 13.53 GiB, well under either.
+    """
     report = measure_kv_fidelity(
         _MODEL,
         kv_bits=4,
@@ -33,7 +39,10 @@ def test_long_window_stress_run_fits_and_buckets() -> None:
     assert report.kl_by_depth is not None
     assert len(report.kl_by_depth) == 8
 
-    import mlx.core as mx
+    from mlx_quant_fidelity._memory_caps import compute_safe_caps_gb
 
-    cap = int(mx.device_info()["max_recommended_working_set_size"])
-    assert report.peak_memory_bytes < cap
+    wired_gb, _ = compute_safe_caps_gb()
+    assert wired_gb, (
+        "device reports no working-set size — the wired cap under test is not installed"
+    )
+    assert report.peak_memory_bytes < wired_gb * 1024**3

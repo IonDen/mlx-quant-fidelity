@@ -199,10 +199,10 @@ def render_markdown(report: FidelityReport) -> str:
 
 @dataclass(frozen=True, slots=True)
 class ComparisonTargetResult:
-    """One target in a comparison: a successful (rankable/unrankable) or failed measurement."""
+    """One target in a comparison: a successful, skipped, or failed measurement."""
 
     label: str
-    status: str  # "ok" | "failed"
+    status: str  # "ok" | "failed" | "skipped"
     report: FidelityReport | WeightFidelityReport | None
     point: RankPoint | None  # set iff status=="ok" AND cost resolved (rankable)
     excluded_reason: str | None  # e.g. "cost unavailable"; None when ranked

@@ -35,15 +35,23 @@ import mlx.core as mx
 length, model_id, revision = int(sys.argv[1]), sys.argv[2], sys.argv[3]
 ceiling = int(mx.device_info()["memory_size"]) - 4 * 1024**3
 
+# MLX does not return a dropped buffer to the OS -- it moves to the allocator's retained cache
+# pool, which get_active_memory() does NOT count. Bound that pool so the watchdog's headroom is
+# real, and measure against active + cache (the actual resident footprint).
+mx.set_cache_limit(4 * 1024**3)
+
 def _watchdog():
     while True:
-        active = int(mx.get_active_memory())
-        if active > ceiling:
+        active, cached = int(mx.get_active_memory()), int(mx.get_cache_memory())
+        if active + cached > ceiling:
             print(json.dumps({"chunk_length": length, "aborted": "active-memory watchdog",
-                              "active_bytes": active, "ceiling_bytes": ceiling}))
+                              "active_bytes": active, "cache_bytes": cached,
+                              "resident_bytes": active + cached, "ceiling_bytes": ceiling}))
             sys.stdout.flush()
             os._exit(3)
-        time.sleep(0.5)
+        # 0.05s, not 0.5s: the poll thread runs while mx.eval holds no GIL, so it is cheap, and
+        # a 0.5s window is long enough for a single large allocation to overshoot the ceiling.
+        time.sleep(0.05)
 
 threading.Thread(target=_watchdog, daemon=True).start()
 

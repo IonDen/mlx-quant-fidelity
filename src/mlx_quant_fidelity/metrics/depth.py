@@ -28,8 +28,10 @@ def bucket_by_depth(
 ) -> tuple[DepthBucketSummary, ...]:
     """Bucket per-position values by depth, pooled across equal-length chunks.
 
-    Buckets are equal-width over the scored positions (the last bucket absorbs the
-    remainder when the count does not divide evenly). All chunks must carry the same
+    Buckets partition the scored positions into equal-width spans. When the position count
+    does not divide evenly by ``n_buckets``, individual bucket widths differ by one position
+    (edges come from an integer-truncated ``numpy.linspace``, so the remainder is spread
+    across buckets rather than absorbed by any single one). All chunks must carry the same
     number of positions; ``n_buckets`` is clamped to that count.
     """
     if not per_chunk_values:
