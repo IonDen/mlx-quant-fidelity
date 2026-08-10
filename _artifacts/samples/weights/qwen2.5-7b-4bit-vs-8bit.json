@@ -10,6 +10,7 @@
     "stride": 512,
     "tokenizer_id": "mlx-community/Qwen2.5-7B-Instruct-8bit"
   },
+  "device": "Apple M1 Max, 32 GB",
   "flip_rate": 0.1639334637964775,
   "kl": {
     "max": 6.358877182006836,
@@ -21,7 +22,7 @@
   "mlx_version": "0.31.2",
   "n_chunks": 100,
   "n_positions": 51100,
-  "peak_memory_bytes": 14403887369,
+  "peak_memory_bytes": 14558638048,
   "per_layer": false,
   "perplexity_delta": 0.9011362364514834,
   "perplexity_quant": 10.792949932845536,
@@ -31,11 +32,11 @@
   "quant_mode": "affine",
   "quant_model_bytes": 4284346255,
   "quant_model_id": "mlx-community/Qwen2.5-7B-Instruct-4bit",
-  "quant_revision": null,
+  "quant_revision": "c26a38f6a37d0a51b4e9a1eb3026530fa35d9fed",
   "reference_bits": 8,
   "reference_model_bytes": 8091987725,
   "reference_model_id": "mlx-community/Qwen2.5-7B-Instruct-8bit",
-  "reference_revision": null,
+  "reference_revision": "df11cb390bd674c24a9ddedf19f05bc09f6e0148",
   "verdict": "marginal",
   "warnings": [
     "Assumes both repos share a tokenizer; only vocab_size (and bos/eos ids) were checked \u2014 a divergent token map would be measured as quant drift.",

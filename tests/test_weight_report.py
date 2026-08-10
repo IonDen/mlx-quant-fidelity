@@ -3,7 +3,12 @@ import json
 
 from mlx_quant_fidelity.corpora.provenance import CorpusProvenance
 from mlx_quant_fidelity.metrics import ScalarSummary
-from mlx_quant_fidelity.report import WeightFidelityReport, render_json, render_weight_markdown
+from mlx_quant_fidelity.report import (
+    WeightFidelityReport,
+    render_json,
+    render_weight_markdown,
+    weight_report_from_dict,
+)
 
 
 def _report(*, reference_bits=None, warnings=("tok assumption",)) -> WeightFidelityReport:
@@ -65,3 +70,19 @@ def test_render_weight_markdown_handles_unknown_bits():
     md = render_weight_markdown(dataclasses.replace(_report(), quant_bits=None))
     assert "None-bit" not in md
     assert "unknown-bit" in md
+
+
+def test_weight_fidelity_report_defaults_device_none():
+    report = _report()
+    assert report.device is None
+
+
+def test_weight_markdown_includes_device_when_set():
+    report = dataclasses.replace(_report(), device="Apple M1 Max, 32 GB")
+    assert "Apple M1 Max, 32 GB" in render_weight_markdown(report)
+
+
+def test_weight_from_dict_accepts_missing_device():
+    d = dataclasses.asdict(_report())
+    del d["device"]
+    assert weight_report_from_dict(d).device is None

@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, cast
 
 import mlx.core as mx
 
-from mlx_quant_fidelity._memory_caps import install_memory_caps
+from mlx_quant_fidelity._memory_caps import device_string, install_memory_caps
 from mlx_quant_fidelity.errors import (
     CorpusError,
     ExactZeroError,  # noqa: F401 — re-exported for callers
@@ -312,4 +312,5 @@ def measure_weight_fidelity(
             agg.kl.mean, agg.kl.p99, agg.flip_rate, thresholds=_WEIGHT_TIERS_v0_2_0
         ),
         warnings=tuple(warnings),
+        device=device_string(),
     )

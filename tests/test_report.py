@@ -1,10 +1,11 @@
+import dataclasses
 import json
 
 import pytest
 
 from mlx_quant_fidelity.corpora.provenance import CorpusProvenance
 from mlx_quant_fidelity.errors import ReportSchemaError
-from mlx_quant_fidelity.metrics import ScalarSummary
+from mlx_quant_fidelity.metrics import DepthBucketSummary, ScalarSummary
 from mlx_quant_fidelity.report import (
     FidelityReport,
     fidelity_report_from_dict,
@@ -75,10 +76,61 @@ def test_weight_from_dict_missing_kl_raises_report_schema_error():
 
 
 def test_render_markdown_deployment_states_post_boundary():
-    import dataclasses
-
     from tests.test_cli import _fake_report
 
     rep = dataclasses.replace(_fake_report(), quantize_start=5, quantize_mode="deployment")
     md = render_markdown(rep)
     assert "post-boundary" in md or "excludes the first" in md  # the NEW exclusion statement
+
+
+def test_fidelity_report_defaults_device_none():
+    report = _report()
+    assert report.device is None
+
+
+def test_markdown_includes_device_when_set():
+    report = dataclasses.replace(_report(), device="Apple M1 Max, 32 GB")
+    assert "Apple M1 Max, 32 GB" in render_markdown(report)
+
+
+def test_from_dict_accepts_missing_device():
+    d = dataclasses.asdict(_report())
+    del d["device"]
+    assert fidelity_report_from_dict(d).device is None
+
+
+def test_markdown_renders_depth_table():
+    report = dataclasses.replace(
+        _report(),
+        kl_by_depth=(
+            DepthBucketSummary(0, 2, 0.01, 0.02, 4),
+            DepthBucketSummary(2, 4, 0.03, 0.05, 4),
+        ),
+    )
+    md = render_markdown(report)
+    assert "Drift by position depth" in md
+    assert "| 0-1 |" in md
+
+
+def test_from_dict_roundtrips_depth_buckets():
+    buckets = (
+        DepthBucketSummary(0, 2, 0.01, 0.02, 4),
+        DepthBucketSummary(2, 4, 0.03, 0.05, 4),
+    )
+    report = dataclasses.replace(_report(), kl_by_depth=buckets)
+    d = dataclasses.asdict(report)
+    rehydrated = fidelity_report_from_dict(d)
+    assert rehydrated.kl_by_depth == buckets
+
+
+def test_from_dict_accepts_missing_depth():
+    d = dataclasses.asdict(_report())
+    d.pop("kl_by_depth", None)
+    assert fidelity_report_from_dict(d).kl_by_depth is None
+
+
+def test_from_dict_rejects_non_list_depth():
+    d = dataclasses.asdict(_report())
+    d["kl_by_depth"] = "boom"
+    with pytest.raises(ReportSchemaError):
+        fidelity_report_from_dict(d)

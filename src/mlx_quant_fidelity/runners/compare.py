@@ -14,7 +14,12 @@ from mlx_quant_fidelity._memory_caps import install_memory_caps
 from mlx_quant_fidelity.costs import kv_bytes_per_token
 from mlx_quant_fidelity.errors import CompareConfigError, QuantizeStartError, ReportSchemaError
 from mlx_quant_fidelity.policy import VALID_VERDICTS, qualifies
-from mlx_quant_fidelity.probes.kv import _kv_head_dim, score_kv_config
+from mlx_quant_fidelity.probes.kv import (
+    MAX_CHUNK_LENGTH,
+    _kv_head_dim,
+    packed_width_mismatch,
+    score_kv_config,
+)
 from mlx_quant_fidelity.ranking import RankPoint, budget_pick, dominated_by, pareto_frontier
 from mlx_quant_fidelity.report import (
     ComparisonReport,
@@ -28,8 +33,11 @@ if TYPE_CHECKING:
 
 _asdict = _dc.asdict
 
-# Bump when the partial format or a cost formula changes so that old partials are rejected.
-_PARTIAL_SCHEMA_VERSION = 1
+# Bump the relevant constant when that mode's partial format or cost formula changes, so only
+# that mode's old partials are rejected. The two modes' partials are independent — a KV-only
+# change (e.g. adding chunk_length to the identity) must not force weight partials to recompute.
+_KV_PARTIAL_SCHEMA_VERSION = 2
+_WEIGHT_PARTIAL_SCHEMA_VERSION = 1
 
 
 def _budget_label(max_kld: float | None, min_tier: str | None) -> str | None:
@@ -186,6 +194,18 @@ def _run_weight_target(
 
 
 def _envelope_to_result(label: str, env: dict[str, object]) -> ComparisonTargetResult:
+    # env is unvalidated json.loads output at the caller; the annotation is a lie mypy
+    # believes but the runtime value may not honor — defend against a non-dict top level.
+    if not isinstance(env, dict):
+        return ComparisonTargetResult(  # type: ignore[unreachable]
+            label,
+            "failed",
+            None,
+            None,
+            None,
+            "CorruptPartial",
+            f"partial for {label!r} is not a JSON object",
+        )
     if env.get("status") == "failed":
         # fix 3: absent keys yield None, not the string "None"
         return ComparisonTargetResult(
@@ -263,6 +283,8 @@ def compare_weight_fidelity(
                 env = json.loads(partial.read_text())
             except (json.JSONDecodeError, OSError):
                 env = None
+            if not isinstance(env, dict):
+                env = None  # valid JSON but not an object — treat as absent, recompute
         # Full run-identity guard: recompute if the partial is absent, has a non-ok status,
         # or its stored run_identity doesn't match the current call's full identity.
         if env is not None:
@@ -271,7 +293,7 @@ def compare_weight_fidelity(
                 "quant": repo,
                 "reference": reference_model_id,
                 "max_chunks": max_chunks,
-                "schema_version": _PARTIAL_SCHEMA_VERSION,
+                "schema_version": _WEIGHT_PARTIAL_SCHEMA_VERSION,
             }
             if env.get("run_identity") != expected_identity:
                 env = None
@@ -307,15 +329,129 @@ def _kv_config_label(bits: int, group_size: int) -> str:
     return f"{bits}:{group_size}"
 
 
+_SWEEP_BITS: tuple[int, ...] = (2, 3, 4, 6, 8)
+_SWEEP_GROUP_SIZES: tuple[int, ...] = (32, 64, 128)
+
+
+def generate_sweep_configs(head_dim: int) -> tuple[list[tuple[int, int]], list[tuple[str, str]]]:
+    """Auto-generate the (bits, group_size) grid for ``compare kv --sweep``.
+
+    Group sizes are drawn from ``(32, 64, 128)``, filtered to those dividing ``head_dim``;
+    bits are ``(2, 3, 4, 6, 8)``. A combination where :func:`packed_width_mismatch` is True
+    (the upstream mlx-lm ``QuantizedKVCache`` pre-allocation bug — see ``probes/kv.py``) is
+    routed to ``skipped`` with a reason instead of the grid, so a sweep never emits a failed
+    row for a known-broken width.
+
+    Raises:
+        CompareConfigError: If no group size in ``(32, 64, 128)`` divides ``head_dim``.
+    """
+    group_sizes = [gs for gs in _SWEEP_GROUP_SIZES if head_dim % gs == 0]
+    if not group_sizes:
+        raise CompareConfigError(
+            f"head_dim={head_dim} is not divisible by any of {list(_SWEEP_GROUP_SIZES)}; "
+            "pass --configs explicitly with a group size that divides the model's KV head_dim."
+        )
+    grid: list[tuple[int, int]] = []
+    skipped: list[tuple[str, str]] = []
+    for bits in _SWEEP_BITS:
+        for gs in group_sizes:
+            label = _kv_config_label(bits, gs)
+            if packed_width_mismatch(head_dim, bits):
+                skipped.append(
+                    (
+                        label,
+                        f"bits={bits} at head_dim={head_dim} hits an upstream mlx-lm "
+                        "QuantizedKVCache packed-width bug (pre-allocation width disagrees "
+                        "with mx.quantize's packed width); excluded from the sweep.",
+                    )
+                )
+                continue
+            grid.append((bits, gs))
+    return grid, skipped
+
+
+def kv_geometry_from_config(
+    config: dict[str, object],
+) -> tuple[int | None, int | None, int | None]:
+    """Derive ``(n_layers, n_kv_heads, head_dim)`` from a raw HuggingFace ``config.json`` dict.
+
+    Honors ``text_config`` nesting (multimodal configs carry the language-model geometry
+    there). ``head_dim`` falls back to ``hidden_size // num_attention_heads`` when absent;
+    ``num_key_value_heads`` falls back to ``num_attention_heads`` (dense attention). A field
+    that can't be resolved to an int comes back ``None`` rather than raising — the caller
+    decides what's fatal.
+    """
+    nested = config.get("text_config")
+    cfg = nested if isinstance(nested, dict) else config
+
+    def _int_or_none(v: object) -> int | None:
+        return v if isinstance(v, int) else None
+
+    n_layers = _int_or_none(cfg.get("num_hidden_layers"))
+    n_heads = _int_or_none(cfg.get("num_attention_heads"))
+    n_kv_heads = _int_or_none(cfg.get("num_key_value_heads"))
+    if n_kv_heads is None:
+        n_kv_heads = n_heads
+    head_dim = _int_or_none(cfg.get("head_dim"))
+    if head_dim is None:
+        hidden_size = _int_or_none(cfg.get("hidden_size"))
+        if hidden_size is not None and n_heads:
+            head_dim = hidden_size // n_heads
+    return n_layers, n_kv_heads, head_dim
+
+
+def filter_configs_by_kv_budget(
+    configs: list[tuple[int, int]],
+    *,
+    n_layers: int,
+    n_kv_heads: int,
+    head_dim: int,
+    max_kv_bytes_per_token: int,
+) -> tuple[list[tuple[int, int]], list[tuple[str, str]]]:
+    """Partition ``configs`` into ``(kept, skipped)`` by a KV-byte-per-token budget.
+
+    Costed via :func:`~mlx_quant_fidelity.costs.kv_bytes_per_token` — the same denominator
+    ``compare kv`` ranks on.
+    """
+    kept: list[tuple[int, int]] = []
+    skipped: list[tuple[str, str]] = []
+    for bits, gs in configs:
+        cost = kv_bytes_per_token(
+            n_layers=n_layers, n_kv_heads=n_kv_heads, head_dim=head_dim, bits=bits, group_size=gs
+        )
+        label = _kv_config_label(bits, gs)
+        if cost > max_kv_bytes_per_token:
+            skipped.append(
+                (
+                    label,
+                    f"{cost} B/token exceeds the --max-kv-bytes-per-token budget of "
+                    f"{max_kv_bytes_per_token}",
+                )
+            )
+        else:
+            kept.append((bits, gs))
+    return kept, skipped
+
+
 def _validate_compare_kv_args(
-    configs: list[tuple[int, int]], *, quantize_start: int, max_chunks: int | None
+    configs: list[tuple[int, int]],
+    *,
+    quantize_start: int,
+    max_chunks: int | None,
+    chunk_length: int,
 ) -> None:
     """Validate KV-compare arguments. Raise CompareConfigError on bad input."""
     if len(configs) < 2:
         raise CompareConfigError("compare needs at least 2 KV configs; use the `kv` probe for one.")
-    if quantize_start != 0 and not (1 <= quantize_start <= 510):  # 512-token wikitext window
+    if not (2 <= chunk_length <= MAX_CHUNK_LENGTH):
+        raise CompareConfigError(
+            f"chunk_length={chunk_length} must be between 2 and MAX_CHUNK_LENGTH="
+            f"{MAX_CHUNK_LENGTH} (a hard safety ceiling on the per-chunk paired fp32 logits)."
+        )
+    if quantize_start != 0 and not (1 <= quantize_start <= chunk_length - 2):
         raise QuantizeStartError(
-            f"quantize_start={quantize_start} must be 0 (stress) or in [1, 510] (deployment)."
+            f"quantize_start={quantize_start} must be 0 (stress) or in "
+            f"[1, {chunk_length - 2}] (deployment)."
         )
     if max_chunks is not None and max_chunks < 1:
         raise CompareConfigError(f"max_chunks must be >= 1 (got {max_chunks}).")
@@ -343,7 +479,7 @@ def _load_model(model_id: str, revision: str | None) -> tuple[object, object]:  
 
 
 def _load_corpus_for_kv(
-    tokenizer: object, model_id: str, max_chunks: int | None
+    tokenizer: object, model_id: str, max_chunks: int | None, *, chunk_length: int
 ) -> object:  # pragma: no cover
     """Build the WikiText-2 corpus for a KV-compare run.
 
@@ -352,7 +488,12 @@ def _load_corpus_for_kv(
     """
     from mlx_quant_fidelity.corpora.wikitext import load_wikitext2
 
-    return load_wikitext2(tokenizer, max_chunks=max_chunks, tokenizer_id=model_id)  # type: ignore[arg-type]
+    return load_wikitext2(
+        tokenizer,  # type: ignore[arg-type]
+        chunk_length=chunk_length,
+        max_chunks=max_chunks,
+        tokenizer_id=model_id,
+    )
 
 
 def _kv_dims(model: object) -> tuple[int | None, int | None, int | None]:
@@ -369,6 +510,18 @@ def _kv_dims(model: object) -> tuple[int | None, int | None, int | None]:
 
 def _kv_envelope_to_result(label: str, env: dict[str, object]) -> ComparisonTargetResult:
     """Convert a stored KV partial envelope to a ComparisonTargetResult."""
+    # env is unvalidated json.loads output at the caller; the annotation is a lie mypy
+    # believes but the runtime value may not honor — defend against a non-dict top level.
+    if not isinstance(env, dict):
+        return ComparisonTargetResult(  # type: ignore[unreachable]
+            label,
+            "failed",
+            None,
+            None,
+            None,
+            "CorruptPartial",
+            f"partial for {label!r} is not a JSON object",
+        )
     if env.get("status") == "failed":
         return ComparisonTargetResult(
             label,
@@ -430,6 +583,8 @@ def compare_kv_fidelity(
     min_tier: str | None = None,
     artifacts_dir: Path | None = None,
     model_revision: str | None = None,
+    chunk_length: int = 512,
+    skipped_configs: list[tuple[str, str]] | None = None,
 ) -> ComparisonReport:
     """Rank N (bits, group_size) KV-cache configs on one model, quality-per-KV-byte-per-token.
 
@@ -443,25 +598,35 @@ def compare_kv_fidelity(
     Args:
         model_id: HuggingFace model ID.
         configs: List of (bits, group_size) tuples; must contain at least 2 distinct entries.
-        quantize_start: 0 = stress mode (default); ``1 ≤ N ≤ 510`` = deployment mode
-            (first N positions computed with a full-precision cache, then the stored prefix
+        quantize_start: 0 = stress mode (default); ``1 ≤ N ≤ chunk_length - 2`` = deployment
+            mode (first N positions computed with a full-precision cache, then the stored prefix
             converts too; metrics cover the post-boundary region).
         max_chunks: Score at most this many corpus chunks (>= 1 if provided).
         max_kld: Optional KLD budget for the recommended pick.
         min_tier: Optional minimum tier for the recommended pick.
         artifacts_dir: Directory for partial JSON files (default: _artifacts/compare/kv).
         model_revision: HuggingFace model revision.
+        chunk_length: Tokens per chunk for the auto-loaded corpus (default 512). Must be in
+            ``[2, MAX_CHUNK_LENGTH]``; see :func:`~mlx_quant_fidelity.probes.kv.measure_kv_fidelity`.
+        skipped_configs: ``(label, reason)`` pairs (e.g. from :func:`generate_sweep_configs` or
+            :func:`filter_configs_by_kv_budget`) that were excluded before scoring — from a
+            known-broken packed width or a KV-byte budget. Each becomes a ``"skipped"``
+            :class:`~mlx_quant_fidelity.report.ComparisonTargetResult`, excluded from the
+            frontier and listed under "Excluded (not ranked)" in the markdown render.
 
     Returns:
         A ComparisonReport with Pareto frontier, dominated map, and optional budget pick.
 
     Raises:
-        QuantizeStartError: If quantize_start is out of range (not 0 and not in [1, 510]).
-        CompareConfigError: If fewer than 2 configs, max_chunks < 1, or duplicate configs.
-            Subclasses ValueError for backward compatibility.
+        QuantizeStartError: If quantize_start is out of range (not 0 and not in
+            [1, chunk_length - 2]).
+        CompareConfigError: If fewer than 2 configs, max_chunks < 1, duplicate configs, or
+            chunk_length is out of range. Subclasses ValueError for backward compatibility.
     """
     # ── Validation guards (score_kv_config has none; must live here) ──────────
-    _validate_compare_kv_args(configs, quantize_start=quantize_start, max_chunks=max_chunks)
+    _validate_compare_kv_args(
+        configs, quantize_start=quantize_start, max_chunks=max_chunks, chunk_length=chunk_length
+    )
 
     out_dir = artifacts_dir or Path("_artifacts/compare/kv")
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -481,6 +646,8 @@ def compare_kv_fidelity(
             raw: dict[str, object] = json.loads(partial.read_text())
         except (json.JSONDecodeError, OSError):
             return None  # corrupt/truncated — treat as absent, recompute
+        if not isinstance(raw, dict):
+            return None  # type: ignore[unreachable]  # valid JSON but not an object — recompute
         if raw.get("status") != "ok":
             return None
         expected_identity: dict[str, object] = {
@@ -491,7 +658,8 @@ def compare_kv_fidelity(
             "group_size": gs,
             "quantize_start": quantize_start,
             "max_chunks": max_chunks,
-            "schema_version": _PARTIAL_SCHEMA_VERSION,
+            "chunk_length": chunk_length,
+            "schema_version": _KV_PARTIAL_SCHEMA_VERSION,
         }
         if raw.get("run_identity") != expected_identity:
             return None
@@ -507,7 +675,7 @@ def compare_kv_fidelity(
         install_memory_caps()
         model, tokenizer = _load_model(model_id, model_revision)
         n_layers, n_kv_heads, head_dim = _kv_dims(model)
-        corpus = _load_corpus_for_kv(tokenizer, model_id, max_chunks)
+        corpus = _load_corpus_for_kv(tokenizer, model_id, max_chunks, chunk_length=chunk_length)
         for bits, gs in pending:
             mx.reset_peak_memory()
             partial = out_dir / _kv_partial_filename(bits, gs)
@@ -541,7 +709,8 @@ def compare_kv_fidelity(
                     "group_size": gs,
                     "quantize_start": quantize_start,
                     "max_chunks": max_chunks,
-                    "schema_version": _PARTIAL_SCHEMA_VERSION,
+                    "chunk_length": chunk_length,
+                    "schema_version": _KV_PARTIAL_SCHEMA_VERSION,
                 }
                 envelope: dict[str, object] = {
                     "status": "ok",
@@ -581,6 +750,11 @@ def compare_kv_fidelity(
         if corpus_prov is None and result.report is not None:
             corpus_prov = result.report.corpus
         results.append(result)
+
+    for skip_label, skip_reason in skipped_configs or []:
+        results.append(
+            ComparisonTargetResult(skip_label, "skipped", None, None, skip_reason, None, None)
+        )
 
     return assemble_comparison_report(
         results,

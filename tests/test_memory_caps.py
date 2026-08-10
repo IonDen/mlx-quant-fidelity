@@ -1,4 +1,41 @@
 from mlx_quant_fidelity import _memory_caps
+from mlx_quant_fidelity._memory_caps import device_string
+
+
+def test_device_string_formats_name_and_memory(monkeypatch):
+    monkeypatch.setattr(
+        _memory_caps.mx,
+        "device_info",
+        lambda: {"device_name": "Apple M1 Max", "memory_size": 34359738368},
+    )
+    assert device_string() == "Apple M1 Max, 32 GB"
+
+
+def test_device_string_none_when_unreported(monkeypatch):
+    monkeypatch.setattr(_memory_caps.mx, "device_info", dict)
+    assert device_string() is None
+
+
+def test_device_string_none_when_device_info_raises(monkeypatch):
+    def _boom():
+        raise RuntimeError("no metal device")
+
+    monkeypatch.setattr(_memory_caps.mx, "device_info", _boom)
+    assert device_string() is None
+
+
+def test_device_string_name_only_when_memory_size_absent(monkeypatch):
+    monkeypatch.setattr(_memory_caps.mx, "device_info", lambda: {"device_name": "Apple M1 Max"})
+    assert device_string() == "Apple M1 Max"
+
+
+def test_device_string_name_only_when_memory_size_non_positive(monkeypatch):
+    monkeypatch.setattr(
+        _memory_caps.mx,
+        "device_info",
+        lambda: {"device_name": "Apple M1 Max", "memory_size": 0},
+    )
+    assert device_string() == "Apple M1 Max"
 
 
 def test_clamp_uses_desired_on_large_device():

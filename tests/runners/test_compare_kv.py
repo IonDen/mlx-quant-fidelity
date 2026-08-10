@@ -63,7 +63,9 @@ def _patch_kv_compare(
 
     monkeypatch.setattr(cmp, "score_kv_config", fake_score)
     monkeypatch.setattr(
-        cmp, "_load_corpus_for_kv", lambda tokenizer, model_id, max_chunks: object()
+        cmp,
+        "_load_corpus_for_kv",
+        lambda tokenizer, model_id, max_chunks, *, chunk_length: object(),
     )
     return calls
 
@@ -131,7 +133,9 @@ def test_compare_kv_requires_two_configs(tmp_path):
 def test_compare_kv_accepts_valid_deployment_start():
     from mlx_quant_fidelity.runners.compare import _validate_compare_kv_args
 
-    _validate_compare_kv_args([(4, 64), (8, 64)], quantize_start=5, max_chunks=None)  # no raise
+    _validate_compare_kv_args(
+        [(4, 64), (8, 64)], quantize_start=5, max_chunks=None, chunk_length=512
+    )  # no raise
 
 
 def test_compare_kv_rejects_out_of_range_start():
@@ -139,13 +143,17 @@ def test_compare_kv_rejects_out_of_range_start():
     from mlx_quant_fidelity.runners.compare import _validate_compare_kv_args
 
     with pytest.raises(QuantizeStartError):
-        _validate_compare_kv_args([(4, 64), (8, 64)], quantize_start=5000, max_chunks=None)
+        _validate_compare_kv_args(
+            [(4, 64), (8, 64)], quantize_start=5000, max_chunks=None, chunk_length=512
+        )
 
 
 def test_compare_kv_still_accepts_stress_zero():
     from mlx_quant_fidelity.runners.compare import _validate_compare_kv_args
 
-    _validate_compare_kv_args([(4, 64), (8, 64)], quantize_start=0, max_chunks=None)  # no raise
+    _validate_compare_kv_args(
+        [(4, 64), (8, 64)], quantize_start=0, max_chunks=None, chunk_length=512
+    )  # no raise
 
 
 def test_compare_kv_rejects_bad_max_chunks(monkeypatch, tmp_path):
@@ -236,7 +244,7 @@ def test_compare_kv_model_loaded_once(monkeypatch, tmp_path):
     # Fix 10: count corpus-build calls with a wrapper, assert exactly once
     corpus_calls: list[object] = []
 
-    def counting_load_corpus(tokenizer, model_id, max_chunks):  # type: ignore[return]
+    def counting_load_corpus(tokenizer, model_id, max_chunks, *, chunk_length):  # type: ignore[return]
         corpus_calls.append(model_id)
         return object()
 
@@ -270,7 +278,9 @@ def test_compare_kv_threads_revision_and_tokenizer(monkeypatch, tmp_path):
 
     corpus_tokenizer_received: list[object] = []
 
-    def fake_load_corpus(tokenizer: object, model_id: str, max_chunks: "int | None") -> object:
+    def fake_load_corpus(
+        tokenizer: object, model_id: str, max_chunks: "int | None", *, chunk_length: int
+    ) -> object:
         corpus_tokenizer_received.append(tokenizer)
         return object()
 
@@ -401,7 +411,7 @@ def test_compare_kv_corrupt_at_collect_yields_failed_result(monkeypatch, tmp_pat
     monkeypatch.setattr(cmp, "install_memory_caps", lambda: (0, 0))
     monkeypatch.setattr(cmp, "_load_model", lambda model_id, revision: (object(), object()))
     monkeypatch.setattr(cmp, "_kv_dims", lambda model: (16, 8, 64))
-    monkeypatch.setattr(cmp, "_load_corpus_for_kv", lambda tok, mid, mc: object())
+    monkeypatch.setattr(cmp, "_load_corpus_for_kv", lambda tok, mid, mc, *, chunk_length: object())
     # score_kv_config should NOT be called (pending=[]) — use a sentinel that would raise
     score_calls: list[object] = []
     monkeypatch.setattr(cmp, "score_kv_config", lambda *a, **kw: score_calls.append(None))
@@ -451,7 +461,7 @@ def test_compare_kv_all_resumed_skips_model_load(monkeypatch, tmp_path):
     monkeypatch.setattr(cmp, "install_memory_caps", lambda: (0, 0))
     monkeypatch.setattr(cmp, "_load_model", fail_if_loaded)
     monkeypatch.setattr(cmp, "_kv_dims", lambda model: (16, 8, 64))
-    monkeypatch.setattr(cmp, "_load_corpus_for_kv", lambda tok, mid, mc: object())
+    monkeypatch.setattr(cmp, "_load_corpus_for_kv", lambda tok, mid, mc, *, chunk_length: object())
     monkeypatch.setattr(cmp, "score_kv_config", assert_not_scored)
 
     report = cmp.compare_kv_fidelity("m", [(4, 64), (8, 64)], artifacts_dir=tmp_path)
@@ -539,7 +549,8 @@ def test_compare_kv_collect_loop_isolates_bad_cost_partial(monkeypatch, tmp_path
         "group_size": 64,
         "quantize_start": 0,
         "max_chunks": None,
-        "schema_version": compare_mod._PARTIAL_SCHEMA_VERSION,
+        "chunk_length": 512,
+        "schema_version": compare_mod._KV_PARTIAL_SCHEMA_VERSION,
     }
     (tmp_path / "4_64.json").write_text(
         json.dumps(
@@ -644,16 +655,17 @@ def _kv_partial_with_identity(
     group_size: int,
     quantize_start: int = 0,
     max_chunks: int | None = None,
+    chunk_length: int = 512,
     schema_version: int | None = None,
 ) -> str:
     """Build a KV partial JSON with a run_identity block.
 
-    schema_version defaults to _PARTIAL_SCHEMA_VERSION (the live constant).
+    schema_version defaults to _KV_PARTIAL_SCHEMA_VERSION (the live constant).
     Pass a different integer to simulate a version mismatch.
     """
     import mlx_quant_fidelity.runners.compare as compare_mod
 
-    sv = schema_version if schema_version is not None else compare_mod._PARTIAL_SCHEMA_VERSION
+    sv = schema_version if schema_version is not None else compare_mod._KV_PARTIAL_SCHEMA_VERSION
     identity = {
         "mode": "kv",
         "model_id": model_id,
@@ -662,6 +674,7 @@ def _kv_partial_with_identity(
         "group_size": group_size,
         "quantize_start": quantize_start,
         "max_chunks": max_chunks,
+        "chunk_length": chunk_length,
         "schema_version": sv,
     }
     return json.dumps(
@@ -734,7 +747,7 @@ def test_validate_compare_kv_args_rejects_single_config():
     from mlx_quant_fidelity.runners.compare import _validate_compare_kv_args
 
     with pytest.raises(CompareConfigError, match="at least 2 KV configs"):
-        _validate_compare_kv_args([(4, 64)], quantize_start=0, max_chunks=None)
+        _validate_compare_kv_args([(4, 64)], quantize_start=0, max_chunks=None, chunk_length=512)
 
 
 def test_kv_envelope_with_invalid_verdict_is_corrupt_partial():
@@ -778,7 +791,8 @@ def _kv_partial_env(bits: int, gs: int, *, kl_mean: float, cost: int) -> dict[st
             "group_size": gs,
             "quantize_start": 0,
             "max_chunks": None,
-            "schema_version": cmp._PARTIAL_SCHEMA_VERSION,
+            "chunk_length": 512,
+            "schema_version": cmp._KV_PARTIAL_SCHEMA_VERSION,
         },
     }
 
@@ -844,3 +858,189 @@ def test_compare_kv_stress_partial_recomputed_for_deployment(monkeypatch, tmp_pa
             "org/m", [(4, 64), (8, 64)], quantize_start=5, artifacts_dir=tmp_path
         )
     assert loaded["n"] == 1  # both stress partials rejected → recompute triggered → load fires once
+
+
+# ── Task 1 (0030): non-dict top-level partial isolation ───────────────────────
+
+
+def test_compare_kv_non_dict_toplevel_partial_is_recomputed(monkeypatch, tmp_path):
+    """A partial file whose top-level JSON is valid but not an object (e.g. `[]`) must be
+    treated as absent by `_read_partial` — the config becomes pending and is recomputed,
+    not a crash (previously `raw.get("status")` raised AttributeError on a list).
+    """
+    (tmp_path / "8_64.json").write_text("[]")
+    reports = {(4, 64): _fid((4, 64), 0.09), (8, 64): _fid((8, 64), 0.01)}
+    calls = _patch_kv_compare(monkeypatch, reports)
+    report = cmp.compare_kv_fidelity("m", [(4, 64), (8, 64)], artifacts_dir=tmp_path)
+    # (8, 64) must have been re-scored — the non-dict partial is not resumed
+    assert (8, 64) in calls
+    result_8 = next(r for r in report.results if r.label == "8:64")
+    assert result_8.status == "ok"
+
+
+def test_kv_envelope_non_dict_is_corrupt_partial():
+    """`_kv_envelope_to_result` on a non-dict envelope (collect-time guard) is a CorruptPartial,
+    not an AttributeError crash.
+    """
+    from mlx_quant_fidelity.runners.compare import _kv_envelope_to_result
+
+    result = _kv_envelope_to_result("4:64", [])  # type: ignore[arg-type]
+    assert (result.status, result.error_type) == ("failed", "CorruptPartial")
+
+
+# ── Task 6 (0033 part 3): chunk_length as a first-class knob ──────────────────
+
+
+def test_kv_partial_schema_version_is_2():
+    # Literal pin (mirrors the weight-side == 1 pin in test_compare_weight.py): a future
+    # unrelated edit that accidentally bumps or resets this constant goes red here, not just
+    # against whatever the constant happens to be at the time.
+    assert cmp._KV_PARTIAL_SCHEMA_VERSION == 2
+
+
+def test_kv_partial_identity_includes_chunk_length(monkeypatch, tmp_path):
+    """A freshly-scored KV partial's run_identity records chunk_length and the KV schema
+    version, so a later run at a different chunk_length is correctly seen as stale.
+    """
+    reports = {(4, 64): _fid((4, 64), 0.09), (8, 64): _fid((8, 64), 0.01)}
+    _patch_kv_compare(monkeypatch, reports)
+    cmp.compare_kv_fidelity("m", [(4, 64), (8, 64)], chunk_length=1024, artifacts_dir=tmp_path)
+    env = json.loads((tmp_path / "4_64.json").read_text())
+    assert env["run_identity"]["chunk_length"] == 1024
+    # Literal (not compared against the live constant -- see test_kv_partial_schema_version_is_2
+    # for that pin; this asserts the ACTUAL persisted value is the one Task 6 shipped).
+    assert env["run_identity"]["schema_version"] == 2
+
+
+def test_chunk_length_change_invalidates_partials(monkeypatch, tmp_path):
+    """A partial written at chunk_length=512 must NOT resume a chunk_length=1024 run."""
+    rep = _fid((4, 64), 0.09)
+    (tmp_path / "4_64.json").write_text(
+        _kv_partial_with_identity(rep, 1000, bits=4, group_size=64, chunk_length=512)
+    )
+    reports = {(4, 64): _fid((4, 64), 0.09), (8, 64): _fid((8, 64), 0.01)}
+    calls = _patch_kv_compare(monkeypatch, reports)
+
+    cmp.compare_kv_fidelity("m", [(4, 64), (8, 64)], chunk_length=1024, artifacts_dir=tmp_path)
+
+    assert (4, 64) in calls, "(4,64) must be re-scored; stale chunk_length=512 must not resume"
+
+
+def test_validate_compare_kv_args_rejects_chunk_length_above_ceiling():
+    from mlx_quant_fidelity.errors import CompareConfigError
+    from mlx_quant_fidelity.probes.kv import MAX_CHUNK_LENGTH
+    from mlx_quant_fidelity.runners.compare import _validate_compare_kv_args
+
+    with pytest.raises(CompareConfigError, match="MAX_CHUNK_LENGTH"):
+        _validate_compare_kv_args(
+            [(4, 64), (8, 64)],
+            quantize_start=0,
+            max_chunks=None,
+            chunk_length=MAX_CHUNK_LENGTH + 1,
+        )
+
+
+def test_validate_compare_kv_args_quantize_start_bound_follows_chunk_length():
+    from mlx_quant_fidelity.errors import QuantizeStartError
+    from mlx_quant_fidelity.runners.compare import _validate_compare_kv_args
+
+    # window=1024 -> valid boundary up to 1022; 1023 must raise
+    with pytest.raises(QuantizeStartError):
+        _validate_compare_kv_args(
+            [(4, 64), (8, 64)], quantize_start=1023, max_chunks=None, chunk_length=1024
+        )
+    _validate_compare_kv_args(  # 1022 is the last valid boundary — no raise
+        [(4, 64), (8, 64)], quantize_start=1022, max_chunks=None, chunk_length=1024
+    )
+
+
+# ── Task 8 (0035): compare kv --sweep + KV-byte budget filter ─────────────────
+
+
+def test_sweep_grid_from_head_dim_64():
+    # 5 widths x {32, 64} (128 does not divide 64) -> 10 configs, hand-listed;
+    # bits 6 has NO packed-width mismatch at head_dim 64, so nothing is skipped
+    grid, skipped = cmp.generate_sweep_configs(64)
+    assert grid == [
+        (2, 32),
+        (2, 64),
+        (3, 32),
+        (3, 64),
+        (4, 32),
+        (4, 64),
+        (6, 32),
+        (6, 64),
+        (8, 32),
+        (8, 64),
+    ]
+    assert skipped == []
+
+
+def test_sweep_grid_head_dim_128_skips_broken_bits6():
+    # packed_width_mismatch(128, 6) is True (the 0031 crash) -> bits-6 combos are
+    # skipped with the upstream reason, never emitted as failed rows
+    grid, skipped = cmp.generate_sweep_configs(128)
+    assert all(bits != 6 for bits, _ in grid)
+    assert {label for label, _ in skipped} == {"6:32", "6:64", "6:128"}
+    assert all("mlx-lm" in reason for _, reason in skipped)
+
+
+def test_sweep_grid_indivisible_head_dim_raises():
+    with pytest.raises(CompareConfigError, match="head_dim=48"):
+        cmp.generate_sweep_configs(48)
+
+
+def test_geometry_from_flat_and_nested_config():
+    flat = {
+        "num_hidden_layers": 16,
+        "num_attention_heads": 32,
+        "num_key_value_heads": 8,
+        "hidden_size": 2048,
+    }
+    assert cmp.kv_geometry_from_config(flat) == (16, 8, 64)
+    assert cmp.kv_geometry_from_config({"text_config": flat}) == (16, 8, 64)
+
+
+def test_geometry_missing_head_dim_and_hidden_size_is_all_none():
+    assert cmp.kv_geometry_from_config({}) == (None, None, None)
+
+
+def test_budget_filter_partitions_and_names_reason():
+    kept, skipped = cmp.filter_configs_by_kv_budget(
+        [(8, 64), (2, 64)],
+        n_layers=16,
+        n_kv_heads=8,
+        head_dim=64,
+        max_kv_bytes_per_token=6000,
+    )
+    # hand-derived via kv_bytes_per_token: elements = 2*16*8*64 = 16384;
+    # 8-bit: 16384*(1 + 4/64) = 17408 (over 6000); 2-bit: 16384*(0.25 + 4/64) = 5120 (under)
+    assert kept == [(2, 64)]
+    assert skipped[0][0] == "8:64"
+    assert "B/token" in skipped[0][1]
+
+
+def test_skipped_configs_appear_in_report_not_frontier(monkeypatch, tmp_path):
+    """skipped_configs entries become 'skipped' results, excluded from the frontier, and
+    listed under **Excluded (not ranked):** with the reason text in the markdown render.
+    """
+    from mlx_quant_fidelity.report import render_comparison_markdown
+
+    reports = {(4, 64): _fid((4, 64), 0.09), (8, 64): _fid((8, 64), 0.01)}
+    _patch_kv_compare(monkeypatch, reports)
+    report = cmp.compare_kv_fidelity(
+        "m",
+        [(4, 64), (8, 64)],
+        artifacts_dir=tmp_path,
+        skipped_configs=[
+            ("6:64", "17408 B/token exceeds the --max-kv-bytes-per-token budget of 1000")
+        ],
+    )
+    skipped_result = next(r for r in report.results if r.label == "6:64")
+    assert skipped_result.status == "skipped"
+    assert skipped_result.point is None
+    assert skipped_result.report is None
+    assert "6:64" not in report.frontier
+    md = render_comparison_markdown(report)
+    assert "**Excluded (not ranked):**" in md
+    assert "`6:64` — 17408 B/token exceeds the --max-kv-bytes-per-token budget of 1000" in md

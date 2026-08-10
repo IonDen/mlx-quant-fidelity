@@ -3,23 +3,124 @@
 from __future__ import annotations
 
 import importlib.metadata
+from contextlib import contextmanager
 from typing import TYPE_CHECKING
 
 import mlx.core as mx
+import numpy as np
 from mlx_lm.models.cache import QuantizedKVCache, make_prompt_cache
 
-from mlx_quant_fidelity._memory_caps import install_memory_caps
+from mlx_quant_fidelity._memory_caps import (
+    compute_safe_caps_gb,
+    device_string,
+    install_memory_caps,
+)
 from mlx_quant_fidelity.errors import (
     CacheNotQuantizableError,
     CorpusError,
     QuantizeStartError,
 )
+from mlx_quant_fidelity.metrics import bucket_by_depth
 from mlx_quant_fidelity.policy import verdict_for
 from mlx_quant_fidelity.probes._paired import _aggregate_chunks, _check_exact_zero, _reduce_pair
 from mlx_quant_fidelity.report import FidelityReport
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
+
     from mlx_quant_fidelity.corpora.provenance import Corpus
+
+
+# Hard ceiling on chunk_length (kernel-panic safety surface — paired fp32 logits scale with
+# window x vocab, see the memory gate in score_kv_config). Validated 2026-08-09 by the
+# long-window memory spike (docs/measurement-principles.md, scripts/spike_long_window_memory.py):
+# measured peak at chunk_length=4096 on Llama-3.2-1B-4bit (vocab ~128k) was ~13.5 GiB, under the
+# device wired cap. The ceiling is therefore only validated AT THAT VOCABULARY — peak memory
+# scales linearly with vocab, so a 262k-vocab model at 4096 would need roughly twice that. Larger
+# vocabularies are gated dynamically against the installed wired cap (_preflight_logits_budget),
+# not by this constant.
+MAX_CHUNK_LENGTH = 4096
+
+# Fraction of the installed wired cap the per-chunk paired-logits estimate may occupy before the
+# probe refuses to run. Leaves room for model weights, the KV cache, and the allocator's retained
+# pool — the estimate covers only the transient logits/log-softmax working set.
+LOGITS_BUDGET_FRACTION = 0.7
+
+# Bytes-per-window multiplier, calibrated against the 2026-08-09 measured long-window spike
+# (docs/measurement-principles.md): the measured peak slope between the 2048 and 4096
+# chunk_length lanes on Llama-3.2-1B-4bit is ~6.6 [positions, vocab] fp32-array-equivalents
+# per window (raw logits + log-softmax temporaries under the lazy graph), rounded up to 7 so
+# the estimate keeps erring high. The slope excludes the model-weight/KV-cache memory
+# intercept, so small models fire the warning slightly early -- the right direction for a
+# safety warning.
+_LOGITS_ARRAYS_PER_WINDOW = 7
+
+# Estimate above which the report carries a memory warning (the band below the hard gate).
+_LOGITS_WARN_BYTES = 4 * 1024**3
+
+
+def _paired_logits_bytes(window: int, vocab: int) -> int:
+    """Estimated transient bytes held by the paired fp32 logits for one chunk."""
+    return _LOGITS_ARRAYS_PER_WINDOW * (window - 1) * int(vocab) * 4
+
+
+def _preflight_logits_budget(window: int | None, vocab: int | None) -> str | None:
+    """Refuse windows whose paired-logits estimate exceeds the installed wired cap.
+
+    Returns a warning string (or None) for the band below the gate; raises ``CorpusError``
+    above it. The gate runs BEFORE any cache construction or forward pass — a warning
+    emitted in the report arrives after the allocation it was meant to prevent, which is
+    exactly the pageable-allocation paging-storm path the ceiling exists to avoid.
+
+    Skipped (warning path only) when the device reports no working-set size, since there is
+    no cap to measure against.
+    """
+    if not vocab or not window:
+        return (
+            f"per-chunk paired fp32 logits budget is UNCHECKED (vocab_size={vocab!r}, "
+            f"chunk_length={window!r}): one of them is not derivable, so the estimate could "
+            "not be gated against the installed wired cap. Prefer a smaller --chunk-length "
+            "on an unfamiliar architecture."
+        )
+    est = _paired_logits_bytes(window, vocab)
+    wired_gb, _ = compute_safe_caps_gb()
+    if wired_gb:
+        gate = int(LOGITS_BUDGET_FRACTION * wired_gb * 1024**3)
+        if est > gate:
+            raise CorpusError(
+                f"chunk_length={window} at vocab_size={int(vocab)}: paired fp32 logits peak ≈ "
+                f"{est / 1024**3:.1f} GiB per chunk, above the {gate / 1024**3:.1f} GiB "
+                f"pre-flight budget ({LOGITS_BUDGET_FRACTION:.0%} of the {wired_gb} GiB "
+                "installed wired cap). Lower --chunk-length (halving it roughly halves the "
+                "estimate); see docs/measurement-principles.md."
+            )
+    if est > _LOGITS_WARN_BYTES:
+        return (
+            f"chunk_length={window}: paired fp32 logits peak ≈ {est / 1024**3:.1f} GiB per "
+            "chunk; see docs/measurement-principles.md (Drift by position depth) for "
+            "measured ceilings."
+        )
+    return None
+
+
+@contextmanager
+def _packed_width_belt(kv_bits: int) -> Iterator[None]:
+    """Re-raise mlx-lm's packed-width broadcast_shapes crash as a package-rooted error.
+
+    Belt to the pre-flight ``packed_width_mismatch`` gate, for architectures whose head_dim
+    is not derivable. Wraps BOTH scoring branches — deployment mode appends to a quantized
+    cache at the boundary just as stress mode does, so an unwrapped ValueError there would
+    reach the CLI as a raw traceback. Unrelated ValueErrors propagate untouched.
+    """
+    try:
+        yield
+    except ValueError as exc:
+        if "broadcast_shapes" in str(exc):
+            raise CacheNotQuantizableError(
+                f"kv_bits={kv_bits} crashed appending to a fresh QuantizedKVCache "
+                f"(mlx-lm packed-width truncation bug): {exc}"
+            ) from exc
+        raise
 
 
 def _kv_head_dim(model: object) -> int | None:
@@ -58,6 +159,17 @@ def _head_dim_gate(*, head_dim: int | None, kv_group_size: int, model_type: str)
             f"choose a group size that divides {head_dim} (e.g. 32 or 64)."
         )
     return None
+
+
+def packed_width_mismatch(head_dim: int, bits: int) -> bool:
+    """True when mlx-lm's QuantizedKVCache pre-allocation disagrees with mx.quantize.
+
+    The cache pre-allocates packed buffers of width ``head_dim // (32 // bits)``
+    (el_per_int truncation, mlx-lm models/cache.py) while ``mx.quantize`` packs to
+    ``head_dim * bits // 32``; a first append with mismatched widths dies in
+    broadcast_shapes. Affects bits=6 at e.g. head_dim=128 on mlx-lm 0.31.x.
+    """
+    return head_dim // (32 // bits) != head_dim * bits // 32
 
 
 def _cache_is_quantizable(cache: list[object], *, group_size: int, bits: int) -> bool:
@@ -170,11 +282,33 @@ def score_kv_config(
     """
     probe_warnings: list[str] = []
     model_type = str(getattr(getattr(model, "args", None), "model_type", "unknown"))
+    head_dim = _kv_head_dim(model)
     head_dim_warning = _head_dim_gate(
-        head_dim=_kv_head_dim(model), kv_group_size=kv_group_size, model_type=model_type
+        head_dim=head_dim, kv_group_size=kv_group_size, model_type=model_type
     )
     if head_dim_warning is not None:
         probe_warnings.append(head_dim_warning)
+    # Pre-flight the per-chunk logits budget BEFORE any cache construction or forward pass.
+    budget_warning = _preflight_logits_budget(
+        getattr(corpus.provenance, "chunk_length", None),
+        getattr(getattr(model, "args", None), "vocab_size", None),
+    )
+    if budget_warning is not None:
+        probe_warnings.append(budget_warning)
+    if kv_bits not in (2, 3, 4, 6, 8):
+        raise CacheNotQuantizableError(f"unsupported kv_bits={kv_bits}; MLX supports 2/3/4/6/8.")
+    if head_dim is not None and packed_width_mismatch(head_dim, kv_bits):
+        usable = [b for b in (2, 3, 4, 6, 8) if not packed_width_mismatch(head_dim, b)]
+        remedy = (
+            f"use bits {'/'.join(str(b) for b in usable)} or a group-compatible head_dim."
+            if usable
+            else "no supported bit width packs cleanly at this head_dim."
+        )
+        raise CacheNotQuantizableError(
+            f"kv_bits={kv_bits} cannot append to a fresh QuantizedKVCache at "
+            f"head_dim={head_dim} on this mlx-lm version (packed-width truncation bug); "
+            f"{remedy}"
+        )
 
     probe_cache = make_prompt_cache(model)
     n_layers = len(probe_cache)
@@ -192,24 +326,26 @@ def score_kv_config(
         if quantize_start > 0 and int(ids.size) < quantize_start + 2:
             continue  # too short to have a post-boundary position; skip
         ref_cache = make_prompt_cache(model)
-        if quantize_start == 0:
-            quant_cache: list[object] = [
-                QuantizedKVCache(group_size=kv_group_size, bits=kv_bits) for _ in range(n_layers)
-            ]
-            kl, flip, ref_nll, quant_nll = _score_chunk(model, ids, ref_cache, quant_cache)
-        else:
-            quant_cache = make_prompt_cache(model)
-            kl, flip, ref_nll, quant_nll = _score_chunk_deployment(
-                model,
-                ids,
-                ref_cache,
-                quant_cache,
-                quantize_start=quantize_start,
-                group_size=kv_group_size,
-                bits=kv_bits,
-            )
-            kl, flip = kl[quantize_start:], flip[quantize_start:]
-            ref_nll, quant_nll = ref_nll[quantize_start:], quant_nll[quantize_start:]
+        with _packed_width_belt(kv_bits):
+            if quantize_start == 0:
+                quant_cache: list[object] = [
+                    QuantizedKVCache(group_size=kv_group_size, bits=kv_bits)
+                    for _ in range(n_layers)
+                ]
+                kl, flip, ref_nll, quant_nll = _score_chunk(model, ids, ref_cache, quant_cache)
+            else:
+                quant_cache = make_prompt_cache(model)
+                kl, flip, ref_nll, quant_nll = _score_chunk_deployment(
+                    model,
+                    ids,
+                    ref_cache,
+                    quant_cache,
+                    quantize_start=quantize_start,
+                    group_size=kv_group_size,
+                    bits=kv_bits,
+                )
+                kl, flip = kl[quantize_start:], flip[quantize_start:]
+                ref_nll, quant_nll = ref_nll[quantize_start:], quant_nll[quantize_start:]
         mx.eval(kl, flip, ref_nll, quant_nll)
         kls.append(kl)
         flips.append(flip)
@@ -234,6 +370,18 @@ def score_kv_config(
             "shorter than the keep-first-N boundary, or the quantized cache was bypassed)"
         ),
     )
+
+    kl_by_depth = None
+    if mode == "stress" and kls:
+        arrays = [np.asarray(k, dtype=np.float64) for k in kls]
+        if len({a.shape[0] for a in arrays}) == 1:  # uniform windows only
+            kl_by_depth = bucket_by_depth(arrays)
+        else:
+            probe_warnings.append(
+                "depth table omitted: scored chunks have unequal lengths "
+                "(drift-by-depth requires a fixed-window corpus)."
+            )
+
     return FidelityReport(
         model_id=model_id,
         model_revision=model_revision,
@@ -255,6 +403,8 @@ def score_kv_config(
         cache_supported=True,
         verdict=verdict_for(agg.kl.mean, agg.kl.p99, agg.flip_rate),
         warnings=tuple(probe_warnings),
+        device=device_string(),
+        kl_by_depth=kl_by_depth,
     )
 
 
@@ -267,6 +417,7 @@ def measure_kv_fidelity(
     corpus: Corpus | None = None,
     max_chunks: int | None = None,
     model_revision: str | None = None,
+    chunk_length: int = 512,
 ) -> FidelityReport:
     """Measure how much KV-cache quantization costs, via teacher-forced paired scoring.
 
@@ -278,10 +429,18 @@ def measure_kv_fidelity(
             mode (first N positions computed with a full-precision cache, then the stored prefix
             converts too; metrics cover the post-boundary region).
         corpus: Pre-built corpus to score. If None, WikiText-2 test split is fetched (requires
-            network access and the ``--run-network`` marker in tests).
+            network access and the ``--run-network`` marker in tests). ``chunk_length`` must be
+            left at its default when a corpus is supplied — the corpus already fixes its window.
+            ``corpus.provenance.chunk_length`` is still checked against ``MAX_CHUNK_LENGTH``
+            (the safety ceiling applies to every window, not only the auto-loaded one).
         max_chunks: Score at most this many corpus chunks (applies to both the auto-loaded and
             a caller-provided corpus).
         model_revision: HuggingFace model revision (commit SHA or tag).
+        chunk_length: Tokens per chunk for the auto-loaded corpus (default 512). Must be in
+            ``[2, MAX_CHUNK_LENGTH]`` — the upper bound is a hard safety ceiling, not a mere
+            recommendation. ``MAX_CHUNK_LENGTH`` alone is vocabulary-blind, so a second,
+            vocabulary-aware pre-flight also refuses any window whose paired fp32 logits
+            would exceed a fraction of the installed wired cap.
 
     Returns:
         A :class:`~mlx_quant_fidelity.report.FidelityReport` with all metrics and provenance.
@@ -290,11 +449,35 @@ def measure_kv_fidelity(
         QuantizeStartError: If quantize_start is out of range for the corpus window.
         CacheNotQuantizableError: If the model's KV cache does not support quantization.
         ExactZeroError: If KLD and flip rate are exactly 0 (quantization did not engage).
+        CorpusError: If chunk_length is out of range, or is set together with a caller-provided
+            corpus, or a caller-provided corpus's own chunk_length exceeds MAX_CHUNK_LENGTH, or
+            the corpus/max_chunks combination yields no chunks, or the window x vocabulary
+            paired-logits estimate exceeds the installed wired-memory budget.
     """
     from mlx_lm import load
 
+    if corpus is not None and chunk_length != 512:
+        raise CorpusError(
+            "chunk_length applies to the auto-loaded corpus; the provided corpus already "
+            "fixes its own window (pass corpus without chunk_length, or omit corpus and let "
+            "chunk_length build one)."
+        )
+    if not (2 <= chunk_length <= MAX_CHUNK_LENGTH):
+        raise CorpusError(
+            f"chunk_length={chunk_length} must be between 2 and MAX_CHUNK_LENGTH="
+            f"{MAX_CHUNK_LENGTH} (a hard safety ceiling — larger windows hold larger paired "
+            "fp32 logits per chunk and risk a kernel panic — raising it requires re-validating "
+            "peak memory; see docs/measurement-principles.md)."
+        )
+    if corpus is not None and corpus.provenance.chunk_length > MAX_CHUNK_LENGTH:
+        raise CorpusError(
+            f"corpus.provenance.chunk_length={corpus.provenance.chunk_length} exceeds "
+            f"MAX_CHUNK_LENGTH={MAX_CHUNK_LENGTH} (a hard safety ceiling — larger windows hold "
+            "larger paired fp32 logits per chunk and risk a kernel panic — raising it requires "
+            "re-validating peak memory; see docs/measurement-principles.md)."
+        )
     if quantize_start != 0:
-        window = corpus.provenance.chunk_length if corpus is not None else 512  # wikitext default
+        window = corpus.provenance.chunk_length if corpus is not None else chunk_length
         if not (1 <= quantize_start <= window - 2):
             raise QuantizeStartError(
                 f"quantize_start={quantize_start} must be in [1, {window - 2}] "
@@ -312,7 +495,9 @@ def measure_kv_fidelity(
     if corpus is None:  # pragma: no cover
         from mlx_quant_fidelity.corpora.wikitext import load_wikitext2
 
-        corpus = load_wikitext2(tokenizer, max_chunks=max_chunks, tokenizer_id=model_id)
+        corpus = load_wikitext2(
+            tokenizer, chunk_length=chunk_length, max_chunks=max_chunks, tokenizer_id=model_id
+        )
         if len(corpus.chunks) == 0:
             raise CorpusError("the evaluation corpus yielded no chunks; at least one is required.")
 

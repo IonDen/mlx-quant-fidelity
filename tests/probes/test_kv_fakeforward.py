@@ -13,6 +13,7 @@ from mlx_quant_fidelity.errors import (
 )
 from mlx_quant_fidelity.probes import kv as kvmod
 from mlx_quant_fidelity.probes.kv import (
+    MAX_CHUNK_LENGTH,
     _aggregate_chunks,
     _cache_is_quantizable,
     _check_exact_zero,
@@ -20,6 +21,7 @@ from mlx_quant_fidelity.probes.kv import (
     _kv_head_dim,
     _score_chunk,
     measure_kv_fidelity,
+    packed_width_mismatch,
     score_kv_config,
 )
 
@@ -308,15 +310,16 @@ class _FakeDivergentModel:
     head_dim=64, kv_group_size default 64: 64 % 64 == 0 so no head_dim warning fires.
     """
 
-    def __init__(self):
+    def __init__(self, head_dim=64):
         self.args = type(
             "A",
             (),
             {
                 "model_type": "llama",
-                "head_dim": 64,
+                "head_dim": head_dim,
                 "hidden_size": None,
                 "num_attention_heads": None,
+                "vocab_size": 3,
             },
         )()
 
@@ -419,6 +422,7 @@ def test_score_kv_config_emits_warning_when_head_dim_unknown(monkeypatch):
                 "head_dim": None,
                 "hidden_size": None,
                 "num_attention_heads": None,
+                "vocab_size": 3,
             },
         )()
 
@@ -550,3 +554,323 @@ def test_measure_kv_deployment_boundary_validated_before_load(monkeypatch):
         measure_kv_fidelity("any-model", quantize_start=511)  # == window-1 → zero quantized
     with pytest.raises(QuantizeStartError):
         measure_kv_fidelity("any-model", quantize_start=-1)
+
+
+# ---------------------------------------------------------------------------
+# 0031 — bits=6 packed-width mismatch gate (mlx-lm QuantizedKVCache append crash)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("head_dim", "bits", "expected"),
+    [
+        (128, 6, True),  # 128 // 5 = 25  vs  128 * 6 // 32 = 24 — the 0031 crash
+        (96, 6, True),  # 96 // 5 = 19   vs  96 * 6 // 32 = 18
+        (64, 6, False),  # 12 == 12
+        (128, 3, False),  # 128 // 10 = 12 vs  128 * 3 // 32 = 12
+        (128, 2, False),
+        (128, 4, False),
+        (128, 8, False),
+    ],
+)
+def test_packed_width_mismatch(head_dim, bits, expected):
+    assert packed_width_mismatch(head_dim, bits) is expected
+
+
+def test_bits6_head_dim_128_rejected_package_rooted():
+    # head_dim=128 % kv_group_size=32 == 0 (no head_dim warning); the packed-width gate fires
+    # before make_prompt_cache / any forward, so a bare args stub is enough.
+    model = _FakeDivergentModel(head_dim=128)
+    with pytest.raises(CacheNotQuantizableError, match="mlx-lm"):
+        score_kv_config(model, _kv_corpus(1), model_id="fake", kv_bits=6, kv_group_size=32)
+
+
+def test_bits6_head_dim_64_still_measures(monkeypatch):
+    # head_dim=64 agrees at bits=6 (12 == 12) so the gate does not fire — scoring proceeds.
+    _patch_kv_caches_divergent(monkeypatch)
+    report = score_kv_config(
+        _FakeDivergentModel(head_dim=64),
+        _kv_corpus(2),
+        model_id="fake",
+        kv_bits=6,
+        kv_group_size=32,
+    )
+    assert report.kv_bits == 6
+
+
+def test_bits5_head_dim_128_reports_unsupported_bits_not_packing_bug():
+    # Regression: the packed-width gate must not shadow the unsupported-bits check.
+    # packed_width_mismatch(128, 5) is True (128 // 6 = 21 != 128 * 5 // 32 = 20), but the
+    # message users see must be the "unsupported kv_bits" one, not the mlx-lm packing message.
+    model = _FakeDivergentModel(head_dim=128)
+    with pytest.raises(CacheNotQuantizableError, match="unsupported kv_bits=5"):
+        score_kv_config(model, _kv_corpus(1), model_id="fake", kv_bits=5, kv_group_size=32)
+
+
+def test_bits0_head_dim_128_raises_clean_error_not_zerodivision():
+    # Regression: packed_width_mismatch's `32 // bits` must never run on an unvalidated bits=0.
+    model = _FakeDivergentModel(head_dim=128)
+    with pytest.raises(CacheNotQuantizableError, match="unsupported kv_bits=0"):
+        score_kv_config(model, _kv_corpus(1), model_id="fake", kv_bits=0, kv_group_size=32)
+
+
+class _FakeBroadcastCrashModel:
+    """head_dim=64 (agrees at any gated bits) so the early gate does NOT fire; the forward call
+    against a quantized cache raises the raw mlx-lm broadcast_shapes ValueError instead, so this
+    exercises the belt catch inside the stress-mode chunk loop.
+    """
+
+    def __init__(self):
+        self.args = type(
+            "A",
+            (),
+            {
+                "model_type": "llama",
+                "head_dim": 64,
+                "hidden_size": None,
+                "num_attention_heads": None,
+                "vocab_size": 3,
+            },
+        )()
+
+    def __call__(self, inp, cache=None):
+        if cache is not None and getattr(cache[0], "bits", None) is not None:
+            raise ValueError("[broadcast_shapes] Shapes (1,4,25) and (1,4,24) cannot be broadcast.")
+        return mx.zeros((1, inp.shape[1], 3))
+
+
+def test_score_kv_config_wraps_broadcast_shapes_crash(monkeypatch):
+    _patch_kv_caches_divergent(monkeypatch)
+    with pytest.raises(CacheNotQuantizableError, match="broadcast_shapes"):
+        score_kv_config(_FakeBroadcastCrashModel(), _kv_corpus(1), model_id="fake")
+
+
+class _FakeUnrelatedValueErrorModel(_FakeBroadcastCrashModel):
+    """Same shape as _FakeBroadcastCrashModel but the quant-pass ValueError is unrelated to the
+    packed-width bug — the belt catch must not swallow it into a misleading CacheNotQuantizableError.
+    """
+
+    def __call__(self, inp, cache=None):
+        if cache is not None and getattr(cache[0], "bits", None) is not None:
+            raise ValueError("some unrelated numerical error")
+        return mx.zeros((1, inp.shape[1], 3))
+
+
+def test_score_kv_config_reraises_unrelated_value_error(monkeypatch):
+    _patch_kv_caches_divergent(monkeypatch)
+    with pytest.raises(ValueError, match="unrelated numerical error"):
+        score_kv_config(_FakeUnrelatedValueErrorModel(), _kv_corpus(1), model_id="fake")
+
+
+def test_score_kv_config_deployment_wraps_broadcast_shapes_crash(monkeypatch):
+    """The packed-width belt catch covers deployment mode too, not only the stress branch.
+
+    ``_score_chunk_deployment`` quantizes the stored cache at the boundary and appends to it
+    for segment 2, so it hits the same mlx-lm packed-width crash — without the shared wrap a
+    raw ValueError escapes to the CLI as an unhandled traceback.
+    """
+    _patch_kv_caches_deployment(monkeypatch)
+    with pytest.raises(CacheNotQuantizableError, match="broadcast_shapes"):
+        score_kv_config(
+            _FakeBroadcastCrashModel(), _kv_corpus(1, 6), model_id="fake", quantize_start=2
+        )
+
+
+def test_score_kv_config_deployment_reraises_unrelated_value_error(monkeypatch):
+    """The deployment-side belt must not swallow an unrelated ValueError either."""
+    _patch_kv_caches_deployment(monkeypatch)
+    with pytest.raises(ValueError, match="unrelated numerical error"):
+        score_kv_config(
+            _FakeUnrelatedValueErrorModel(), _kv_corpus(1, 6), model_id="fake", quantize_start=2
+        )
+
+
+def test_packed_width_message_offers_only_workable_bits():
+    """The remedy list is computed, not a fixed '2/3/4/8' string that can itself be wrong.
+
+    At head_dim=80 both bits=3 (8 vs 7) and bits=6 (16 vs 15) mismatch, so a message naming
+    bits 3 sends the user straight into a second crash.
+    """
+    model = _FakeDivergentModel(head_dim=80)
+    with pytest.raises(CacheNotQuantizableError) as excinfo:
+        score_kv_config(model, _kv_corpus(1), model_id="fake", kv_bits=6, kv_group_size=16)
+    msg = str(excinfo.value)
+    assert "use bits 2/4/8" in msg
+    assert "2/3/4/8" not in msg
+
+
+# ---------------------------------------------------------------------------
+# Task 5 — score_kv_config populates kl_by_depth in stress mode only
+# ---------------------------------------------------------------------------
+
+
+def test_stress_report_carries_depth_buckets(monkeypatch):
+    # _kv_corpus(2) -> 2 chunks of chunk_len=4 -> 3 scored (teacher-forced) positions each.
+    _patch_kv_caches_divergent(monkeypatch)
+    report = score_kv_config(_FakeDivergentModel(), _kv_corpus(2), model_id="fake")
+    assert report.kl_by_depth is not None
+    assert sum(b.n_positions for b in report.kl_by_depth) == report.n_positions
+    assert report.kl_by_depth[0].start == 0
+    assert report.kl_by_depth[-1].end == 3  # scored positions per chunk (chunk_len-1)
+
+
+def test_deployment_report_has_no_depth_buckets(monkeypatch):
+    # Same shape as the deployment tests above (quantize_start > 0): kl_by_depth is stress-only.
+    _patch_kv_caches_deployment(monkeypatch)
+    report = score_kv_config(
+        _FakeDivergentModel(), _kv_corpus(1, 6), model_id="fake", quantize_start=2
+    )
+    assert report.quantize_mode == "deployment"
+    assert report.kl_by_depth is None
+
+
+def test_unequal_chunks_warn_when_depth_suppressed(monkeypatch):
+    # A corpus with a shorter final chunk (drop_final_partial=False is a supported Corpus
+    # shape) -> per-chunk scored-position counts differ -> depth bucketing is skipped, and the
+    # omission is reported as a warning, never silent.
+    _patch_kv_caches_divergent(monkeypatch)
+    chunks = (mx.arange(4), mx.arange(3))
+    prov = CorpusProvenance("x", "test", "org/m", 4, 4, "none", "keep", "raw", 7)
+    corpus = Corpus(chunks=chunks, provenance=prov)
+    report = score_kv_config(_FakeDivergentModel(), corpus, model_id="org/m")
+    assert report.kl_by_depth is None
+    assert any("depth table omitted" in w for w in report.warnings)
+
+
+# ---------------------------------------------------------------------------
+# Task 6 (0033 part 3) — chunk_length as a first-class knob + memory warning
+# ---------------------------------------------------------------------------
+
+
+def test_chunk_length_rejected_with_provided_corpus():
+    corpus = Corpus(
+        chunks=(mx.arange(4),),
+        provenance=CorpusProvenance("x", "test", "t", 4, 4, "none", "drop", "raw", 4),
+    )
+    with pytest.raises(CorpusError, match="provided corpus"):
+        measure_kv_fidelity("fake", corpus=corpus, chunk_length=1024)
+
+
+def test_chunk_length_below_two_rejected():
+    with pytest.raises(CorpusError, match="chunk_length"):
+        measure_kv_fidelity("fake", chunk_length=1)
+
+
+def test_chunk_length_above_ceiling_rejected():
+    # the ceiling is a hard refusal (kernel-panic surface), not a warning
+    with pytest.raises(CorpusError, match=r"MAX_CHUNK_LENGTH|maximum"):
+        measure_kv_fidelity("fake", chunk_length=MAX_CHUNK_LENGTH + 1)
+
+
+def test_corpus_chunk_length_above_ceiling_rejected():
+    # A caller-provided corpus bypasses the chunk_length knob entirely (load_wikitext2 is
+    # public with an unbounded chunk_length), so the ceiling must ALSO be enforced against
+    # corpus.provenance.chunk_length directly -- a "warning, not refusal" hole otherwise.
+    # chunk_length stays at its default (512) so this isolates the corpus-path check from the
+    # separate "chunk_length set together with a corpus" mismatch check.
+    corpus = Corpus(
+        chunks=(mx.arange(4),),
+        provenance=CorpusProvenance("x", "test", "t", 8192, 8192, "none", "drop", "raw", 4),
+    )
+    with pytest.raises(CorpusError, match="MAX_CHUNK_LENGTH"):
+        measure_kv_fidelity("fake", corpus=corpus)
+    # No mocked install_memory_caps/load: reaching either would hang/error on a real network
+    # call, so pytest.raises firing fast is itself evidence no scoring was attempted.
+
+
+def test_quantize_start_bound_follows_chunk_length():
+    # chunk_length=8 -> valid boundary up to 6; quantize_start=7 must raise. A regression that
+    # silently fell back to the old hardcoded window=512 would compute bound=510 and WRONGLY
+    # accept quantize_start=7, so this specific (small chunk_length, near-boundary start) pair
+    # is what actually discriminates the two implementations -- window=1024/start=1023 would
+    # also raise under a hardcoded-512 fallback (1023 > 510 either way).
+    from mlx_quant_fidelity.errors import QuantizeStartError
+
+    with pytest.raises(QuantizeStartError):
+        measure_kv_fidelity("fake", quantize_start=7, chunk_length=8)
+
+
+def _pin_caps(monkeypatch, wired_gb=20, memory_gb=22):
+    """Pin the installed-cap read so the pre-flight gate threshold is machine-independent.
+
+    ``score_kv_config`` reads the cap through the kv module's own ``compute_safe_caps_gb``
+    name, so that is what must be patched; patching ``_memory_caps.compute_safe_caps_gb``
+    would be disconnected and leave these assertions machine-dependent.
+    """
+    monkeypatch.setattr(kvmod, "compute_safe_caps_gb", lambda: (wired_gb, memory_gb))
+
+
+def test_large_window_emits_memory_warning(monkeypatch):
+    # window=4096 (== MAX_CHUNK_LENGTH, so reachable through the public chunk_length knob --
+    # unlike an out-of-ceiling window, which could never reach score_kv_config for real),
+    # vocab=128_256 (Llama-3-class) -> paired fp32 logits peak ~= 7*(4096-1)*128256*4 bytes
+    # ~= 13.7 GiB: over the 4 GiB warning threshold but UNDER the 14.0 GiB pre-flight gate
+    # (0.7 x the pinned 20 GiB wired cap), so this lands in the warn-only band.
+    _patch_kv_caches_divergent(monkeypatch)
+    _pin_caps(monkeypatch)
+    model = _FakeDivergentModel(head_dim=64)
+    model.args.vocab_size = 128_256
+    report = score_kv_config(model, _kv_corpus(1, chunk_len=4096), model_id="fake")
+    # Pins the 7x multiplier, calibrated against the 2026-08-09 measured long-window spike
+    # (docs/measurement-principles.md): a regression back to the old 4x multiplier would
+    # compute 7.8 GiB here, not 13.7 GiB.
+    expected_gib = 7 * (4096 - 1) * 128_256 * 4 / 1024**3
+    assert any(f"{expected_gib:.1f} GiB" in w for w in report.warnings)
+
+
+def test_window_over_wired_gate_raises_before_any_forward(monkeypatch):
+    """A window x vocab whose paired-logits estimate exceeds the installed cap REFUSES to run.
+
+    vocab=151_936 (Qwen2-class) at window 4096 estimates ~16.2 GiB, above the 14.0 GiB gate
+    (0.7 x the pinned 20 GiB wired cap). Before this gate the same configuration only produced
+    a report *warning* -- after the allocation that the ceiling exists to prevent.
+
+    make_prompt_cache is deliberately NOT patched: if the gate did not fire first, the fake
+    model would blow up in cache construction, so a clean CorpusError is itself evidence the
+    refusal precedes any cache/forward work.
+    """
+    _pin_caps(monkeypatch)
+    model = _FakeDivergentModel(head_dim=64)
+    model.args.vocab_size = 151_936
+    with pytest.raises(CorpusError, match="cap") as excinfo:
+        score_kv_config(model, _kv_corpus(1, chunk_len=4096), model_id="fake")
+    msg = str(excinfo.value)
+    assert "4096" in msg  # names the window
+    assert "151936" in msg  # names the vocab
+    assert "16.2 GiB" in msg  # names the estimate
+    assert "14.0 GiB" in msg  # names the gate derived from the installed cap
+
+
+def test_gate_skipped_when_no_cap_reported(monkeypatch):
+    """A device reporting no working-set size ((0, 0) caps) must not gate -- warn only."""
+    _patch_kv_caches_divergent(monkeypatch)
+    _pin_caps(monkeypatch, wired_gb=0, memory_gb=0)
+    model = _FakeDivergentModel(head_dim=64)
+    model.args.vocab_size = 151_936
+    report = score_kv_config(model, _kv_corpus(1, chunk_len=4096), model_id="fake")
+    assert any("GiB per chunk" in w for w in report.warnings)
+
+
+def test_underivable_vocab_reports_unchecked_budget(monkeypatch):
+    """No vocab_size on the model args -> the logits budget is neither gated nor silently OK."""
+    _patch_kv_caches_divergent(monkeypatch)
+    _pin_caps(monkeypatch)
+
+    class _NoVocabModel(_FakeDivergentModel):
+        def __init__(self):
+            super().__init__(head_dim=64)
+            self.args.vocab_size = None
+
+    report = score_kv_config(_NoVocabModel(), _kv_corpus(1), model_id="fake")
+    assert any("unchecked" in w.lower() for w in report.warnings)
+
+
+def test_score_kv_config_reports_device_from_device_string(monkeypatch):
+    """The report's device provenance comes from device_string() -- not hardcoded/None.
+
+    Mutating the call site to ``device=None`` currently survives the suite; this pins it.
+    """
+    _patch_kv_caches_divergent(monkeypatch)
+    monkeypatch.setattr(kvmod, "device_string", lambda: "Sentinel Chip, 99 GB")
+    report = score_kv_config(_FakeDivergentModel(), _kv_corpus(1), model_id="org/m")
+    assert report.device == "Sentinel Chip, 99 GB"

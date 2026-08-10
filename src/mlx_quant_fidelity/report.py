@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, cast
 
 from mlx_quant_fidelity.corpora.provenance import CorpusProvenance
 from mlx_quant_fidelity.errors import ReportSchemaError
-from mlx_quant_fidelity.metrics import ScalarSummary
+from mlx_quant_fidelity.metrics import DepthBucketSummary, ScalarSummary
 
 if TYPE_CHECKING:
     from mlx_quant_fidelity.ranking import RankPoint
@@ -39,6 +39,8 @@ class FidelityReport:
     cache_supported: bool
     verdict: str
     warnings: tuple[str, ...]
+    device: str | None = None
+    kl_by_depth: tuple[DepthBucketSummary, ...] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,6 +71,7 @@ class WeightFidelityReport:
     reference_model_bytes: int | None
     verdict: str
     warnings: tuple[str, ...]
+    device: str | None = None
 
 
 def render_json(report: FidelityReport | WeightFidelityReport) -> str:
@@ -112,7 +115,8 @@ def render_weight_markdown(report: WeightFidelityReport) -> str:
         "",
         f"_mlx {report.mlx_version}, mlx-lm {report.mlx_lm_version}, "
         f"quant {report.quant_model_bytes} B, reference {report.reference_model_bytes} B, "
-        f"peak {report.peak_memory_bytes / 1e9:.2f} GB._",
+        f"peak {report.peak_memory_bytes / 1e9:.2f} GB"
+        f"{f', on {report.device}' if report.device is not None else ''}._",
         *([f"\n> Note: {w}" for w in report.warnings]),
     ]
     return "\n".join(lines)
@@ -127,6 +131,11 @@ def fidelity_report_from_dict(d: dict[str, object]) -> FidelityReport:
             raise ReportSchemaError("persisted report 'kl'/'corpus' must be dicts")
         fields = {**d, "kl": ScalarSummary(**kl), "corpus": CorpusProvenance(**corpus)}
         fields["warnings"] = tuple(cast("list[str]", fields.get("warnings") or []))
+        depth = d.get("kl_by_depth")
+        if depth is not None:
+            if not isinstance(depth, (list, tuple)) or not all(isinstance(b, dict) for b in depth):
+                raise ReportSchemaError("persisted 'kl_by_depth' must be a list of bucket dicts")
+            fields["kl_by_depth"] = tuple(DepthBucketSummary(**b) for b in depth)
         return FidelityReport(**fields)  # type: ignore[arg-type]
     except ReportSchemaError:
         raise
@@ -159,9 +168,22 @@ def render_markdown(report: FidelityReport) -> str:
         "under-predicts long-context/code degradation.",
         "",
         f"_mlx {report.mlx_version}, mlx-lm {report.mlx_lm_version}, "
-        f"model rev `{report.model_revision}`, peak {report.peak_memory_bytes / 1e9:.2f} GB._",
+        f"model rev `{report.model_revision}`, peak {report.peak_memory_bytes / 1e9:.2f} GB"
+        f"{f', on {report.device}' if report.device is not None else ''}._",
         *([f"\n> Note: {w}" for w in report.warnings]),
     ]
+    if report.kl_by_depth:
+        lines += [
+            "",
+            "**Drift by position depth** (stress mode; positions pooled across chunks):",
+            "",
+            "| positions | KL mean | KL p99 |",
+            "|---|---|---|",
+        ]
+        lines += [
+            f"| {b.start}-{b.end - 1} | {b.kl_mean:.4f} | {b.kl_p99:.4f} |"
+            for b in report.kl_by_depth
+        ]
     if report.quantize_mode == "deployment":
         lines.append(
             f"\n> **Deployment mode:** metrics and the {report.n_positions} positions "
@@ -177,10 +199,10 @@ def render_markdown(report: FidelityReport) -> str:
 
 @dataclass(frozen=True, slots=True)
 class ComparisonTargetResult:
-    """One target in a comparison: a successful (rankable/unrankable) or failed measurement."""
+    """One target in a comparison: a successful, skipped, or failed measurement."""
 
     label: str
-    status: str  # "ok" | "failed"
+    status: str  # "ok" | "failed" | "skipped"
     report: FidelityReport | WeightFidelityReport | None
     point: RankPoint | None  # set iff status=="ok" AND cost resolved (rankable)
     excluded_reason: str | None  # e.g. "cost unavailable"; None when ranked
@@ -268,7 +290,7 @@ def render_comparison_markdown(report: ComparisonReport) -> str:
     if excluded:
         lines += ["", "**Excluded (not ranked):**"]
         for r in excluded:
-            why = r.excluded_reason if r.status == "ok" else f"{r.error_type}: {r.message}"
+            why = r.excluded_reason or f"{r.error_type}: {r.message}"
             lines.append(f"- `{r.label}` — {why}")
     lines += [""]
     if report.budget_pick is not None:

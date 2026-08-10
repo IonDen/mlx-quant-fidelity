@@ -87,6 +87,29 @@ Deployment mode exercises the `to_quantized` conversion path that mlx-lm uses in
 
 What these numbers do not cover: the probe's 512-token chunk window is not a long document. mlx-lm's default delays conversion until 5000 tokens, but it then quantizes those stored prefix entries too. The probe measures post-boundary cost one chunk at a time. Deployment numbers are a per-chunk proxy, not a real-deployment average over long-form generation.
 
+## Drift by position depth
+
+Every stress-mode report over a fixed-window corpus also buckets its per-position KLD by depth. The scored positions in each chunk split into eight equal-width ranges (`metrics/depth.py::bucket_by_depth`), and each range's mean and p99 KLD are pooled across every scored chunk. A model whose quantizer cost grows the further it reads into a window shows a rising KL mean from the first bucket to the last; a model whose cost doesn't depend on depth shows a flat table.
+
+The table only appears in stress mode, and only when every scored chunk carries the same number of positions. Deployment mode's post-boundary region isn't a fixed width across configurations, and pooling an unequal-length corpus by position index would conflate depth with wherever a chunk happens to end. When the scored chunks don't match in length, the probe drops the table and adds a report warning that points back to this section instead of publishing a number that misrepresents depth.
+
+Depth buckets get more informative as the window grows, so `kv` and `compare kv` take a `--chunk-length` option (default 512, capped at 4096). Paired fp32 logits for one chunk scale with window length times vocabulary size, so a longer window costs proportionally more memory — both runs hold a full logits tensor at once before it collapses to per-position scalars. Measured peaks on Llama-3.2-1B-4bit at kv4, group size 64 (Apple M1 Max, 32 GB; reproducer: `scripts/spike_long_window_memory.py`):
+
+| chunk length | peak memory |
+|---|---|
+| 512 | 2.27 GiB |
+| 1024 | 3.86 GiB |
+| 2048 | 7.09 GiB |
+| 4096 | 13.53 GiB |
+
+4096 is a hard ceiling — `chunk_length` above it raises before a model loads. Below the ceiling, the CLI adds a warning once the estimated logits footprint for the chosen window passes 4 GiB, using a slope calibrated against the measurements above.
+
+Those measurements come from a model with a vocabulary of about 128,000 tokens, and because the footprint scales with vocabulary as well as window length, a model with twice that vocabulary needs roughly twice the memory at the same window. The 4096 ceiling on its own is therefore not a sufficient guard. Before scoring a window, the probe also compares its estimated logits footprint against the memory cap it installs on the current device, and refuses any window that would claim more than a conservative fraction of that cap instead of warning once the memory is already committed. On a large-vocabulary model that refusal can land on a window the table above shows as comfortable; lower `--chunk-length` until it fits. The fraction is deliberately cautious, because the estimate covers the paired logits alone while a real run also holds the model weights and the cache beside them.
+
+On the models sampled so far, at windows up to 4096 tokens on WikiText-2, the depth curve is close to flat: 4-bit and 8-bit KV cost about the same near position 60 as near position 4000. That is not evidence that KV quantization is depth-insensitive in general. It's what these specific checkpoints show, on this corpus, at these window lengths — and short-prose windows this size are still well short of the context lengths where other work has found the effect. Depth sensitivity has been reported at longer context elsewhere: one study finds KV-quantization drift widening past roughly 4k tokens of context (arXiv:2607.05399), and another traces error accumulation over long reasoning-style generations (arXiv:2606.03458).
+
+Neither external result is directly comparable to the table above. Both study generation over spans longer than this probe's 4096-token ceiling, and this probe's depth table comes from teacher-forced windows: it measures attention over a longer *quantized cache*, not the compounding error of a model sampling its own tokens over many steps. A flat curve at 4096 says the quantizer's cost doesn't grow with attention span in that range on these checkpoints — it says nothing about what happens once a model is generating against its own quantized history for tens of thousands of tokens.
+
 ## References
 
 - `probes/kv.py`: `_score_chunk`, `score_kv_config` — teacher-forced paired KV scoring.
@@ -94,5 +117,9 @@ What these numbers do not cover: the probe's 512-token chunk window is not a lon
 - `metrics/flip.py`: `top_token_flips` — fp32 argmax disagreement.
 - `metrics/perplexity.py`: `token_nll` — `-log softmax(logits)[target]`, fp32.
 - `probes/_paired.py`: `_check_exact_zero` — `ExactZeroError` on exact-zero KLD and flip.
+- `metrics/depth.py`: `bucket_by_depth` — equal-width depth buckets pooled across scored chunks.
+- `scripts/spike_long_window_memory.py` — the chunk-length memory measurement above.
 - llama.cpp `llama-perplexity --kl-divergence-base` — the KLD direction convention this tool follows.
 - *Accuracy Is Not All You Need* — arXiv:2407.09141.
+- KV-quantization drift at longer context — arXiv:2607.05399.
+- Error accumulation over long reasoning generations — arXiv:2606.03458.

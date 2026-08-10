@@ -63,7 +63,14 @@ version-file = "src/mlx_quant_fidelity/_version.py"
 packages = ["src/mlx_quant_fidelity"]
 
 [tool.hatch.build.targets.sdist]
-exclude = [".codegraph/", ".hypothesis/", ".coverage", "docs/superpowers/", "docs/backlog/"]
+exclude = [
+  ".codegraph/",
+  ".hypothesis/",
+  ".coverage",
+  ".superpowers/",
+  "docs/superpowers/",
+  "docs/backlog/",
+]
 
 [tool.ruff]
 src = ["src"]
