@@ -319,6 +319,7 @@ class _FakeDivergentModel:
                 "head_dim": head_dim,
                 "hidden_size": None,
                 "num_attention_heads": None,
+                "vocab_size": 3,
             },
         )()
 
@@ -421,6 +422,7 @@ def test_score_kv_config_emits_warning_when_head_dim_unknown(monkeypatch):
                 "head_dim": None,
                 "hidden_size": None,
                 "num_attention_heads": None,
+                "vocab_size": 3,
             },
         )()
 
@@ -627,6 +629,7 @@ class _FakeBroadcastCrashModel:
                 "head_dim": 64,
                 "hidden_size": None,
                 "num_attention_heads": None,
+                "vocab_size": 3,
             },
         )()
 
@@ -657,6 +660,43 @@ def test_score_kv_config_reraises_unrelated_value_error(monkeypatch):
     _patch_kv_caches_divergent(monkeypatch)
     with pytest.raises(ValueError, match="unrelated numerical error"):
         score_kv_config(_FakeUnrelatedValueErrorModel(), _kv_corpus(1), model_id="fake")
+
+
+def test_score_kv_config_deployment_wraps_broadcast_shapes_crash(monkeypatch):
+    """The packed-width belt catch covers deployment mode too, not only the stress branch.
+
+    ``_score_chunk_deployment`` quantizes the stored cache at the boundary and appends to it
+    for segment 2, so it hits the same mlx-lm packed-width crash — without the shared wrap a
+    raw ValueError escapes to the CLI as an unhandled traceback.
+    """
+    _patch_kv_caches_deployment(monkeypatch)
+    with pytest.raises(CacheNotQuantizableError, match="broadcast_shapes"):
+        score_kv_config(
+            _FakeBroadcastCrashModel(), _kv_corpus(1, 6), model_id="fake", quantize_start=2
+        )
+
+
+def test_score_kv_config_deployment_reraises_unrelated_value_error(monkeypatch):
+    """The deployment-side belt must not swallow an unrelated ValueError either."""
+    _patch_kv_caches_deployment(monkeypatch)
+    with pytest.raises(ValueError, match="unrelated numerical error"):
+        score_kv_config(
+            _FakeUnrelatedValueErrorModel(), _kv_corpus(1, 6), model_id="fake", quantize_start=2
+        )
+
+
+def test_packed_width_message_offers_only_workable_bits():
+    """The remedy list is computed, not a fixed '2/3/4/8' string that can itself be wrong.
+
+    At head_dim=80 both bits=3 (8 vs 7) and bits=6 (16 vs 15) mismatch, so a message naming
+    bits 3 sends the user straight into a second crash.
+    """
+    model = _FakeDivergentModel(head_dim=80)
+    with pytest.raises(CacheNotQuantizableError) as excinfo:
+        score_kv_config(model, _kv_corpus(1), model_id="fake", kv_bits=6, kv_group_size=16)
+    msg = str(excinfo.value)
+    assert "use bits 2/4/8" in msg
+    assert "2/3/4/8" not in msg
 
 
 # ---------------------------------------------------------------------------
@@ -750,17 +790,87 @@ def test_quantize_start_bound_follows_chunk_length():
         measure_kv_fidelity("fake", quantize_start=7, chunk_length=8)
 
 
+def _pin_caps(monkeypatch, wired_gb=20, memory_gb=22):
+    """Pin the installed-cap read so the pre-flight gate threshold is machine-independent.
+
+    ``score_kv_config`` reads the cap through the kv module's own ``compute_safe_caps_gb``
+    name, so that is what must be patched; patching ``_memory_caps.compute_safe_caps_gb``
+    would be disconnected and leave these assertions machine-dependent.
+    """
+    monkeypatch.setattr(kvmod, "compute_safe_caps_gb", lambda: (wired_gb, memory_gb))
+
+
 def test_large_window_emits_memory_warning(monkeypatch):
     # window=4096 (== MAX_CHUNK_LENGTH, so reachable through the public chunk_length knob --
     # unlike an out-of-ceiling window, which could never reach score_kv_config for real),
-    # vocab=151_936 (Qwen2-class) -> paired fp32 logits peak ~= 7*(4096-1)*151936*4 bytes
-    # ~= 16.2 GiB, over the 4 GiB threshold -> warning fires.
+    # vocab=128_256 (Llama-3-class) -> paired fp32 logits peak ~= 7*(4096-1)*128256*4 bytes
+    # ~= 13.7 GiB: over the 4 GiB warning threshold but UNDER the 14.0 GiB pre-flight gate
+    # (0.7 x the pinned 20 GiB wired cap), so this lands in the warn-only band.
     _patch_kv_caches_divergent(monkeypatch)
+    _pin_caps(monkeypatch)
     model = _FakeDivergentModel(head_dim=64)
-    model.args.vocab_size = 151_936
+    model.args.vocab_size = 128_256
     report = score_kv_config(model, _kv_corpus(1, chunk_len=4096), model_id="fake")
     # Pins the 7x multiplier, calibrated against the 2026-08-09 measured long-window spike
     # (docs/measurement-principles.md): a regression back to the old 4x multiplier would
-    # compute 9.3 GiB here, not 16.2 GiB.
-    expected_gib = 7 * (4096 - 1) * 151_936 * 4 / 1024**3
+    # compute 7.8 GiB here, not 13.7 GiB.
+    expected_gib = 7 * (4096 - 1) * 128_256 * 4 / 1024**3
     assert any(f"{expected_gib:.1f} GiB" in w for w in report.warnings)
+
+
+def test_window_over_wired_gate_raises_before_any_forward(monkeypatch):
+    """A window x vocab whose paired-logits estimate exceeds the installed cap REFUSES to run.
+
+    vocab=151_936 (Qwen2-class) at window 4096 estimates ~16.2 GiB, above the 14.0 GiB gate
+    (0.7 x the pinned 20 GiB wired cap). Before this gate the same configuration only produced
+    a report *warning* -- after the allocation that the ceiling exists to prevent.
+
+    make_prompt_cache is deliberately NOT patched: if the gate did not fire first, the fake
+    model would blow up in cache construction, so a clean CorpusError is itself evidence the
+    refusal precedes any cache/forward work.
+    """
+    _pin_caps(monkeypatch)
+    model = _FakeDivergentModel(head_dim=64)
+    model.args.vocab_size = 151_936
+    with pytest.raises(CorpusError, match="cap") as excinfo:
+        score_kv_config(model, _kv_corpus(1, chunk_len=4096), model_id="fake")
+    msg = str(excinfo.value)
+    assert "4096" in msg  # names the window
+    assert "151936" in msg  # names the vocab
+    assert "16.2 GiB" in msg  # names the estimate
+    assert "14.0 GiB" in msg  # names the gate derived from the installed cap
+
+
+def test_gate_skipped_when_no_cap_reported(monkeypatch):
+    """A device reporting no working-set size ((0, 0) caps) must not gate -- warn only."""
+    _patch_kv_caches_divergent(monkeypatch)
+    _pin_caps(monkeypatch, wired_gb=0, memory_gb=0)
+    model = _FakeDivergentModel(head_dim=64)
+    model.args.vocab_size = 151_936
+    report = score_kv_config(model, _kv_corpus(1, chunk_len=4096), model_id="fake")
+    assert any("GiB per chunk" in w for w in report.warnings)
+
+
+def test_underivable_vocab_reports_unchecked_budget(monkeypatch):
+    """No vocab_size on the model args -> the logits budget is neither gated nor silently OK."""
+    _patch_kv_caches_divergent(monkeypatch)
+    _pin_caps(monkeypatch)
+
+    class _NoVocabModel(_FakeDivergentModel):
+        def __init__(self):
+            super().__init__(head_dim=64)
+            self.args.vocab_size = None
+
+    report = score_kv_config(_NoVocabModel(), _kv_corpus(1), model_id="fake")
+    assert any("unchecked" in w.lower() for w in report.warnings)
+
+
+def test_score_kv_config_reports_device_from_device_string(monkeypatch):
+    """The report's device provenance comes from device_string() -- not hardcoded/None.
+
+    Mutating the call site to ``device=None`` currently survives the suite; this pins it.
+    """
+    _patch_kv_caches_divergent(monkeypatch)
+    monkeypatch.setattr(kvmod, "device_string", lambda: "Sentinel Chip, 99 GB")
+    report = score_kv_config(_FakeDivergentModel(), _kv_corpus(1), model_id="org/m")
+    assert report.device == "Sentinel Chip, 99 GB"

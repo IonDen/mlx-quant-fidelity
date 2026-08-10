@@ -321,6 +321,21 @@ def test_measure_weight_caps_before_both_loads(monkeypatch):
     assert any("share a tokenizer" in w for w in report.warnings)
 
 
+def test_measure_weight_reports_device_from_device_string(monkeypatch):
+    """The report's device provenance comes from device_string() -- not hardcoded/None.
+
+    Mirrors the KV-probe device test; mutating the call site to ``device=None`` currently
+    survives the suite.
+    """
+    from mlx_quant_fidelity.probes import weights as w
+
+    calls: list[str] = []
+    _patch_loads(monkeypatch, ref_peak=0, quant_peak=1, calls=calls)
+    monkeypatch.setattr(w, "device_string", lambda: "Sentinel Chip, 99 GB")
+    report = measure_weight_fidelity("quant", "ref", corpus=_corpus(1))
+    assert report.device == "Sentinel Chip, 99 GB"
+
+
 def test_measure_weight_records_quantized_reference_bits(monkeypatch):
     calls: list[str] = []
     _patch_loads(monkeypatch, ref_peak=0, quant_peak=1, calls=calls, ref_quantized=True)
