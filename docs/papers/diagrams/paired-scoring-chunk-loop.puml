@@ -1,0 +1,35 @@
+@startuml
+title Paired teacher-forced scoring with per-chunk reduction
+
+top to bottom direction
+
+skinparam backgroundColor #FFFFFF
+skinparam shadowing false
+skinparam roundCorner 10
+skinparam defaultFontName Helvetica
+skinparam defaultFontColor #111827
+skinparam ArrowColor #4B5563
+skinparam ArrowFontColor #374151
+skinparam rectangle {
+  BorderColor #4B5563
+  FontColor #111827
+  BackgroundColor #F8FAFC
+}
+
+rectangle "Per-chunk loop\nrepeats over the corpus; nothing vocab-wide survives an iteration" as loop #EDE9FE {
+  rectangle "Fixed corpus chunk\nthe same tokens drive both runs" as chunk #DBEAFE
+  rectangle "Reference run\nfull-precision KV cache" as ref #DCFCE7
+  rectangle "Quantized run\nquantized KV cache" as quant #DCFCE7
+  rectangle "Paired fp32 logits\nvocab-wide, one tensor per run, transient" as logits #FEF3C7
+  rectangle "Per-position scalars\nKL divergence, top-token flip, target NLL" as scalars #DCFCE7
+  rectangle "mx.eval the scalars\ndrop the per-chunk caches, mx.clear_cache()" as evict #DCFCE7
+
+  chunk -down-> ref
+  chunk -down-> quant
+  ref -down-> logits
+  quant -down-> logits
+  logits -down-> scalars : reduced inside the loop
+  scalars -down-> evict
+  evict -up-> chunk : next chunk
+}
+@enduml

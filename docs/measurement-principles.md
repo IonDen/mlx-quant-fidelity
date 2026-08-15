@@ -15,7 +15,7 @@ ref_logits = model(inp, cache=ref_cache)[0].astype(mx.float32)
 quant_logits = model(inp, cache=quant_cache)[0].astype(mx.float32)
 ```
 
-Both passes receive the same `inp`; only the cache differs. This is teacher-forced scoring: the corpus tokens drive both runs, so the two passes see the same context at every position.
+Both passes receive the same `inp`. This is teacher-forced scoring: the corpus tokens drive both runs, so the two passes see the same context at every position. In the KV probe, the measured intervention also includes mlx-lm's different quantized-attention path; the section on limitations below describes that bundle.
 
 Generation would break this. The moment quantization changes a sampled token, the next pass receives different input, and the divergence compounds. What you end up measuring is trajectory drift, not cache cost. The llama.cpp `--kl-divergence-base` flag works the same way: it scores a forward pass over fixed text, not a generation.
 
@@ -37,22 +37,22 @@ return terms.sum(axis=-1)
 
 The zero-probability policy is explicit: where `P = 0`, the term is zero (`0 · log 0 := 0` by convention). There is no epsilon smoothing. If `P > 0` and `Q` approaches zero, the term approaches positive infinity — the honest cost of the reference assigning probability to a token the quantized model nearly rules out. In practice, softmax over real logits is always strictly positive, so finite results are the norm.
 
-KLD is computed over the full vocabulary, not truncated to the reference's top-k. Top-k storage is fine for flip rate and top-k overlap, but truncating for KLD discards the tail and systematically underreports the divergence.
+KLD is computed over the full vocabulary, not truncated to the reference's top-k. Top-k storage is fine for flip rate and top-k overlap, but truncation does not preserve full-vocabulary `KL(P_ref || Q_quant)`. Truncating outright and renormalizing the retained probabilities are two different approximations, and neither has a guaranteed bias direction.
 
 The report includes mean, median, p99, and max. The tail is where quantization tends to hurt quietly: a model with a healthy mean KLD can still have occasional positions where it is badly wrong. Ranking and domination in `compare` use mean KLD only; read the p99 column directly if the tail matters for your use case.
 
-## Determinism at temperature 0
+## Reproducibility controls
 
-The probe runs at temperature 0. There is no sampler RNG: `mlx-lm`'s `make_sampler` returns argmax when `temp=0`, and the `mx.random` samplers only run when `temp > 0`. Seeding a random state does nothing here.
+The probe is teacher-forced and never calls a sampler. Corpus tokens drive both forward passes, so sampler seeds and temperature do not control the measurement.
 
-The actual determinism levers are fp32 logits and per-chunk graph materialization. Flip rate is computed on fp32 logits before argmax (`metrics/flip.py`):
+The metrics widen logits to fp32 before KL arithmetic and the argmax comparison (`metrics/flip.py`):
 
 ```python
 ref_top = mx.argmax(ref_logits.astype(mx.float32), axis=-1)
 quant_top = mx.argmax(quant_logits.astype(mx.float32), axis=-1)
 ```
 
-Using fp16 logits would cause near-ties to resolve differently across runs due to rounding. The `mx.eval` call after each chunk bounds the lazy graph and ensures the computation is materialized before the cache is reset and cleared, preventing graph state from leaking between chunks.
+Widening stabilizes metric arithmetic, but it cannot recover precision lost while the model computed the logits or make an existing finite-valued argmax more deterministic. The `mx.eval` call after each chunk bounds the lazy graph and materializes the reduced outputs before the per-chunk caches are dropped. That is a memory-lifetime boundary, not a cross-run determinism guarantee. Reports record the model revisions and software versions; bitwise reproducibility across releases or devices is not promised.
 
 ## The exact-zero guard
 
@@ -67,11 +67,11 @@ def _check_exact_zero(*, kl_mean: float, flip_rate: float, context: str) -> None
         )
 ```
 
-The guard triggers when both metrics are exactly zero, not just near-zero. When this happens it almost always means quantization never engaged — a cache that was bypassed or never engaged, or a configuration error. Reporting zero as a valid fidelity score in these cases would be wrong.
+The guard triggers when both metrics are exactly zero, not just near-zero. That outcome is indistinguishable from a bypass without further diagnosis — for example, a cache that was never quantized or a configuration dead-end. Reporting it as a valid fidelity score would therefore be unsafe.
 
 ## What the numbers don't say
 
-KLD measures how much the quantized distribution differs from the reference on the evaluation corpus at temperature 0. It does not measure downstream task accuracy. The paper this tool builds on, *Accuracy Is Not All You Need* (arXiv:2407.09141), shows that short-prose distributional drift underestimates degradation on long-context tasks and code. Every report records the corpus, token count, and mode so the number carries its own qualification.
+KLD measures how much the quantized distribution differs from the reference on the evaluation corpus. It does not measure downstream task accuracy. *Accuracy Is Not All You Need* (arXiv:2407.09141) shows that aggregate benchmark accuracy can hide answer flips and reports worse MT-Bench results for compressed models on a free-form generative task. It does not evaluate long-context or code workloads, so the short WikiText-2 windows here provide no evidence about either domain. Every report records the corpus, token count, and mode so the number carries its own qualification.
 
 Perplexity delta is a related but distinct signal: it scores the realized next corpus token (`token_nll = -log softmax(logits)[target]`), while mean KLD measures full-vocabulary drift. They correlate but can diverge when the reference distribution doesn't concentrate on the observed token. See [docs/ranking-principles.md](ranking-principles.md) for how perplexity delta interacts with ranking.
 
