@@ -10,13 +10,13 @@
 
 You install a 4-bit model. It loads, it answers, the prose reads fine. Nothing in the logs suggests otherwise.
 
-On Qwen2.5-7B with a 4-bit KV cache active from the first token, 99% of next-token choices come out different from the same model running a full-precision cache. The text is still fluent English — that is exactly the problem. A quantization failure does not announce itself, and file size tells you nothing about it.
+On Qwen2.5-7B with a 4-bit KV cache active from the first token, 99% of next-token choices come out different from the same model running a full-precision cache. Quantizing from token zero is the harshest way to measure, and it is not what you get by default: mlx-lm's own generate command leaves the cache unquantized until token 5000. The text is still fluent English — that is exactly the problem. A quantization failure does not announce itself, and file size tells you nothing about it.
 
 `mlx-quant-fidelity` runs the same text through your model twice, once quantized and once not, and reports how far apart the two ended up: KL divergence, top-token flip rate, perplexity delta. It covers both **KV-cache quantization** and **weight quantization**.
 
 The CUDA and GGUF world has had this for years — llama.cpp's `--kl-divergence-base`, EleutherAI's `lm-evaluation-harness`. MLX had nothing, and neither of those covers the KV-cache and attention angle.
 
-## Try it in thirty seconds
+## Try it in one command
 
 ```bash
 pip install mlx-quant-fidelity
@@ -36,11 +36,11 @@ mlx-quant-fidelity kv mlx-community/Llama-3.2-3B-Instruct-4bit --kv-bits 8
 | perplexity Δ | +0.0054 (17.722 → 17.728) |
 ```
 
-That model at 8-bit KV is safe to ship. Apple Silicon, Python 3.11+.
+That model at 8-bit KV is safe to ship on this corpus. Apple Silicon, Python 3.11+.
 
 ## Does this apply to you?
 
-Precision gets lost in two different places, at two different times, and they need two different commands.
+Precision gets lost in two places — on disk and in the running cache — and each needs its own command.
 
 ![Diagram: a running quantized model loses precision in two places. Weights on disk were quantized once, before download, and are measured by `mlx-quant-fidelity weights`, which scores a quantized repo against a higher-precision repo. The KV cache is quantized continuously at run time as the cache grows with every token, and is measured by `mlx-quant-fidelity kv`, which scores a full-precision cache against a quantized one. Both feed `mlx-quant-fidelity compare`, which ranks configurations by quality per byte](https://raw.githubusercontent.com/IonDen/mlx-quant-fidelity/main/docs/assets/diagrams/coverage-map.svg)
 
@@ -65,7 +65,7 @@ Builds the whole bits-by-group-size grid from the model's `config.json`, drops a
 mlx-quant-fidelity kv <model> --kv-bits 8 --format badge
 ```
 
-Prints one shields.io line for your model card. Green, amber, or red, with the bit width, corpus, and mode baked into the label so two badges are never confused.
+Prints one shields.io line for your model card. Green, yellow, or red, with the bit width, corpus, chunk length, and mode baked into the message, so two badges are never confused.
 
 ## What a report looks like
 
