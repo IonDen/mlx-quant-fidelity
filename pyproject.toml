@@ -4,15 +4,19 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mlx-quant-fidelity"
-description = "Measure MLX quantization quality loss — KL divergence, perplexity, top-token agreement for KV cache and weights"
+description = "Measure quantization quality loss on Apple Silicon MLX — KL divergence, top-token flip rate and perplexity delta for KV-cache and weight quantization"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "Apache-2.0"
 license-files = ["LICENSE", "NOTICE"]
 authors = [{ name = "Denis Ineshin", email = "denis.ineshin@gmail.com" }]
-keywords = ["quantization", "quality", "kl-divergence", "perplexity", "kv-cache", "eval", "mlx", "apple-silicon"]
+keywords = [
+  "quantization", "quantization-quality", "kl-divergence", "perplexity",
+  "kv-cache", "kv-cache-quantization", "eval", "llm-eval",
+  "mlx", "apple-silicon", "mlx-lm",
+]
 classifiers = [
-  "Development Status :: 3 - Alpha",
+  "Development Status :: 4 - Beta",
   "Intended Audience :: Developers",
   "Intended Audience :: Science/Research",
   "License :: OSI Approved :: Apache Software License",
