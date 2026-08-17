@@ -1,6 +1,6 @@
 # Fidelity verdict thresholds
 
-Your report came back `marginal` and you want to know where that line was drawn.
+Your report came back `marginal`. Here's where that line was drawn.
 
 `mlx-quant-fidelity` assigns each measurement a verdict of `good`, `marginal`, or `bad`. The verdict is driven by three calibrated thresholds — mean KLD, p99 KLD, and flip rate — and all three must pass for a tier to apply.
 
