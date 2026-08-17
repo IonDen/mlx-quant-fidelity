@@ -144,3 +144,12 @@ def test_real_committed_samples_are_readable():
     matching = [p for p in kv if p.label == expected_label]
     assert len(matching) == 1
     assert matching[0].kl_mean == known_data["kl"]["mean"]
+
+
+def test_committed_chart_carries_no_wall_clock_date():
+    # The chart's provenance claim is that re-running the script reproduces the
+    # committed SVG. A rendered-at timestamp silently breaks that, so assert the
+    # committed artifact is free of one. Pure file read: no matplotlib needed, so
+    # this runs in the default lane without the `docs` group.
+    svg = (REPO_ROOT / "docs" / "assets" / "charts" / "fidelity-cliff.svg").read_text()
+    assert "<dc:date>" not in svg

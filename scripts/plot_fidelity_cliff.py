@@ -122,6 +122,10 @@ def render(kv: list[CliffPoint], weights: list[CliffPoint], out_path: Path) -> N
     import matplotlib
 
     matplotlib.use("Agg")
+    # Fixed salt so the per-render hashed clip-path/marker ids matplotlib embeds in SVG
+    # output are stable across runs — otherwise the committed SVG changes on every
+    # re-render even when the plotted geometry does not.
+    matplotlib.rcParams["svg.hashsalt"] = "mlx-quant-fidelity"
     import matplotlib.pyplot as plt
 
     fig, axes = plt.subplots(1, 2, figsize=(13, 5.2))
@@ -168,7 +172,7 @@ def render(kv: list[CliffPoint], weights: list[CliffPoint], out_path: Path) -> N
     )
     fig.tight_layout(rect=(0, 0.04, 1, 0.94))
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(out_path, format="svg", bbox_inches="tight")
+    fig.savefig(out_path, format="svg", bbox_inches="tight", metadata={"Date": None})
 
 
 OG_PATH = REPO_ROOT / "docs" / "assets" / "social" / "og-card.png"
