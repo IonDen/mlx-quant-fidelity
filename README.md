@@ -67,44 +67,23 @@ mlx-quant-fidelity kv <model> --kv-bits 8 --format badge
 
 Prints one shields.io line for your model card. Green, yellow, or red, with the bit width, corpus, chunk length, and mode baked into the message, so two badges are never confused.
 
-## What a report looks like
-
-```markdown
-# KV-fidelity: `mlx-community/Llama-3.2-3B-Instruct-4bit` @ 8-bit (group 64)
-
-**Verdict:** good · **mode:** stress (quantize_start=0)
-
-| metric | value |
-|---|---|
-| KL mean | 0.0002 nats |
-| KL median | 0.0001 nats |
-| KL p99 | 0.0015 nats |
-| KL max | 0.1129 nats |
-| flip rate | 0.0065 |
-| perplexity Δ | +0.0054 (17.722 → 17.728) |
-
-Measured on **wikitext-2-raw/test**, 51100 positions across 100 chunks of length 512 ...
-```
-
 ## Badge output
 
-`--format badge` prints a single shields.io Markdown line instead of the full report:
-
-```bash
-mlx-quant-fidelity kv mlx-community/Llama-3.2-3B-Instruct-4bit --kv-bits 8 --format badge
-```
-
-Output:
+`--format badge` replaces the whole report with one line:
 
 ```
 ![KV fidelity](https://img.shields.io/badge/KV_fidelity-good_%C2%B7_8--bit_%C2%B7_wikitext--2--raw%2F512_%C2%B7_stress-brightgreen)
 ```
 
-Green for `good`, yellow for `marginal`, red for `bad`. The badge message includes the bit width, corpus, chunk length, and mode so badges from different configurations are distinguishable. Threshold values and the color map are in [docs/threshold-policy.md](docs/threshold-policy.md).
+Green for `good`, yellow for `marginal`, red for `bad`. Threshold values and the color map are in [docs/threshold-policy.md](docs/threshold-policy.md).
 
-## How much does KV quantization cost?
+## What it found
 
-M1 Max, WikiText-2 test (100 chunks of 512 tokens), stress mode (quantize from token 0). Reproduce any row with `mlx-quant-fidelity kv <model> --kv-bits <bits> --max-chunks 100`; the full committed reports are under [`_artifacts/samples/`](_artifacts/samples).
+![Chart with two panels showing mean KL divergence on a logarithmic axis, with green, amber and red bands marking the good, marginal and bad thresholds. Left panel, KV-cache quantization: Llama-3.2-1B at 4-bit KV reaches 0.148 and Qwen2.5-7B at 4-bit reaches 9.36, both in the red band, while all three models at 8-bit KV sit deep in the green band below 0.01. Right panel, weight quantization: 4-bit weights land between 0.085 and 0.158 in the amber band while 8-bit weights sit near 0.001 in the green band](https://raw.githubusercontent.com/IonDen/mlx-quant-fidelity/main/docs/assets/charts/fidelity-cliff.svg)
+
+Eight-bit is near-lossless everywhere we measured it. Four-bit is a real trade, and on one checkpoint it collapses.
+
+KV cache, M1 Max, WikiText-2 test (100 chunks of 512 tokens), stress mode (quantize from token 0). Reproduce any row with `mlx-quant-fidelity kv <model> --kv-bits <bits> --max-chunks 100`; the full committed reports are under [`_artifacts/samples/`](_artifacts/samples).
 
 | Model | KV bits | KL mean (nats) | flip rate | verdict |
 |---|---|---|---|---|
@@ -115,7 +94,7 @@ M1 Max, WikiText-2 test (100 chunks of 512 tokens), stress mode (quantize from t
 | Qwen2.5-7B | 4 | 9.36 | 0.99 | bad |
 | Qwen2.5-7B | 8 | 0.009 | 0.032 | marginal |
 
-8-bit KV is near-lossless on all three models. 4-bit is another matter, and Qwen2.5-7B at 4-bit in stress mode falls apart: nearly every token flips. This measurement establishes a checkpoint-specific failure, not its cause. mlx-lm's default delays cache conversion until 5000 tokens, so those positions are computed while attention uses a full-precision cache. At the boundary, however, mlx-lm converts the entire stored prefix too. Run the tool first and you see the fidelity risk before deployment.
+8-bit KV is near-lossless on all three models. 4-bit is another matter, and Qwen2.5-7B at 4-bit in stress mode falls apart: nearly every token flips. This measurement establishes a checkpoint-specific failure, not its cause. mlx-lm's own generate command leaves the cache unquantized until token 5000, so those positions are computed while attention uses a full-precision cache. At the boundary, however, mlx-lm converts the entire stored prefix too. The Python API defaults differently: pass `kv_bits` to `mlx_lm.generate` and quantization starts at token 0 unless you also set `quantized_kv_start`. Run the tool first and you see the fidelity risk before deployment.
 
 ## Does drift change with position depth?
 
@@ -154,6 +133,8 @@ Unlike the KV probe, both runs use standard attention, so the drift is the deplo
 
 `compare` ranks a set of quantizations on a memory-normalized Pareto frontier: quality (mean KL divergence) on one axis, memory cost on the other. It identifies any configuration that is both worse quality and more expensive than another option on the list — those are dominated and you would never choose them.
 
+![Diagram explaining domination: configuration A drifts less, with a lower mean KL divergence, and costs less, with fewer cache bytes per token. Configuration B loses on both counts, so B is dominated — worse on quality and more expensive, meaning no memory budget would make it the right pick. Ranking reports domination so options can be discarded outright instead of weighed by hand](https://raw.githubusercontent.com/IonDen/mlx-quant-fidelity/main/docs/assets/diagrams/pareto-domination.svg)
+
 ```bash
 # rank weight quantizations against a bf16 reference
 mlx-quant-fidelity compare weights q4 q6 q8 --reference fp16
@@ -171,10 +152,13 @@ Add `--max-kld 0.05` to get the cheapest configuration whose mean KLD stays unde
 
 Teacher-forced scoring, not generation. For each fixed-length corpus chunk the model runs twice on the *same* tokens — once with a full-precision KV cache, once with a quantized one — and the two next-token distributions are compared position by position. Generation would let the runs diverge in their own inputs the moment quantization changed a sampled token, turning the measurement into trajectory drift instead of cache cost. Logits collapse to per-position scalars inside the chunk loop and are released before the next chunk, so a long corpus never holds full distributions in memory.
 
-Two modes:
+![Diagram of the paired teacher-forced scoring loop: a fixed corpus chunk feeds a reference run with a full-precision KV cache and a quantized run with a quantized KV cache; both produce vocabulary-wide fp32 logits that are reduced inside the loop to per-position scalars for KL divergence, top-token flip and target negative log-likelihood; the scalars are evaluated, the per-chunk caches are dropped and the cache pool cleared, and the loop advances, so no vocabulary-wide tensor outlives its chunk](https://raw.githubusercontent.com/IonDen/mlx-quant-fidelity/main/docs/papers/diagrams/paired-scoring-chunk-loop.svg)
 
-- **stress** (`--quantize-start 0`, the default): quantize from token 0. The harsh, apples-to-apples quantizer test.
-- **deployment** (`--quantize-start N`): computes the first N positions with a full-precision cache, then converts the entire stored cache and scores only the post-boundary region. This matches mlx-lm's `--quantized-kv-start` conversion behavior; it does not preserve a full-precision prefix in storage. [docs/measurement-principles.md](docs/measurement-principles.md) explains why deployment and stress drift need a matched comparison and why neither is a long-context deployment average.
+Every report records which of two modes produced it.
+
+![Diagram comparing the two measurement modes. In stress mode with quantize-start 0, the default, every position runs against a quantized cache from the very first token, and every position is scored. In deployment mode with quantize-start 5000, positions 0 through 4999 are computed against a full-precision cache; at position 5000 the entire stored cache converts to quantized and no full-precision prefix is kept; positions 5000 and beyond run against the quantized cache, and only the post-boundary positions are scored](https://raw.githubusercontent.com/IonDen/mlx-quant-fidelity/main/docs/assets/diagrams/stress-vs-deployment.svg)
+
+Stress mode (`--quantize-start 0`, the default) quantizes from token 0 — the harsh, apples-to-apples quantizer test. Deployment mode (`--quantize-start N`) computes the first N positions with a full-precision cache, then converts the entire stored cache and scores only the post-boundary region. That matches mlx-lm's `--quantized-kv-start` conversion behavior, which does not preserve a full-precision prefix in storage. [docs/measurement-principles.md](docs/measurement-principles.md) explains why deployment and stress drift need a matched comparison and why neither is a long-context deployment average.
 
 A run that returns exactly zero drift raises instead of reporting a silent "perfect fidelity." That almost always means quantization never engaged, not that it was free.
 
