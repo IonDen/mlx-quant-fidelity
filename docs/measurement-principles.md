@@ -1,5 +1,7 @@
 # How fidelity is measured
 
+You have a drift number and you want to know exactly what was run to produce it.
+
 `mlx-quant-fidelity` measures the gap between a quantized model and its reference by running both on the same tokens and comparing their next-token distributions position by position. What follows explains the mechanics, the implementation choices, and where the numbers stop being useful.
 
 ## Teacher-forced paired scoring, not generation
@@ -85,7 +87,7 @@ Post-boundary positions therefore read through a quantized prefix as well as qua
 
 Deployment mode exercises the `to_quantized` conversion path that mlx-lm uses in practice. Stress mode quantizes from an empty cache and never touches the path that converts existing full-precision entries. A quantizer that behaves differently on pre-filled data is therefore invisible to stress mode. Deployment mode also preserves the exact pre-boundary computation history, even though it does not preserve the prefix's storage type after conversion.
 
-What these numbers do not cover: the probe's 512-token chunk window is not a long document. mlx-lm's default delays conversion until 5000 tokens, but it then quantizes those stored prefix entries too. The probe measures post-boundary cost one chunk at a time. Deployment numbers are a per-chunk proxy, not a real-deployment average over long-form generation.
+What these numbers do not cover: the probe's 512-token chunk window is not a long document. mlx-lm's own generate command delays conversion until token 5000, but it then quantizes those stored prefix entries too. The probe measures post-boundary cost one chunk at a time. Deployment numbers are a per-chunk proxy, not a real-deployment average over long-form generation.
 
 ## Drift by position depth
 

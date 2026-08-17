@@ -168,20 +168,45 @@ The weight probe works the same way with two models instead of two caches: a qua
 
 See [docs/measurement-principles.md](docs/measurement-principles.md) for the zero-probability policy, the exact-zero guard, and how perplexity delta relates to mean KLD.
 
-## What the numbers don't say
+## What a fidelity number can't tell you
 
 - A fidelity number is **corpus- and context-length-specific**. WikiText-2 at temperature 0 measures short-prose distributional drift; the paper this builds on, *Accuracy Is Not All You Need*, shows that under-predicts task-specific and long-context degradation. Every report records the corpus and the token count so the number is never read as a bare score.
 - Perplexity delta is reported for continuity with llama.cpp. It is related to but distinct from mean KLD — it scores the realized next token and can diverge from full-vocabulary drift — so it is not independent corroboration.
 - The measured drift bundles the quantizer's error with the quantized-attention kernel's numerics. That is the real end-to-end cost; a quantizer-only control is on the roadmap.
 
-## Research notes
+## Python API
 
-- [Low-bit KV caches on MLX: what exists and what is missing](https://github.com/IonDen/mlx-quant-fidelity/blob/main/docs/papers/low-bit-kv-caches-on-mlx-what-exists-and-what-is-missing.md) — surveys mlx-lm's shipped cache, the measured 8-bit and 4-bit fidelity cost, KIVI/KVQuant-style alternatives, and the remaining MLX layout and kernel gaps.
-- [How to measure what quantization actually costs](https://github.com/IonDen/mlx-quant-fidelity/blob/main/docs/papers/how-to-measure-what-quantization-actually-costs.md) — the methods companion: teacher-forced paired scoring, streaming full-vocabulary KL on a 32 GB machine, the guards that keep a harness from passing by doing nothing, and where the verdict thresholds honestly come from.
+Each command has a function behind it that returns the same report object the CLI renders.
+
+```python
+from mlx_quant_fidelity import measure_kv_fidelity
+
+report = measure_kv_fidelity("mlx-community/Llama-3.2-3B-Instruct-4bit", kv_bits=8)
+print(report.kl.mean, report.flip_rate, report.verdict)
+```
+
+```python
+from mlx_quant_fidelity import measure_weight_fidelity
+
+# measure_weight_fidelity(quantized_repo, reference_repo)
+report = measure_weight_fidelity(
+    "mlx-community/Llama-3.2-3B-Instruct-4bit",  # quantized
+    "mlx-community/Llama-3.2-3B-Instruct-bf16",  # reference
+)
+print(report.kl.mean, report.flip_rate, report.verdict)
+```
+
+`compare_kv_fidelity` and `compare_weight_fidelity` back the two `compare` subcommands and return a `ComparisonReport`.
+
+## Further reading
+
+- [Low-bit KV caches on MLX: what exists and what is missing](https://ineshin.space/papers/low-bit-kv-caches-on-mlx-what-exists-and-what-is-missing/) — surveys mlx-lm's shipped cache, the measured 8-bit and 4-bit fidelity cost, KIVI and KVQuant-style alternatives, and the remaining MLX layout and kernel gaps.
+- [How to measure what quantization actually costs](https://github.com/IonDen/mlx-quant-fidelity/blob/main/docs/papers/how-to-measure-what-quantization-actually-costs.md) — the methods companion: teacher-forced paired scoring, streaming full-vocabulary KL on a 32 GB machine, and where the verdict thresholds honestly come from.
+- More writing at [ineshin.space](https://ineshin.space).
 
 ## Status
 
-0.5.0, released on PyPI as `mlx-quant-fidelity` — adds depth-resolved KV drift over a configurable `--chunk-length`, an auto-generated `compare kv --sweep`, and device provenance in every report. 0.4.0 added deployment mode (`--quantize-start`) and a shareable fidelity badge (`--format badge`). 0.3.x added the `compare` command for memory-normalized Pareto ranking of KV-cache and weight quantizations. Downstream-task accuracy and more are on the [roadmap](ROADMAP.md).
+0.5.1, released on PyPI as `mlx-quant-fidelity`. The measurement surface is unchanged from 0.5.0, which added depth-resolved KV drift over a configurable `--chunk-length`, an auto-generated `compare kv --sweep`, and device provenance in every report. Downstream-task accuracy and a quantizer-only control are on the [roadmap](ROADMAP.md).
 
 ## License
 

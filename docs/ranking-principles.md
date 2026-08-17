@@ -1,5 +1,7 @@
 # How to read the Pareto
 
+When you have five quantized variants and one memory budget, you need to know which ones you can rule out without testing them.
+
 `mlx-quant-fidelity compare` ranks a set of quantizations on a Pareto frontier: quality on one axis, memory cost on the other. This document explains what that means, how each axis is computed, and where the approach falls short.
 
 ## The question
@@ -37,6 +39,8 @@ Memory normalization is what makes the comparison meaningful. Without it, compar
 ## Pareto efficiency
 
 Target A dominates target B when A is no worse than B on both axes and strictly better on at least one. The Pareto frontier is the set of non-dominated targets. Dominated targets appear in the comparison report flagged with a dominator's label.
+
+![Diagram explaining domination: configuration A drifts less, with a lower mean KL divergence, and costs less, with fewer cache bytes per token. Configuration B loses on both counts, so B is dominated — worse on quality and more expensive, meaning no memory budget would make it the right pick. Ranking reports domination so options can be discarded outright instead of weighed by hand](https://raw.githubusercontent.com/IonDen/mlx-quant-fidelity/main/docs/assets/diagrams/pareto-domination.svg)
 
 A worked example: suppose you compare four weight quantizations.
 
