@@ -96,7 +96,7 @@ KV cache, M1 Max, WikiText-2 test (100 chunks of 512 tokens), stress mode (quant
 | Qwen2.5-7B | 4 | 9.36 | 0.99 | bad |
 | Qwen2.5-7B | 8 | 0.009 | 0.032 | marginal |
 
-8-bit KV is near-lossless on all three models. 4-bit is another matter, and Qwen2.5-7B at 4-bit in stress mode falls apart: nearly every token flips. This measurement establishes a checkpoint-specific failure, not its cause. mlx-lm's own generate command leaves the cache unquantized until token 5000, so those positions are computed while attention uses a full-precision cache. At the boundary, however, mlx-lm converts the entire stored prefix too. The Python API defaults differently: pass `kv_bits` to `mlx_lm.generate` and quantization starts at token 0 unless you also set `quantized_kv_start`. Run the tool first and you see the fidelity risk before deployment.
+8-bit KV costs little on all three models, though only Llama-3.2-3B clears the good tier outright. 4-bit is another matter, and Qwen2.5-7B at 4-bit in stress mode falls apart: nearly every token flips. This measurement establishes a checkpoint-specific failure, not its cause. mlx-lm's own generate command leaves the cache unquantized until token 5000, so those positions are computed while attention uses a full-precision cache. At the boundary, however, mlx-lm converts the entire stored prefix too. The Python API defaults differently: pass `kv_bits` to `mlx_lm.generate` and quantization starts at token 0 unless you also set `quantized_kv_start`. Run the tool first and you see the fidelity risk before deployment.
 
 ## Does drift change with position depth?
 
