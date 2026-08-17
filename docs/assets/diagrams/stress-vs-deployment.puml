@@ -1,0 +1,36 @@
+@startuml
+title Two ways to measure: stress and deployment
+
+top to bottom direction
+
+skinparam backgroundColor #FFFFFF
+skinparam shadowing false
+skinparam roundCorner 10
+skinparam defaultFontName Helvetica
+skinparam defaultFontColor #111827
+skinparam ArrowColor #4B5563
+skinparam ArrowFontColor #374151
+skinparam rectangle {
+  BorderColor #4B5563
+  FontColor #111827
+  BackgroundColor #F8FAFC
+}
+
+rectangle "stress  --quantize-start 0   (the default)" as stress #EDE9FE {
+  rectangle "every position\nquantized cache from the very first token" as s1 #FEF3C7
+  rectangle "scored: every position" as s2 #DCFCE7
+  s1 -down-> s2
+}
+
+rectangle "deployment  --quantize-start 5000" as deploy #EDE9FE {
+  rectangle "positions 0 to 4999\ncomputed against a full-precision cache" as d1 #DBEAFE
+  rectangle "at position 5000\nthe ENTIRE stored cache converts to quantized\nno full-precision prefix is kept" as d2 #FECACA
+  rectangle "positions 5000 and beyond\nquantized cache" as d3 #FEF3C7
+  rectangle "scored: post-boundary positions only" as d4 #DCFCE7
+  d1 -down-> d2
+  d2 -down-> d3
+  d3 -down-> d4
+}
+
+stress -[hidden]down- deploy
+@enduml
