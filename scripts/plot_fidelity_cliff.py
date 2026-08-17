@@ -171,13 +171,85 @@ def render(kv: list[CliffPoint], weights: list[CliffPoint], out_path: Path) -> N
     fig.savefig(out_path, format="svg", bbox_inches="tight")
 
 
+OG_PATH = REPO_ROOT / "docs" / "assets" / "social" / "og-card.png"
+
+
+def render_og_card(kv: list[CliffPoint], out_path: Path) -> None:
+    """Draw the 1280x640 Open Graph social card.
+
+    A single-panel version of the KV cliff with the project name, sized for the
+    link previews GitHub, X, and Hacker News render. Band, boundary-line, and
+    z-order treatment match ``render()`` so the two images ship as one visual set.
+
+    Args:
+        kv: KV-cache panel points to plot.
+        out_path: Destination PNG path.
+    """
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    fig = plt.figure(figsize=(12.8, 6.4), dpi=100)
+    fig.patch.set_facecolor("#FFFFFF")
+    ax = fig.add_axes((0.36, 0.13, 0.60, 0.58))
+
+    labels = [p.label.replace(" · ", "\n") for p in kv]
+    values = [p.kl_mean for p in kv]
+    colors = [VERDICT_COLORS[p.verdict] for p in kv]
+    positions = range(len(kv))
+
+    ax.axvspan(1e-6, KV_BANDS[0], color="#16A34A", alpha=0.14, zorder=0)
+    ax.axvspan(KV_BANDS[0], KV_BANDS[1], color="#CA8A04", alpha=0.14, zorder=0)
+    ax.axvspan(KV_BANDS[1], 1e2, color="#DC2626", alpha=0.14, zorder=0)
+    for boundary in KV_BANDS:
+        ax.axvline(boundary, color="#6B7280", alpha=0.5, linewidth=0.8, linestyle="--")
+
+    ax.barh(list(positions), values, color=colors, height=0.62, zorder=2)
+    ax.set_yticks(list(positions), labels, fontsize=13)
+    ax.set_xscale("log")
+    ax.set_xlim(1e-5, 2e1)
+    ax.invert_yaxis()
+    ax.set_xlabel("mean KL divergence (log scale) — lower is better", fontsize=12)
+    ax.tick_params(axis="x", labelsize=10)
+    ax.grid(axis="x", alpha=0.25, linewidth=0.5)
+    for spine in ("top", "right"):
+        ax.spines[spine].set_visible(False)
+
+    outlier = max(kv, key=lambda p: p.kl_mean)
+    ax.annotate(
+        f"KL ≈ {outlier.kl_mean:.1f}",
+        xy=(outlier.kl_mean, kv.index(outlier)),
+        xytext=(-10, 0),
+        textcoords="offset points",
+        ha="right",
+        va="center",
+        fontsize=14,
+        weight="bold",
+        color="#FFFFFF",
+    )
+
+    fig.text(0.05, 0.87, "mlx-quant-fidelity", fontsize=38, weight="bold", color="#111827")
+    fig.text(
+        0.05,
+        0.79,
+        "Measure what a quantization actually costs, on Apple Silicon.",
+        fontsize=16,
+        color="#374151",
+    )
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path, format="png", facecolor="#FFFFFF")
+
+
 def main() -> None:
-    """Collect the committed samples and render the chart."""
+    """Collect the committed samples and render the chart and social card."""
     samples = REPO_ROOT / "_artifacts" / "samples"
     kv = collect_kv_points(samples)
     weights = collect_weight_points(samples / "weights")
     render(kv, weights, OUT_PATH)
     print(f"wrote {OUT_PATH.relative_to(REPO_ROOT)} — {len(kv)} KV, {len(weights)} weight points")
+    render_og_card(kv, OG_PATH)
+    print(f"wrote {OG_PATH.relative_to(REPO_ROOT)}")
 
 
 if __name__ == "__main__":
