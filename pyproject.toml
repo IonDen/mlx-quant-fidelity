@@ -47,6 +47,7 @@ Roadmap = "https://github.com/IonDen/mlx-quant-fidelity/blob/main/ROADMAP.md"
 test = ["pytest>=8.3", "pytest-cov>=5.0", "hypothesis>=6.130"]
 typecheck = ["mypy>=1.13"]
 lint = ["ruff>=0.7"]
+docs = ["matplotlib>=3.9"]
 dev = [
   { include-group = "test" },
   { include-group = "typecheck" },
