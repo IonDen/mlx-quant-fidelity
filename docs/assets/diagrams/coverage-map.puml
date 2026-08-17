@@ -1,0 +1,36 @@
+@startuml
+title Where quantization changes your model's answers
+
+top to bottom direction
+
+skinparam backgroundColor #FFFFFF
+skinparam shadowing false
+skinparam roundCorner 10
+skinparam defaultFontName Helvetica
+skinparam defaultFontColor #111827
+skinparam ArrowColor #4B5563
+skinparam ArrowFontColor #374151
+skinparam rectangle {
+  BorderColor #4B5563
+  FontColor #111827
+  BackgroundColor #F8FAFC
+}
+
+rectangle "A quantized model, running" as model #DBEAFE
+
+rectangle "Weights on disk\nfixed when the repo was quantized\nq4 / q6 / q8 safetensors" as weights #FEF3C7
+rectangle "KV cache in memory\nchosen at run time, grows with every token" as kv #FEF3C7
+
+rectangle "mlx-quant-fidelity weights\nquantized repo vs higher-precision repo" as cmdw #DCFCE7
+rectangle "mlx-quant-fidelity kv\nfull-precision cache vs quantized cache" as cmdk #DCFCE7
+rectangle "mlx-quant-fidelity compare\nranks configurations by quality per byte" as cmdc #EDE9FE
+
+model -down-> weights : precision lost once,\nbefore you downloaded it
+model -down-> kv : precision lost continuously,\nwhile you generate
+
+weights -down-> cmdw : measure with
+kv -down-> cmdk : measure with
+
+cmdw -down-> cmdc
+cmdk -down-> cmdc
+@enduml
