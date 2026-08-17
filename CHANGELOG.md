@@ -3,6 +3,19 @@
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.1] - 2026-08-17
+
+Documentation release: a rewritten README, diagrams for the measurement model, and a fidelity chart rendered from the committed sample reports.
+
+### Changed
+
+- Rewrote the README around the three questions the tool answers: what a quantization you are about to run costs, which configuration fits a memory budget, and what to publish alongside a quantized model.
+- Added diagrams for where precision is lost, how stress and deployment measurement differ, and what it means for one configuration to dominate another.
+- Added a fidelity chart rendered from the committed sample reports by `scripts/plot_fidelity_cliff.py`, so every plotted number is reproducible from committed data.
+- Refreshed package metadata and promoted the development status to Beta.
+
+No change to measurement behavior. Reports produced by 0.5.1 are identical to 0.5.0.
+
 ## [0.5.0] - 2026-08-10
 
 Adds depth-resolved KV drift over a configurable window, an auto-generated `compare kv` sweep, and device provenance in every report.

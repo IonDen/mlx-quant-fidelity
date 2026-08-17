@@ -2,7 +2,7 @@
 
 Comparing quantizations only helps if it tells you which ones you can drop before you test them.
 
-`mlx-quant-fidelity compare` ranks a set of quantizations on a Pareto frontier: quality on one axis, memory cost on the other. This document explains what that means, how each axis is computed, and where the approach falls short.
+`mlx-quant-fidelity compare` ranks a set of quantizations on a Pareto frontier: quality on one axis, memory cost on the other.
 
 ## The question
 

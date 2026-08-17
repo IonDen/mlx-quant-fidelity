@@ -2,7 +2,7 @@
 
 You have a drift number and you want to know exactly what was run to produce it.
 
-`mlx-quant-fidelity` measures the gap between a quantized model and its reference by running both on the same tokens and comparing their next-token distributions position by position. What follows explains the mechanics, the implementation choices, and where the numbers stop being useful.
+`mlx-quant-fidelity` measures the gap between a quantized model and its reference by running both on the same tokens and comparing their next-token distributions position by position.
 
 ## Teacher-forced paired scoring, not generation
 
@@ -21,7 +21,7 @@ Both passes receive the same `inp`. This is teacher-forced scoring: the corpus t
 
 Generation would break this. The moment quantization changes a sampled token, the next pass receives different input, and the divergence compounds. What you end up measuring is trajectory drift, not cache cost. The llama.cpp `--kl-divergence-base` flag works the same way: it scores a forward pass over fixed text, not a generation.
 
-Logits are large. A single position over a 128k-token vocabulary is half a megabyte in fp32. The chunk loop collapses logits to per-position scalars (`kl_divergence`, `top_token_flips`, `token_nll`) and calls `mx.eval` before moving on, letting the vocab-wide tensors go out of scope. Accumulating them across a corpus would require roughly 125 GB — four times the machine. Holding full next-token distributions for the corpus would require roughly 125 GB in fp32 — four times the machine — so each position is reduced to scalars as the probe goes, keeping memory flat across the corpus.
+Logits are large. A single position over a 128k-token vocabulary is half a megabyte in fp32, and holding full next-token distributions for the whole corpus would require roughly 125 GB — four times the machine. The chunk loop collapses logits to per-position scalars (`kl_divergence`, `top_token_flips`, `token_nll`) and calls `mx.eval` before moving on, letting the vocab-wide tensors go out of scope, so memory stays flat across the corpus.
 
 Two modes are available. Stress mode (`quantize_start=0`, the default): quantization begins at token 0 and both caches start empty, so the probe measures pure quantizer cost from the first position. Deployment mode (`quantize_start > 0`): the first N positions are computed with a full-precision cache, then the entire stored cache converts at position N. The section at the end of this document covers what each mode measures and where the numbers stop being comparable.
 
