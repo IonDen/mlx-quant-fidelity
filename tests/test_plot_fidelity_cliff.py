@@ -18,6 +18,21 @@ def _load_module():
     return module
 
 
+def _find_module_scope_imports(node: ast.AST) -> list[ast.Import | ast.ImportFrom]:
+    # Recurses into compound statements (If/Try/For/While/With, ...) so an import
+    # nested one level down at module scope is still caught, but does not recurse
+    # into FunctionDef/AsyncFunctionDef/ClassDef bodies — imports genuinely scoped
+    # inside a function (e.g. render()) are not module-scope imports.
+    found: list[ast.Import | ast.ImportFrom] = []
+    for child in ast.iter_child_nodes(node):
+        if isinstance(child, (ast.Import, ast.ImportFrom)):
+            found.append(child)
+        if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            continue
+        found.extend(_find_module_scope_imports(child))
+    return found
+
+
 def test_matplotlib_is_not_imported_at_module_scope():
     # render() imports matplotlib lazily so the collectors stay usable without the
     # dev-only `docs` group. This asserts the source, not the runtime: once the docs
@@ -25,7 +40,7 @@ def test_matplotlib_is_not_imported_at_module_scope():
     source = (REPO_ROOT / "scripts" / "plot_fidelity_cliff.py").read_text()
     tree = ast.parse(source)
     offenders = []
-    for node in tree.body:  # module scope only, not function bodies
+    for node in _find_module_scope_imports(tree):
         if isinstance(node, ast.Import):
             offenders += [a.name for a in node.names if a.name.startswith("matplotlib")]
         elif isinstance(node, ast.ImportFrom) and (node.module or "").startswith("matplotlib"):
@@ -67,8 +82,12 @@ def test_collect_kv_points_ignores_long_window_variants(tmp_path):
 
 
 def test_collect_kv_points_sorts_by_bits_then_label(tmp_path):
+    # Filenames are alphabetically the OPPOSITE of the intended bits order (the
+    # bits=4 fixture sorts last, bits=8 sorts first), so only the collector's own
+    # `sorted(points, key=lambda p: (p.bits, p.label))` can produce [4, 8] — the
+    # directory-glob's alphabetical file order alone would yield [8, 4].
     module = _load_module()
-    for bits, name in ((8, "b"), (4, "a")):
+    for bits, name in ((8, "a"), (4, "z")):
         payload = {
             "model_id": f"mlx-community/{name}",
             "kv_bits": bits,
@@ -112,3 +131,16 @@ def test_real_committed_samples_are_readable():
     assert len(kv) == 6
     assert len(weights) == 5
     assert all(p.kl_mean > 0 for p in kv + weights)
+
+    # Spot-check one specific committed file's literal mean-KLD field end to end, so
+    # a field mix-up (e.g. reading p99 instead of mean) is caught independently of
+    # the synthetic fixtures above, which all use single-field payloads. The
+    # expected value is read from the JSON itself, not hardcoded, so it cannot rot.
+    known_path = REPO_ROOT / "_artifacts" / "samples" / "llama-3.2-1b-4bit-kv4.json"
+    known_data = json.loads(known_path.read_text())
+    expected_label = (
+        f"{module._short_model_name(known_data['model_id'])} · {known_data['kv_bits']}-bit KV"
+    )
+    matching = [p for p in kv if p.label == expected_label]
+    assert len(matching) == 1
+    assert matching[0].kl_mean == known_data["kl"]["mean"]
