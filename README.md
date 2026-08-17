@@ -8,49 +8,64 @@
 [![Python versions](https://img.shields.io/pypi/pyversions/mlx-quant-fidelity.svg)](https://pypi.org/project/mlx-quant-fidelity/)
 [![License: Apache-2.0](https://img.shields.io/pypi/l/mlx-quant-fidelity.svg)](https://github.com/IonDen/mlx-quant-fidelity/blob/main/LICENSE)
 
-Measure how much quality a quantization costs on Apple Silicon. `mlx-quant-fidelity` scores a quantized model against a higher-precision reference on the same corpus and reports the drift as numbers you can act on: KL divergence, top-token flip rate, perplexity delta. It measures both **KV-cache quantization** and **weight quantization**. No more choosing a bit-width by file size.
+You install a 4-bit model. It loads, it answers, the prose reads fine. Nothing in the logs suggests otherwise.
 
-The CUDA/GGUF world has had this for years: llama.cpp's `--kl-divergence-base`, EleutherAI's `lm-evaluation-harness`. MLX had nothing. This is the MLX version, and it covers the KV-cache and attention angle those tools skip.
+On Qwen2.5-7B with a 4-bit KV cache active from the first token, 99% of next-token choices come out different from the same model running a full-precision cache. The text is still fluent English — that is exactly the problem. A quantization failure does not announce itself, and file size tells you nothing about it.
 
-## Install
+`mlx-quant-fidelity` runs the same text through your model twice, once quantized and once not, and reports how far apart the two ended up: KL divergence, top-token flip rate, perplexity delta. It covers both **KV-cache quantization** and **weight quantization**.
+
+The CUDA and GGUF world has had this for years — llama.cpp's `--kl-divergence-base`, EleutherAI's `lm-evaluation-harness`. MLX had nothing, and neither of those covers the KV-cache and attention angle.
+
+## Try it in thirty seconds
 
 ```bash
 pip install mlx-quant-fidelity
-```
-
-Apple Silicon (MLX), Python 3.11+.
-
-## Use it
-
-```bash
 mlx-quant-fidelity kv mlx-community/Llama-3.2-3B-Instruct-4bit --kv-bits 8
 ```
 
-Prints a Markdown report. Add `--format json` for JSON, `--format badge` for a shields.io badge line, `--kv-bits 4`, `--kv-group-size 64`, `--max-chunks N` to bound the corpus, or `--chunk-length N` (up to 4096, default 512) for a longer window and a depth-resolved drift table.
+```
+# KV-fidelity: `mlx-community/Llama-3.2-3B-Instruct-4bit` @ 8-bit (group 64)
 
-```python
-from mlx_quant_fidelity import measure_kv_fidelity
+**Verdict:** good · **mode:** stress (quantize_start=0)
 
-report = measure_kv_fidelity("mlx-community/Llama-3.2-3B-Instruct-4bit", kv_bits=8)
-print(report.kl.mean, report.flip_rate, report.verdict)
+| metric | value |
+|---|---|
+| KL mean | 0.0002 nats |
+| KL p99 | 0.0015 nats |
+| flip rate | 0.0065 |
+| perplexity Δ | +0.0054 (17.722 → 17.728) |
 ```
 
-Or measure **weight** quantization — a quantized repo against a higher-precision reference:
+That model at 8-bit KV is safe to ship. Apple Silicon, Python 3.11+.
+
+## Does this apply to you?
+
+Precision gets lost in two different places, at two different times, and they need two different commands.
+
+![Diagram: a running quantized model loses precision in two places. Weights on disk were quantized once, before download, and are measured by `mlx-quant-fidelity weights`, which scores a quantized repo against a higher-precision repo. The KV cache is quantized continuously at run time as the cache grows with every token, and is measured by `mlx-quant-fidelity kv`, which scores a full-precision cache against a quantized one. Both feed `mlx-quant-fidelity compare`, which ranks configurations by quality per byte](https://raw.githubusercontent.com/IonDen/mlx-quant-fidelity/main/docs/assets/diagrams/coverage-map.svg)
+
+**"I'm about to run a quantized model and I want to know what I gave up."**
 
 ```bash
+mlx-quant-fidelity kv mlx-community/Llama-3.2-3B-Instruct-4bit --kv-bits 4
 mlx-quant-fidelity weights mlx-community/Llama-3.2-3B-Instruct-4bit --reference mlx-community/Llama-3.2-3B-Instruct-bf16
 ```
 
-```python
-from mlx_quant_fidelity import measure_weight_fidelity
+**"I need this model to fit in my RAM and I don't know which setting to cut."**
 
-# measure_weight_fidelity(quantized_repo, reference_repo)
-report = measure_weight_fidelity(
-    "mlx-community/Llama-3.2-3B-Instruct-4bit",  # quantized
-    "mlx-community/Llama-3.2-3B-Instruct-bf16",  # reference
-)
-print(report.kl.mean, report.flip_rate, report.verdict)
+```bash
+mlx-quant-fidelity compare kv <model> --sweep --max-kv-bytes-per-token 200
 ```
+
+Builds the whole bits-by-group-size grid from the model's `config.json`, drops anything over your memory budget, and ranks what's left by quality per byte. No weights downloaded to do it.
+
+**"I publish quantized models and I want to show they're good."**
+
+```bash
+mlx-quant-fidelity kv <model> --kv-bits 8 --format badge
+```
+
+Prints one shields.io line for your model card. Green, amber, or red, with the bit width, corpus, and mode baked into the label so two badges are never confused.
 
 ## What a report looks like
 
