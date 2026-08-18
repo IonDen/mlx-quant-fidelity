@@ -68,7 +68,7 @@ For `--max-kld`, this restriction costs nothing: if a dominated target clears th
 
 For `--min-tier`, the situation is different. Tier qualification uses the full verdict — mean KLD, p99, and flip rate together — while domination is decided on mean KLD alone. A dominated target can pass the tier check while its frontier dominator fails it (because the dominator has a worse p99 or flip rate despite its mean KLD being no worse). When that happens, the tool returns no pick rather than recommending a dominated target. The comparison table shows tiers for all targets so you can decide.
 
-To pick a threshold: start by reading the comparison table. If all frontier targets have acceptable quality, take the cheapest one. To put a number on "acceptable," use `--max-kld` with a threshold from the reference runs in the README — for example, 0.01 nats is roughly in the range of 8-bit weight quantization on Llama-3 models.
+To pick a threshold: start by reading the comparison table. If all frontier targets have acceptable quality, take the cheapest one. To put a number on "acceptable," use `--max-kld` with a threshold from [docs/threshold-policy.md](threshold-policy.md) — for example, 0.01 nats is the mean-KLD ceiling a `good` verdict has to clear. The 8-bit weight measurements in the README land about ten times below it.
 
 ## Interpretation and limits
 

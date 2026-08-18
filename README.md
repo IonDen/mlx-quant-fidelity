@@ -100,7 +100,14 @@ KV cache, M1 Max, WikiText-2 test (100 chunks of 512 tokens), stress mode (quant
 
 ## Does drift change with position depth?
 
-`--chunk-length 4096` widens the window and adds a table breaking mean and p99 KLD down by position depth within a chunk. Llama-3.2-1B at 4-bit KV, M1 Max, WikiText-2 test (12 chunks of 4096 tokens, the same ~50k-token corpus coverage as the 512-token samples above):
+`--chunk-length 4096` widens the window and adds a table breaking mean and p99 KLD down by position depth within a chunk.
+
+```bash
+mlx-quant-fidelity kv mlx-community/Llama-3.2-1B-Instruct-4bit \
+  --kv-bits 4 --chunk-length 4096 --max-chunks 12
+```
+
+Llama-3.2-1B at 4-bit KV, M1 Max, WikiText-2 test (12 chunks of 4096 tokens, the same ~50k-token corpus coverage as the 512-token samples above):
 
 | positions | KL mean | KL p99 |
 |---|---|---|
@@ -127,7 +134,7 @@ Same corpus and recipe, but the comparison is now a quantized model repo against
 | Llama-3.2-3B | 8-bit | bf16 | 0.0009 | 0.021 | 0.00 | good |
 | Qwen2.5-7B | 4-bit | 8-bit | 0.109 | 0.16 | +0.9 | marginal |
 
-8-bit weights are near-lossless: about 2% of top tokens flip and perplexity barely moves. 4-bit is a real trade: 15 to 21% of top tokens flip and perplexity climbs a point or more, worst on the small 1B model. The Qwen row compares 4-bit against 8-bit rather than bf16, so its drift is relative to an already-quantized reference, not full precision; the report records that the reference is 8-bit and says so in plain text. The verdict tiers are provisional, anchored to these q8 and q4 reference points on short prose rather than to downstream task accuracy.
+8-bit weights are near-lossless: about 2% of top tokens flip and perplexity barely moves. 4-bit is a real trade: 15 to 21% of top tokens flip and perplexity climbs by 0.9 to 3.5 points, worst on the small 1B model. The Qwen row compares 4-bit against 8-bit rather than bf16, so its drift is relative to an already-quantized reference, not full precision; the report records that the reference is 8-bit and says so in plain text. The verdict tiers are provisional, anchored to these q8 and q4 reference points on short prose rather than to downstream task accuracy.
 
 Unlike the KV probe, both runs use standard attention, so the drift is the deployed quantized model's weight-quant cost with no quantized-attention kernel folded in. It does still include the quantized-matmul kernel's numerics, which is exactly what you run when you load the model.
 
