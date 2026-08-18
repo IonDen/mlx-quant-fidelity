@@ -56,6 +56,8 @@ def test_collect_kv_points_reads_committed_samples(tmp_path):
         "kl": {"mean": 0.148, "median": 0.1, "p99": 0.9, "max": 5.0},
         "flip_rate": 0.2,
         "verdict": "bad",
+        "corpus": {"chunk_length": 512},
+        "quantize_mode": "stress",
     }
     (tmp_path / "llama-3.2-1b-4bit-kv4.json").write_text(json.dumps(sample))
 
@@ -68,13 +70,28 @@ def test_collect_kv_points_reads_committed_samples(tmp_path):
     assert "Llama-3.2-1B" in points[0].label
 
 
-def test_collect_kv_points_ignores_long_window_variants(tmp_path):
-    # The cl4096 samples measure a different chunk length; mixing them into a
-    # chart captioned "512-token chunks" would misattribute the numbers.
+def test_collect_kv_points_ignores_off_recipe_samples(tmp_path):
+    # The chart is captioned "512-token chunks, quantized from the first token",
+    # so a sample at another chunk length or in deployment mode would be
+    # misattributed. The filenames here deliberately carry NO "-cl4096" marker:
+    # only a filter reading corpus.chunk_length and quantize_mode can reject
+    # them, so a filename-matching implementation fails this test.
     module = _load_module()
-    base = {"model_id": "m", "kv_bits": 4, "kl": {"mean": 0.1}, "flip_rate": 0.2, "verdict": "bad"}
-    (tmp_path / "llama-3.2-1b-4bit-kv4.json").write_text(json.dumps(base))
-    (tmp_path / "llama-3.2-1b-4bit-kv4-cl4096.json").write_text(json.dumps(base))
+
+    def sample(chunk_length, mode):
+        return {
+            "model_id": "m",
+            "kv_bits": 4,
+            "kl": {"mean": 0.1},
+            "flip_rate": 0.2,
+            "verdict": "bad",
+            "corpus": {"chunk_length": chunk_length},
+            "quantize_mode": mode,
+        }
+
+    (tmp_path / "keep.json").write_text(json.dumps(sample(512, "stress")))
+    (tmp_path / "wide.json").write_text(json.dumps(sample(2048, "stress")))
+    (tmp_path / "deploy.json").write_text(json.dumps(sample(512, "deployment")))
 
     points = module.collect_kv_points(tmp_path)
 
@@ -94,6 +111,8 @@ def test_collect_kv_points_sorts_by_bits_then_label(tmp_path):
             "kl": {"mean": 0.01},
             "flip_rate": 0.0,
             "verdict": "good",
+            "corpus": {"chunk_length": 512},
+            "quantize_mode": "stress",
         }
         (tmp_path / f"{name}-kv{bits}.json").write_text(json.dumps(payload))
 

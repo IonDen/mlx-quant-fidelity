@@ -10,7 +10,7 @@ When you have several quantizations of the same model — q4, q6, and q8 weights
 
 Raw metric sorting does not answer that. Sorting by KL divergence alone picks the best quality regardless of cost, which tells you nothing you didn't already know (more bits = lower KLD). Sorting by size alone ignores quality. Neither tells you whether q6 is a meaningful step up from q4 or barely different.
 
-The useful question: are there any quantizations on the list that are both worse quality and more expensive than another option on the same list? Those are strictly dominated — you would never choose them. The remaining candidates form the Pareto frontier, where every point gives up something compared to its neighbors.
+The useful question: are there any quantizations on the list that another option matches or beats on both quality and cost, and beats on at least one? Those are strictly dominated — you would never choose them. The remaining candidates form the Pareto frontier, where every point gives up something compared to its neighbors.
 
 ## The quality axis
 
@@ -40,7 +40,7 @@ Memory normalization is what makes the comparison meaningful. Without it, compar
 
 Target A dominates target B when A is no worse than B on both axes and strictly better on at least one. The Pareto frontier is the set of non-dominated targets. Dominated targets appear in the comparison report flagged with a dominator's label.
 
-![Diagram explaining domination: configuration A drifts less, with a lower mean KL divergence, and costs less, with fewer cache bytes per token. Configuration B loses on both counts, so B is dominated — worse on quality and more expensive, meaning no memory budget would make it the right pick. Ranking reports domination so options can be discarded outright instead of weighed by hand](https://raw.githubusercontent.com/IonDen/mlx-quant-fidelity/main/docs/assets/diagrams/pareto-domination.svg)
+![Diagram explaining domination: configuration A is no worse than B on quality, its mean KL divergence being no higher, and no worse on cost, its cache bytes per token being no higher. B wins on neither axis while A beats it on at least one, so B is dominated and no memory budget would make it the right pick. Ranking reports domination so options can be discarded outright instead of weighed by hand](https://raw.githubusercontent.com/IonDen/mlx-quant-fidelity/main/docs/assets/diagrams/pareto-domination.svg)
 
 A worked example: suppose you compare four weight quantizations.
 
@@ -51,7 +51,7 @@ A worked example: suppose you compare four weight quantizations.
 | q4 | 0.09 | 4.2 GB |
 | q4-bad | 0.20 | 4.3 GB |
 
-q4-bad has worse quality than q4 (KLD 0.20 vs 0.09) and costs more bytes (4.3 vs 4.2 GB). q4 dominates q4-bad: you would never choose q4-bad. The frontier is {q4, q6, q8}. Each is the cheapest way to achieve at least that quality level; none dominates another.
+q4-bad has worse quality than q4 (KLD 0.20 vs 0.09) and costs more bytes (4.3 vs 4.2 GB), so q4 dominates it on both axes at once — you would never choose q4-bad. A tie on one axis is enough: had q4-bad matched q4's KLD exactly and still cost more, it would be dominated just the same. The frontier is {q4, q6, q8}. Each is the cheapest way to achieve at least that quality level; none dominates another.
 
 The tool does not pick a single "knee" from the frontier automatically. Where the knee sits depends on how you weight quality against cost, and choosing that weighting is a value judgment the tool deliberately leaves to you.
 

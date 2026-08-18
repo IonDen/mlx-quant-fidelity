@@ -48,8 +48,10 @@ def _short_model_name(model_id: str) -> str:
 def collect_kv_points(samples_dir: Path) -> list[CliffPoint]:
     """Collect KV-cache measurements from committed sample reports.
 
-    Long-window ``-cl4096`` variants are excluded: they measure a different chunk
-    length, and mixing them into one chart would misattribute the numbers.
+    Only default-window stress runs are charted. A sample measured at another
+    chunk length, or in deployment mode, is excluded: the chart is captioned
+    "512-token chunks, quantized from the first token", so mixing one in would
+    misattribute the numbers.
 
     Args:
         samples_dir: Directory of committed ``kv`` sample JSON reports.
@@ -59,10 +61,10 @@ def collect_kv_points(samples_dir: Path) -> list[CliffPoint]:
     """
     points: list[CliffPoint] = []
     for path in sorted(samples_dir.glob("*.json")):
-        if path.stem.endswith("-cl4096"):
-            continue
         data: dict[str, Any] = json.loads(path.read_text())
         if "kv_bits" not in data:
+            continue
+        if data["corpus"]["chunk_length"] != 512 or data["quantize_mode"] != "stress":
             continue
         points.append(
             CliffPoint(
@@ -240,6 +242,22 @@ def render_og_card(kv: list[CliffPoint], out_path: Path) -> None:
         "Measure what a quantization actually costs, on Apple Silicon.",
         fontsize=16,
         color="#374151",
+    )
+    fig.text(
+        0.05,
+        0.40,
+        "KV-cache quantization\nWikiText-2, 512-token chunks\nquantized from the first token\nApple M1 Max",
+        fontsize=13,
+        color="#374151",
+        linespacing=1.6,
+    )
+    fig.text(
+        0.05,
+        0.13,
+        "The 4-bit outlier is one checkpoint,\nnot a general 4-bit result.",
+        fontsize=11,
+        color="#6B7280",
+        linespacing=1.5,
     )
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_path, format="png", facecolor="#FFFFFF")

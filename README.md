@@ -10,7 +10,7 @@
 
 You install a 4-bit model. It loads, it answers, the prose reads fine. Nothing in the logs suggests otherwise.
 
-On Qwen2.5-7B with a 4-bit KV cache active from the first token, 99% of next-token choices come out different from the same model running a full-precision cache. Quantizing from token zero is the harshest way to measure, and it is not what you get by default: mlx-lm's own generate command leaves the cache unquantized until token 5000. The text is still fluent English — that is exactly the problem. A quantization failure does not announce itself, and file size tells you nothing about it.
+On Qwen2.5-7B with a 4-bit KV cache active from the first token, 99% of next-token choices come out different from the same model running a full-precision cache. Quantizing from token zero is the harshest way to measure, and it is not what you get by default: mlx-lm's own generate command leaves the cache unquantized until token 5000. Nothing about installing that model, or setting that flag, surfaces a number like 99%. A quantization failure does not announce itself, and file size tells you nothing about it.
 
 `mlx-quant-fidelity` runs the same text through your model twice, once quantized and once not, and reports how far apart the two ended up: KL divergence, top-token flip rate, perplexity delta. It covers both **KV-cache quantization** and **weight quantization**.
 
@@ -20,7 +20,7 @@ The CUDA and GGUF world has had this for years — llama.cpp's `--kl-divergence-
 
 ```bash
 pip install mlx-quant-fidelity
-mlx-quant-fidelity kv mlx-community/Llama-3.2-3B-Instruct-4bit --kv-bits 8
+mlx-quant-fidelity kv mlx-community/Llama-3.2-3B-Instruct-4bit --kv-bits 8 --max-chunks 100
 ```
 
 ```
@@ -31,12 +31,28 @@ mlx-quant-fidelity kv mlx-community/Llama-3.2-3B-Instruct-4bit --kv-bits 8
 | metric | value |
 |---|---|
 | KL mean | 0.0002 nats |
+| KL median | 0.0001 nats |
 | KL p99 | 0.0015 nats |
+| KL max | 0.1129 nats |
 | flip rate | 0.0065 |
 | perplexity Δ | +0.0054 (17.722 → 17.728) |
+
+Measured on **wikitext-2-raw/test**, 51100 positions across 100 chunks of length 512 (tokenizer `mlx-community/Llama-3.2-3B-Instruct-4bit`).
+
+...
 ```
 
-That model at 8-bit KV is safe to ship on this corpus. Apple Silicon, Python 3.11+.
+That model at 8-bit KV clears the good tier on this corpus. Apple Silicon, Python 3.11+.
+
+### Common options
+
+- `--kv-bits` / `--kv-group-size` — the KV configuration to score, default `4` / `64`. The `4:32,4:64` shorthand in `compare kv --configs` is `bits:group_size`.
+- `--max-chunks N` — score only the first N corpus chunks. Every number in this README uses `--max-chunks 100`; leave it off and the run covers the whole WikiText-2 test split.
+- `--chunk-length N` — the scoring window, default 512, hard ceiling 4096.
+- `--quantize-start N` — `0` for stress mode, the default; any N above 0 for deployment mode.
+- `--format json|md|badge` — `md` by default. `json` is the machine-readable form the reports under [`_artifacts/samples/`](_artifacts/samples) are written in, and `badge` works on `weights` as well as `kv`. The two `compare` subcommands take `json` and `md` only.
+
+Both cost something to run. The quickstart pulls roughly 1.8 GB of weights plus the corpus on first use, and a wider window costs memory rather than time: the 4096-token run further down peaks at 13.53 GiB, so it will not fit a 16 GB machine. [docs/measurement-principles.md](docs/measurement-principles.md#drift-by-position-depth) lists the measured peak for every window length and explains the pre-flight that refuses one too large for your device.
 
 ## Does this apply to you?
 
@@ -65,7 +81,7 @@ Builds the whole bits-by-group-size grid from the model's `config.json`, drops a
 mlx-quant-fidelity kv <model> --kv-bits 8 --format badge
 ```
 
-Prints one shields.io line for your model card. Green, yellow, or red, with the bit width, corpus, chunk length, and mode baked into the message, so two badges are never confused.
+Prints one shields.io line for your model card. Green, yellow, or red, with the bit width, corpus, chunk length, and mode baked into the message, so two badges from the same model at different configurations are distinguishable at a glance.
 
 ## Badge output
 
@@ -100,7 +116,7 @@ KV cache, M1 Max, WikiText-2 test (100 chunks of 512 tokens), stress mode (quant
 
 ## Does drift change with position depth?
 
-`--chunk-length 4096` widens the window and adds a table breaking mean and p99 KLD down by position depth within a chunk.
+Every stress-mode report already breaks mean and p99 KLD down by position depth within a chunk. `--chunk-length 4096` widens the window so those buckets span more positions.
 
 ```bash
 mlx-quant-fidelity kv mlx-community/Llama-3.2-1B-Instruct-4bit \
@@ -140,9 +156,9 @@ Unlike the KV probe, both runs use standard attention, so the drift is the deplo
 
 ## Comparing quantizations
 
-`compare` ranks a set of quantizations on a memory-normalized Pareto frontier: quality (mean KL divergence) on one axis, memory cost on the other. It identifies any configuration that is both worse quality and more expensive than another option on the list — those are dominated and you would never choose them.
+`compare` ranks a set of quantizations on a memory-normalized Pareto frontier: quality (mean KL divergence) on one axis, memory cost on the other. It identifies any configuration that another option on the list matches or beats on both axes and beats on at least one — those are dominated and you would never choose them.
 
-![Diagram explaining domination: configuration A drifts less, with a lower mean KL divergence, and costs less, with fewer cache bytes per token. Configuration B loses on both counts, so B is dominated — worse on quality and more expensive, meaning no memory budget would make it the right pick. Ranking reports domination so options can be discarded outright instead of weighed by hand](https://raw.githubusercontent.com/IonDen/mlx-quant-fidelity/main/docs/assets/diagrams/pareto-domination.svg)
+![Diagram explaining domination: configuration A is no worse than B on quality, its mean KL divergence being no higher, and no worse on cost, its cache bytes per token being no higher. B wins on neither axis while A beats it on at least one, so B is dominated and no memory budget would make it the right pick. Ranking reports domination so options can be discarded outright instead of weighed by hand](https://raw.githubusercontent.com/IonDen/mlx-quant-fidelity/main/docs/assets/diagrams/pareto-domination.svg)
 
 ```bash
 # rank weight quantizations against a bf16 reference
