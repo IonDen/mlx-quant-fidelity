@@ -3,6 +3,8 @@
 *A research memo from `mlx-quant-fidelity`: the design of an honest quantization-fidelity
 measurement, and the specific ways the obvious harness lies*
 
+> 📄 [Read on the website](https://ineshin.space/papers/how-to-measure-what-quantization-actually-costs/) — same paper, formatted for reading.
+
 Ask what 4-bit quantization costs a model and the obvious measurement plan writes itself:
 generate some text with and without quantization, compare, seed everything for reproducibility,
 keep the logits around for analysis, and report an average score. Every step of that plan hides

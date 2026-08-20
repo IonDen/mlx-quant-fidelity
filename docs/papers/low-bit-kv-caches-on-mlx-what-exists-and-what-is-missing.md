@@ -3,6 +3,8 @@
 *A research memo from `mlx-quant-fidelity`: the shipped state of KV-cache quantization
 on Apple Silicon, what it measurably costs, and where the real gaps are*
 
+> 📄 [Read on the website](https://ineshin.space/papers/low-bit-kv-caches-on-mlx-what-exists-and-what-is-missing/) — same paper, formatted for reading.
+
 Low-bit KV caches already ship on Apple Silicon. [mlx-lm](https://github.com/ml-explore/mlx-lm)
 provides a drop-in, calibration-free `QuantizedKVCache` behind three generation CLI flags. It
 works on standard attention paths when the cache type supports conversion. New proposals should
