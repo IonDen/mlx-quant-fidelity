@@ -224,7 +224,7 @@ print(report.kl.mean, report.flip_rate, report.verdict)
 ## Further reading
 
 - [Low-bit KV caches on MLX: what exists and what is missing](https://ineshin.space/papers/low-bit-kv-caches-on-mlx-what-exists-and-what-is-missing/) — surveys mlx-lm's shipped cache, the measured 8-bit and 4-bit fidelity cost, KIVI and KVQuant-style alternatives, and the remaining MLX layout and kernel gaps.
-- [How to measure what quantization actually costs](https://github.com/IonDen/mlx-quant-fidelity/blob/main/docs/papers/how-to-measure-what-quantization-actually-costs.md) — the methods companion: teacher-forced paired scoring, streaming full-vocabulary KL on a 32 GB machine, the guards that keep a harness from passing by doing nothing, and where the verdict thresholds honestly come from.
+- [How to measure what quantization actually costs](https://ineshin.space/papers/how-to-measure-what-quantization-actually-costs/) — the methods companion: teacher-forced paired scoring, streaming full-vocabulary KL on a 32 GB machine, the guards that keep a harness from passing by doing nothing, and where the verdict thresholds honestly come from.
 - More writing at [ineshin.space](https://ineshin.space).
 
 ## Status
