@@ -25,7 +25,8 @@ def test_long_window_stress_run_fits_and_buckets() -> None:
     The bound is ``compute_safe_caps_gb()[0]`` (the cap the probe actually installs, 20 GiB on
     a 32 GB M1 Max), not the device's ``max_recommended_working_set_size`` (~26.8 GiB) — a run
     peaking at 24 GiB would pass the latter while blowing the cap that is really in force.
-    The recorded measured peak for this lane is 13.53 GiB, well under either.
+    The recorded measured peak for this lane is 7.09 GiB, well under either; 13.53 GiB is
+    the 4096-token lane, not this one.
     """
     report = measure_kv_fidelity(
         _MODEL,

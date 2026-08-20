@@ -1,0 +1,39 @@
+@startuml
+title What "dominated" means when comparing configurations
+
+top to bottom direction
+
+skinparam backgroundColor #FFFFFF
+skinparam shadowing false
+skinparam roundCorner 10
+skinparam defaultFontName Helvetica
+skinparam defaultFontColor #111827
+skinparam ArrowColor #4B5563
+skinparam ArrowFontColor #374151
+skinparam rectangle {
+  BorderColor #4B5563
+  FontColor #111827
+  BackgroundColor #F8FAFC
+}
+
+rectangle "Configuration A" as a #DCFCE7
+rectangle "Configuration B" as b #FECACA
+
+rectangle "A is no worse on quality\nmean KL divergence no higher" as q #DBEAFE
+rectangle "A is no worse on cost\ncache bytes per token no higher" as c #DBEAFE
+
+rectangle "B is dominated\nA ties or beats it on both axes\nand beats it on at least one,\nso nothing about your budget would make you pick it" as dom #FEF3C7
+
+a -down-> q
+a -down-> c
+b -down-> q : does not win
+b -down-> c : does not win
+q -down-> dom
+c -down-> dom
+
+note bottom of dom
+  Ranking reports domination so you can
+  discard options outright, instead of
+  weighing every configuration by hand.
+end note
+@enduml

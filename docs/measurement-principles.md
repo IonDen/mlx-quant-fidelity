@@ -1,6 +1,8 @@
 # How fidelity is measured
 
-`mlx-quant-fidelity` measures the gap between a quantized model and its reference by running both on the same tokens and comparing their next-token distributions position by position. What follows explains the mechanics, the implementation choices, and where the numbers stop being useful.
+You have a drift number and you want to know exactly what was run to produce it.
+
+`mlx-quant-fidelity` measures the gap between a quantized model and its reference by running both on the same tokens and comparing their next-token distributions position by position.
 
 ## Teacher-forced paired scoring, not generation
 
@@ -19,7 +21,7 @@ Both passes receive the same `inp`. This is teacher-forced scoring: the corpus t
 
 Generation would break this. The moment quantization changes a sampled token, the next pass receives different input, and the divergence compounds. What you end up measuring is trajectory drift, not cache cost. The llama.cpp `--kl-divergence-base` flag works the same way: it scores a forward pass over fixed text, not a generation.
 
-Logits are large. A single position over a 128k-token vocabulary is half a megabyte in fp32. The chunk loop collapses logits to per-position scalars (`kl_divergence`, `top_token_flips`, `token_nll`) and calls `mx.eval` before moving on, letting the vocab-wide tensors go out of scope. Accumulating them across a corpus would require roughly 125 GB — four times the machine. Holding full next-token distributions for the corpus would require roughly 125 GB in fp32 — four times the machine — so each position is reduced to scalars as the probe goes, keeping memory flat across the corpus.
+Logits are large. A single position over a 128k-token vocabulary is half a megabyte in fp32, and holding full next-token distributions for the whole corpus would require roughly 125 GB — four times the machine. The chunk loop collapses logits to per-position scalars (`kl_divergence`, `top_token_flips`, `token_nll`) and calls `mx.eval` before moving on, letting the vocab-wide tensors go out of scope, so memory stays flat across the corpus.
 
 Two modes are available. Stress mode (`quantize_start=0`, the default): quantization begins at token 0 and both caches start empty, so the probe measures pure quantizer cost from the first position. Deployment mode (`quantize_start > 0`): the first N positions are computed with a full-precision cache, then the entire stored cache converts at position N. The section at the end of this document covers what each mode measures and where the numbers stop being comparable.
 
@@ -81,11 +83,11 @@ In the mlx-lm 0.31.x path used by the current reports, the quantized run compose
 
 `--quantize-start N` computes the first N prediction positions while both runs use full-precision caches. At the boundary, the quantized run converts its entire stored cache, including the prefix, in one step. Later entries are quantized as they are written. The reported metrics exclude the first N positions because their logits were computed before conversion and match the reference.
 
-Post-boundary positions therefore read through a quantized prefix as well as quantized new entries. That storage state resembles stress mode, but the computation history differs: deployment mode produced the prefix activations while attention still used a full-precision cache. The committed deployment sample covers 1,020 positions across four chunks, while the stress samples cover 51,100 positions across 100 chunks. They are not a matched comparison and do not establish equal drift.
+Post-boundary positions therefore read through a quantized prefix as well as quantized new entries. That storage state resembles stress mode, but the computation history differs: deployment mode produced the prefix activations while attention still used a full-precision cache. The committed deployment sample and the stress samples run the same corpus geometry — 100 chunks of 512 tokens — but they do not score the same positions. At `quantize_start=256` the deployment run reports 25,500 positions, the tail of each window, while stress reports all 51,100. The deployment average is therefore taken over positions that sit deeper in the window than stress's, on top of the differing computation history above, so reading the two numbers side by side does not establish equal drift.
 
 Deployment mode exercises the `to_quantized` conversion path that mlx-lm uses in practice. Stress mode quantizes from an empty cache and never touches the path that converts existing full-precision entries. A quantizer that behaves differently on pre-filled data is therefore invisible to stress mode. Deployment mode also preserves the exact pre-boundary computation history, even though it does not preserve the prefix's storage type after conversion.
 
-What these numbers do not cover: the probe's 512-token chunk window is not a long document. mlx-lm's default delays conversion until 5000 tokens, but it then quantizes those stored prefix entries too. The probe measures post-boundary cost one chunk at a time. Deployment numbers are a per-chunk proxy, not a real-deployment average over long-form generation.
+What these numbers do not cover: the probe's 512-token chunk window is not a long document. mlx-lm's own generate command delays conversion until token 5000, but it then quantizes those stored prefix entries too. The probe measures post-boundary cost one chunk at a time. Deployment numbers are a per-chunk proxy, not a real-deployment average over long-form generation.
 
 ## Drift by position depth
 
@@ -95,12 +97,14 @@ The table only appears in stress mode, and only when every scored chunk carries 
 
 Depth buckets get more informative as the window grows, so `kv` and `compare kv` take a `--chunk-length` option (default 512, capped at 4096). Paired fp32 logits for one chunk scale with window length times vocabulary size, so a longer window costs proportionally more memory — both runs hold a full logits tensor at once before it collapses to per-position scalars. Measured peaks on Llama-3.2-1B-4bit at kv4, group size 64 (Apple M1 Max, 32 GB; reproducer: `scripts/spike_long_window_memory.py`):
 
-| chunk length | peak memory |
-|---|---|
-| 512 | 2.27 GiB |
-| 1024 | 3.86 GiB |
-| 2048 | 7.09 GiB |
-| 4096 | 13.53 GiB |
+| chunk length | peak memory | source |
+|---|---|---|
+| 512 | 2.27 GiB | committed sample report |
+| 1024 | 3.86 GiB | reproducer run, no committed artifact |
+| 2048 | 7.09 GiB | reproducer run, no committed artifact |
+| 4096 | 13.53 GiB | committed sample report |
+
+The two confirmed rows are the `peak_memory_bytes` recorded in `_artifacts/samples/llama-3.2-1b-4bit-kv4.json` and `llama-3.2-1b-4bit-kv4-cl4096.json`. The 1024 and 2048 rows were measured by the reproducer above but its output directory is not committed, so they cannot be checked against the repository.
 
 4096 is a hard ceiling — `chunk_length` above it raises before a model loads. Below the ceiling, the CLI adds a warning once the estimated logits footprint for the chosen window passes 4 GiB, using a slope calibrated against the measurements above.
 
