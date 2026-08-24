@@ -76,7 +76,7 @@ _DEPLOY_BANDS = {
 def test_deployment_post_boundary_matches_stress(method_name):
     """Deployment reports post-boundary positions only; per-token drift is the same order as stress.
 
-    Recorded ratios (main-thread run, date, machine): stock ____ ; turboquant ____ .
+    Recorded ratios (main-thread run 2026-08-24, M1 Max 32 GB): stock 0.4537 ; turboquant 0.3707 .
     """
     from mlx_lm import load
 

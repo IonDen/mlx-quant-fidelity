@@ -6,7 +6,9 @@ need no port run regardless.
 
 Pre-registered hypotheses (fixed 2026-08-23 from the spike, before any implementation run):
   t4.kl.mean < s4.kl.mean and t4.kl.p99 < s4.kl.p99; t3.kl.mean > s4.kl.mean (spike: 0.0255 / 0.0476 / 0.1773).
-Recorded values (main-thread run, date, machine): s4 ____  t4 ____  t3 ____  seed-43 t4 ____ .
+Recorded values (main-thread run 2026-08-24, M1 Max 32 GB, mlx 0.31.2, port 0.3.0 @ pinned commit;
+`uv run --no-sync pytest ... --run-slow --run-network -q -s`): s4 0.0842 (p99 0.5615)  t4 0.0496
+(p99 0.2986)  t3 0.2109  seed-43 t4 0.0494.
 """
 
 import mlx.core as mx
