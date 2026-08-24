@@ -6,6 +6,7 @@ import json
 import types
 
 import pytest
+from tests.probes.fake_turboquant import install_fake_port
 from tests.test_cli import _fake_report
 
 from mlx_quant_fidelity.errors import CompareConfigError
@@ -1116,9 +1117,13 @@ def test_compare_kv_partial_identity_carries_method_and_schema_3(monkeypatch, tm
 def test_compare_kv_stale_method_provenance_commit_is_recomputed(monkeypatch, tmp_path):
     """A partial recorded at a different turboquant commit is not resumed — every other
     identity field matches, only method_provenance['commit'] differs.
+
+    Uses the fake port (never the real turboquant_mlx) so this test passes in a clean CI
+    checkout, where the `turboquant` dependency group is not installed by `uv sync --group dev`.
     """
     import mlx_quant_fidelity.probes.kv_methods as kvm
 
+    install_fake_port(monkeypatch)
     monkeypatch.setattr(kvm, "_installed_commit", lambda: "current-commit")
     method = TurboQuantKVMethod(bits=4)
     reports = {
