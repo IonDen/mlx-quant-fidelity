@@ -19,3 +19,12 @@ jobs:
       - run: uv run ruff format --check .
       - run: uv run mypy
       - run: uv run pytest --cov=mlx_quant_fidelity --cov-report=term-missing --cov-fail-under=85
+  build:
+    # Same action the release workflow uses, so a distribution that would fail at tag time
+    # (e.g. a build-backend metadata version newer than the bundled twine) fails on the PR.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: hynek/build-and-inspect-python-package@v3.0.1
