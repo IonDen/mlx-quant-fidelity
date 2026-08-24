@@ -1,6 +1,7 @@
 """Tests for compare_kv_fidelity: one-load loop, resume, isolation, validation guards."""
 
 import dataclasses
+import importlib.metadata
 import json
 import types
 
@@ -11,6 +12,15 @@ from mlx_quant_fidelity.errors import CompareConfigError
 from mlx_quant_fidelity.metrics import ScalarSummary
 from mlx_quant_fidelity.probes.kv_methods import StockKVMethod, TurboQuantKVMethod
 from mlx_quant_fidelity.runners import compare as cmp
+
+
+def _stock_provenance_extras(bits: int, gs: int) -> dict[str, object]:
+    """The three run_identity keys carrying numerics provenance, for the stock method."""
+    return {
+        "method_provenance": StockKVMethod(bits=bits, group_size=gs).provenance(),
+        "mlx_version": importlib.metadata.version("mlx"),
+        "mlx_lm_version": importlib.metadata.version("mlx-lm"),
+    }
 
 
 def _fid(label_bits: tuple[int, int], kl_mean: float):  # type: ignore[return]
@@ -551,6 +561,7 @@ def test_compare_kv_collect_loop_isolates_bad_cost_partial(monkeypatch, tmp_path
         "model_revision": None,
         "method": "stock",
         "params": {"bits": 4, "group_size": 64},
+        **_stock_provenance_extras(4, 64),
         "quantize_start": 0,
         "max_chunks": None,
         "chunk_length": 512,
@@ -676,6 +687,7 @@ def _kv_partial_with_identity(
         "model_revision": model_revision,
         "method": "stock",
         "params": {"bits": bits, "group_size": group_size},
+        **_stock_provenance_extras(bits, group_size),
         "quantize_start": quantize_start,
         "max_chunks": max_chunks,
         "chunk_length": chunk_length,
@@ -793,6 +805,7 @@ def _kv_partial_env(bits: int, gs: int, *, kl_mean: float, cost: int) -> dict[st
             "model_revision": None,
             "method": "stock",
             "params": {"bits": bits, "group_size": gs},
+            **_stock_provenance_extras(bits, gs),
             "quantize_start": 0,
             "max_chunks": None,
             "chunk_length": 512,
@@ -1095,6 +1108,56 @@ def test_compare_kv_partial_identity_carries_method_and_schema_3(monkeypatch, tm
     assert ident["params"] == {"bits": 4, "group_size": 64}
     assert "bits" not in ident
     assert "group_size" not in ident
+    assert ident["method_provenance"] == StockKVMethod(bits=4, group_size=64).provenance()
+    assert ident["mlx_version"] == importlib.metadata.version("mlx")
+    assert ident["mlx_lm_version"] == importlib.metadata.version("mlx-lm")
+
+
+def test_compare_kv_stale_method_provenance_commit_is_recomputed(monkeypatch, tmp_path):
+    """A partial recorded at a different turboquant commit is not resumed — every other
+    identity field matches, only method_provenance['commit'] differs.
+    """
+    import mlx_quant_fidelity.probes.kv_methods as kvm
+
+    monkeypatch.setattr(kvm, "_installed_commit", lambda: "current-commit")
+    method = TurboQuantKVMethod(bits=4)
+    reports = {
+        (4, 42): _fid_method("turboquant", {"bits": 4, "seed": 42}, 0.03),
+        (8, 64): _fid((8, 64), 0.01),
+    }
+    calls = _patch_kv_compare(monkeypatch, reports)
+
+    stale_provenance = dict(method.provenance())
+    stale_provenance["commit"] = "stale-commit"  # differs from the current installed commit
+    identity = {
+        "mode": "kv",
+        "model_id": "m",
+        "model_revision": None,
+        "method": "turboquant",
+        "params": {"bits": 4, "seed": 42},
+        "method_provenance": stale_provenance,
+        "mlx_version": importlib.metadata.version("mlx"),
+        "mlx_lm_version": importlib.metadata.version("mlx-lm"),
+        "quantize_start": 0,
+        "max_chunks": None,
+        "chunk_length": 512,
+        "schema_version": cmp._KV_PARTIAL_SCHEMA_VERSION,
+    }
+    envelope = {
+        "status": "ok",
+        "report": dataclasses.asdict(reports[(4, 42)]),
+        "cost": 100,
+        "run_identity": identity,
+    }
+    (tmp_path / "turboquant_4.json").write_text(json.dumps(envelope))
+
+    cmp.compare_kv_fidelity(
+        "m", [method, StockKVMethod(bits=8, group_size=64)], artifacts_dir=tmp_path
+    )
+
+    assert (4, 42) in calls, (
+        "turboquant must be re-scored; stale method_provenance commit must not resume"
+    )
 
 
 def test_compare_kv_recomputes_schema_2_partial(monkeypatch, tmp_path):

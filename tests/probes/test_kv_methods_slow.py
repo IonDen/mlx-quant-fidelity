@@ -1,8 +1,10 @@
 """Real-port oracles for TurboQuantKVMethod (mlx-community/Llama-3.2-1B-Instruct-4bit).
 
 ``@pytest.mark.slow``; run with ``--run-slow`` on the main thread. DO NOT run in CI or in a subagent.
-Requires the pinned port: see ``TURBOQUANT_INSTALL_HINT``. Skips when it is absent; tests that
-need no port run regardless.
+Requires the pinned port. Install it with ``uv sync --group turboquant`` (or the pinned pip line
+in the README); note a plain ``uv run``/``uv sync`` without the group removes a manually
+pip-installed port and these tests then skip. Skips when the port is absent; tests that need no
+port run regardless.
 
 Pre-registered hypotheses (fixed 2026-08-23 from the spike, before any implementation run):
   t4.kl.mean < s4.kl.mean and t4.kl.p99 < s4.kl.p99; t3.kl.mean > s4.kl.mean (spike: 0.0255 / 0.0476 / 0.1773).

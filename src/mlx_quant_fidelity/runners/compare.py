@@ -16,6 +16,7 @@ from mlx_quant_fidelity.costs import kv_bytes_per_token
 from mlx_quant_fidelity.errors import (
     CacheNotQuantizableError,
     CompareConfigError,
+    QuantFidelityError,
     QuantizeStartError,
     ReportSchemaError,
 )
@@ -45,6 +46,14 @@ _asdict = _dc.asdict
 # change (e.g. adding chunk_length to the identity) must not force weight partials to recompute.
 _KV_PARTIAL_SCHEMA_VERSION = 3
 _WEIGHT_PARTIAL_SCHEMA_VERSION = 1
+
+
+def _identity_provenance(method: KVCacheMethod) -> dict[str, str]:
+    """Provenance for the resume identity; a method whose package is absent still gets an identity."""
+    try:
+        return dict(method.provenance())
+    except QuantFidelityError:
+        return {"unavailable": "true"}
 
 
 def _budget_label(max_kld: float | None, min_tier: str | None) -> str | None:
@@ -623,7 +632,9 @@ def compare_kv_fidelity(
 
     Loads the model ONCE and loops configs via score_kv_config (one model resident — that's
     the whole point vs weight compare which spawns per target). Writes a partial JSON per
-    config and resumes by skipping configs whose valid partial already exists.
+    config and resumes by skipping configs whose valid partial already exists. Partials
+    resume only when the measuring package versions (mlx, mlx-lm, and the method's own
+    package/commit) match.
 
     Unsupported configs (CacheNotQuantizableError or any QuantFidelityError) are isolated
     as 'failed' results and excluded from the frontier; the run continues.
@@ -691,6 +702,9 @@ def compare_kv_fidelity(
             "model_revision": model_revision,
             "method": method.name,
             "params": dict(method.params),
+            "method_provenance": _identity_provenance(method),
+            "mlx_version": importlib.metadata.version("mlx"),
+            "mlx_lm_version": importlib.metadata.version("mlx-lm"),
             "quantize_start": quantize_start,
             "max_chunks": max_chunks,
             "chunk_length": chunk_length,
@@ -740,6 +754,9 @@ def compare_kv_fidelity(
                     "model_revision": model_revision,
                     "method": method.name,
                     "params": dict(method.params),
+                    "method_provenance": _identity_provenance(method),
+                    "mlx_version": importlib.metadata.version("mlx"),
+                    "mlx_lm_version": importlib.metadata.version("mlx-lm"),
                     "quantize_start": quantize_start,
                     "max_chunks": max_chunks,
                     "chunk_length": chunk_length,

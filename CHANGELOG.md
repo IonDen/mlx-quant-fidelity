@@ -22,7 +22,7 @@ The KV probe measures any per-layer cache implementation, and the first third-pa
 
 ### Notes
 
-- Through a teacher-forced pass the TurboQuant cache dequantizes on fetch and runs standard attention, so its drift is the quantizer alone while stock's also includes the quantized attention path; every TurboQuant report says so. Only the uniform-bit cache is measured, and its resident memory in this path is roughly 2.3× an fp16 cache.
+- Through a teacher-forced pass the TurboQuant cache dequantizes on fetch and runs standard attention, so its drift is the quantizer alone while stock's also includes the quantized attention path; every TurboQuant report says so. Only the uniform-bit cache is measured, and its resident memory in this path is roughly 2.3× an fp16 cache (derived from its retained dequantization buffers).
 
 ## [0.5.1] - 2026-08-18
 

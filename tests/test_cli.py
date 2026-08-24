@@ -289,6 +289,16 @@ def test_kv_cli_rejects_seed_with_stock(capsys):
     assert "--kv-seed" in capsys.readouterr().err
 
 
+def test_kv_cli_rejects_non_positive_seed(monkeypatch, capsys):
+    def _unexpected(*_a, **_k):
+        raise AssertionError("measure_kv_fidelity must not be reached")
+
+    monkeypatch.setattr(cli, "measure_kv_fidelity", _unexpected)
+    rc = cli.main(["kv", "org/m", "--kv-method", "turboquant", "--kv-seed", "0"])
+    assert rc == 2
+    assert "seed" in capsys.readouterr().err
+
+
 def test_parse_kv_configs_accepts_method_specs():
     assert cli._parse_kv_configs("4:64,turboquant:3") == [
         StockKVMethod(bits=4, group_size=64),

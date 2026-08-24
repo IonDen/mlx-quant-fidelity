@@ -260,7 +260,7 @@ def score_kv_config(
     chunks = corpus.chunks[:max_chunks] if max_chunks is not None else corpus.chunks
     vocab_size = getattr(getattr(model, "args", None), "vocab_size", None)
     if isinstance(vocab_size, int) and vocab_size > 0 and chunks:
-        max_id = max(int(mx.max(ids)) for ids in chunks)
+        max_id = int(mx.max(mx.stack([mx.max(ids) for ids in chunks])))
         if max_id >= vocab_size:
             raise CorpusError(
                 f"corpus contains token id {max_id} but the model's vocab_size is {vocab_size}; "

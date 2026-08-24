@@ -62,6 +62,13 @@ def test_methods_map_names_stock():
     assert METHODS["stock"] is StockKVMethod
 
 
+def test_positive_ints_example_matches_the_method():
+    with pytest.raises(CompareConfigError, match=r"e\.g\. 4:64"):
+        parse_method_spec("4:x")
+    with pytest.raises(CompareConfigError, match=r"e\.g\. turboquant:4"):
+        parse_method_spec("turboquant:x")
+
+
 # --- StockKVMethod: pure surface ------------------------------------------------
 
 
@@ -239,6 +246,12 @@ def test_turboquant_constructor_rejects_bits_outside_2_3_4():
         TurboQuantKVMethod(bits=8)
 
 
+@pytest.mark.parametrize("seed", [0, -1])
+def test_turboquant_constructor_rejects_non_positive_seed(seed):
+    with pytest.raises(ValueError, match="seed"):
+        TurboQuantKVMethod(bits=4, seed=seed)
+
+
 @pytest.mark.parametrize(
     ("bits", "head_dim", "expected"),
     [
@@ -276,6 +289,12 @@ def test_missing_port_raises_with_install_hint(monkeypatch):
         TurboQuantKVMethod(bits=4).probe_capability([KVCache()])
 
 
+def test_provenance_missing_port_is_package_rooted(monkeypatch):
+    monkeypatch.setitem(sys.modules, "turboquant_mlx", None)  # forces ImportError
+    with pytest.raises(MethodUnavailableError, match=TURBOQUANT_PINNED_COMMIT):
+        TurboQuantKVMethod(bits=4).provenance()
+
+
 def test_squatter_package_is_named(monkeypatch):
     install_fake_port(monkeypatch, no_cache_module=True)
     with pytest.raises(MethodUnavailableError, match="squatter"):
@@ -309,6 +328,12 @@ def test_behavioural_contract_catches_wrong_offset(monkeypatch):
 def test_behavioural_contract_catches_sticky_trim(monkeypatch):
     install_fake_port(monkeypatch, bad_trim=True)
     with pytest.raises(MethodUnavailableError, match="did not release"):
+        TurboQuantKVMethod(bits=4).probe_capability([KVCache()])
+
+
+def test_behavioural_contract_requires_populated_buffers(monkeypatch):
+    install_fake_port(monkeypatch, no_deq_buffers=True)
+    with pytest.raises(MethodUnavailableError, match="no populated"):
         TurboQuantKVMethod(bits=4).probe_capability([KVCache()])
 
 

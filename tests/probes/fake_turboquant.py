@@ -69,6 +69,16 @@ class _StickyTrimCache(FakeTurboQuantKVCache):
         return 0
 
 
+class _NoDeqBuffersCache(FakeTurboQuantKVCache):
+    """A port whose update_and_fetch never populates the dequant working buffers."""
+
+    def update_and_fetch(self, keys, values):
+        out = super().update_and_fetch(keys, values)
+        self._k_deq_buf = None
+        self._v_deq_buf = None
+        return out
+
+
 def _raising_property(name):
     def _get(self):
         raise AttributeError(name)
@@ -86,6 +96,7 @@ def install_fake_port(
     with_bits_attr=False,
     wrong_behaviour=False,
     bad_trim=False,
+    no_deq_buffers=False,
 ):
     """Install a fake ``turboquant_mlx`` into sys.modules; returns the fake cache class."""
     pkg = types.ModuleType("turboquant_mlx")
@@ -95,6 +106,8 @@ def install_fake_port(
         base = _StickyTrimCache
     elif wrong_behaviour:
         base = _WrongOffsetCache
+    elif no_deq_buffers:
+        base = _NoDeqBuffersCache
     else:
         base = FakeTurboQuantKVCache
     cls = type("TurboQuantKVCache", (base,), {})

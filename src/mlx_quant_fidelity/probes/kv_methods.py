@@ -346,9 +346,11 @@ class TurboQuantKVMethod:
     seed: int = TURBOQUANT_DEFAULT_SEED
 
     def __post_init__(self) -> None:
-        """Reject bit widths the port does not implement."""
+        """Reject bit widths the port does not implement, and a non-positive rotation seed."""
         if self.bits not in _TURBOQUANT_BITS:
             raise ValueError(f"turboquant supports bits 2/3/4, got bits={self.bits}")
+        if self.seed < 1:
+            raise ValueError(f"turboquant seed must be >= 1, got seed={self.seed}")
 
     @property
     def name(self) -> str:
@@ -417,10 +419,12 @@ class TurboQuantKVMethod:
         The contract feeds 8 tokens through a throwaway cache and forces the graph, so a Metal
         compile/dispatch failure surfaces here as MethodUnavailableError instead of mid-run
         (where ``guard()`` is a no-op for this method). Costs one JIT per process (~50 ms),
-        then well under a millisecond per call. Also proves ``trim(0)`` actually releases the
-        retained dequantized working buffers (the basis of the 2.3x memory note): a port whose
-        trim leaves them resident would silently make ``convert_prefix`` retain full-precision
-        working copies of the prefix past the boundary.
+        then well under a millisecond per call. Also proves the trim contract on both halves
+        (the basis of the 2.3x memory note): the port must actually populate the dequantized
+        working buffers after ``update_and_fetch``, and ``trim(0)`` must then release them. A
+        port whose trim leaves them resident would silently make ``convert_prefix`` retain
+        full-precision working copies of the prefix past the boundary; a port that never
+        populates them in the first place would make that same memory note groundless.
         """
         from mlx_lm.models.cache import KVCache
 
@@ -449,6 +453,12 @@ class TurboQuantKVMethod:
                 f"TurboQuantKVCache behaviour differs from the pinned port (offset {got_offset} != 8 "
                 f"or stored bytes {got_bytes} != {expected}); expected {TURBOQUANT_PINNED_COMMIT}."
             )
+        for attr in ("_k_deq_buf", "_v_deq_buf"):
+            if getattr(probe, attr, None) is None:
+                raise MethodUnavailableError(
+                    f"TurboQuantKVCache has no populated {attr} after update_and_fetch; "
+                    f"expected the port at {TURBOQUANT_PINNED_COMMIT}."
+                )
         probe.trim(0)  # type: ignore[attr-defined]
         if (
             getattr(probe, "_k_deq_buf", None) is not None
@@ -499,7 +509,12 @@ class TurboQuantKVMethod:
 
     def provenance(self) -> dict[str, str]:
         """Package / module versions, installed vs pinned commit, seeds and pinned knobs."""
-        import turboquant_mlx
+        try:
+            import turboquant_mlx
+        except ImportError as exc:
+            raise MethodUnavailableError(
+                f"turboquant_mlx is not installed. Install the pinned port: {TURBOQUANT_INSTALL_HINT}"
+            ) from exc
 
         return {
             "package": "turboquant-mlx",
@@ -535,9 +550,9 @@ class TurboQuantKVMethod:
         return notes
 
 
-def _positive_ints(parts: list[str], *, spec: str, expected: str) -> list[int]:
+def _positive_ints(parts: list[str], *, spec: str, expected: str, example: str) -> list[int]:
     if not parts or not all(p.isascii() and p.isdigit() and int(p) > 0 for p in parts):
-        raise CompareConfigError(f"--configs entry {spec!r} must be {expected} (e.g. 4:64).")
+        raise CompareConfigError(f"--configs entry {spec!r} must be {expected} (e.g. {example}).")
     return [int(p) for p in parts]
 
 
@@ -558,14 +573,16 @@ def parse_method_spec(spec: str) -> KVCacheMethod:
             raise CompareConfigError(
                 f"--configs entry {spec!r} must be 'bits:group_size' (e.g. 4:64)."
             )
-        bits, gs = _positive_ints(args, spec=spec, expected="'bits:group_size'")
+        bits, gs = _positive_ints(args, spec=spec, expected="'bits:group_size'", example="4:64")
         return StockKVMethod(bits=bits, group_size=gs)
     if name == "turboquant":
         if len(args) not in (1, 2):
             raise CompareConfigError(
                 f"--configs entry {spec!r} must be 'turboquant:bits' or 'turboquant:bits:seed'."
             )
-        nums = _positive_ints(args, spec=spec, expected="'turboquant:bits[:seed]'")
+        nums = _positive_ints(
+            args, spec=spec, expected="'turboquant:bits[:seed]'", example="turboquant:4"
+        )
         seed = nums[1] if len(nums) == 2 else TURBOQUANT_DEFAULT_SEED
         try:
             return TurboQuantKVMethod(bits=nums[0], seed=seed)

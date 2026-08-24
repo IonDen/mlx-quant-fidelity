@@ -46,7 +46,7 @@ That model at 8-bit KV clears the good tier on this corpus. Apple Silicon, Pytho
 
 ### Common options
 
-- `--kv-bits` / `--kv-group-size` — the KV configuration to score, default `4` / `64`. The `4:32,4:64` shorthand in `compare kv --configs` is `bits:group_size`. `--kv-method turboquant` swaps `kv` to the TurboQuant-MLX cache instead, and `compare kv --configs` mixes it in with entries like `turboquant:4`.
+- `--kv-bits` / `--kv-group-size` — the KV configuration to score, default `4` / `64`. The `4:32,4:64` shorthand in `compare kv --configs` is `bits:group_size`. `--kv-method turboquant` swaps `kv` to the TurboQuant-MLX cache instead, and `compare kv --configs` mixes it in with entries like `turboquant:4`. `--kv-seed` sets the TurboQuant rotation seed (default 42, must be ≥ 1).
 - `--max-chunks N` — score only the first N corpus chunks. Every number in this README uses `--max-chunks 100`; leave it off and the run covers the whole WikiText-2 test split.
 - `--chunk-length N` — the scoring window, default 512, hard ceiling 4096.
 - `--quantize-start N` — `0` for stress mode, the default; any N above 0 for deployment mode.
