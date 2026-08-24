@@ -47,3 +47,7 @@ class QuantizeStartError(QuantFidelityError, ValueError):
     Subclasses ValueError too, preserving the compare path's documented ValueError
     contract (matching CompareConfigError).
     """
+
+
+class MethodUnavailableError(QuantFidelityError):
+    """A third-party KV-cache method's package is missing, is the wrong package, or is incompatible."""
