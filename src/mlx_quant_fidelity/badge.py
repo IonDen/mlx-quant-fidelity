@@ -30,6 +30,8 @@ def badge_for_report(report: "FidelityReport | WeightFidelityReport") -> dict[st
             f"{report.verdict} · {report.kv_bits}-bit · "
             f"{corpus.name}/{corpus.chunk_length} · {report.quantize_mode}"
         )
+        if report.kv_method != "stock":
+            message = f"{message} · {report.kv_method}"
     else:
         label = "Weight fidelity"
         bits = report.quant_bits if report.quant_bits is not None else "?"

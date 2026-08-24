@@ -3,12 +3,11 @@
 from __future__ import annotations
 
 import importlib.metadata
-from contextlib import contextmanager
 from typing import TYPE_CHECKING
 
 import mlx.core as mx
 import numpy as np
-from mlx_lm.models.cache import QuantizedKVCache, make_prompt_cache
+from mlx_lm.models.cache import make_prompt_cache
 
 from mlx_quant_fidelity._memory_caps import (
     compute_safe_caps_gb,
@@ -16,19 +15,19 @@ from mlx_quant_fidelity._memory_caps import (
     install_memory_caps,
 )
 from mlx_quant_fidelity.errors import (
-    CacheNotQuantizableError,
+    CompareConfigError,
     CorpusError,
     QuantizeStartError,
 )
 from mlx_quant_fidelity.metrics import bucket_by_depth
 from mlx_quant_fidelity.policy import verdict_for
 from mlx_quant_fidelity.probes._paired import _aggregate_chunks, _check_exact_zero, _reduce_pair
+from mlx_quant_fidelity.probes.kv_methods import StockKVMethod
 from mlx_quant_fidelity.report import FidelityReport
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
-
     from mlx_quant_fidelity.corpora.provenance import Corpus
+    from mlx_quant_fidelity.probes.kv_methods import KVCacheMethod
 
 
 # Hard ceiling on chunk_length (kernel-panic safety surface — paired fp32 logits scale with
@@ -103,26 +102,6 @@ def _preflight_logits_budget(window: int | None, vocab: int | None) -> str | Non
     return None
 
 
-@contextmanager
-def _packed_width_belt(kv_bits: int) -> Iterator[None]:
-    """Re-raise mlx-lm's packed-width broadcast_shapes crash as a package-rooted error.
-
-    Belt to the pre-flight ``packed_width_mismatch`` gate, for architectures whose head_dim
-    is not derivable. Wraps BOTH scoring branches — deployment mode appends to a quantized
-    cache at the boundary just as stress mode does, so an unwrapped ValueError there would
-    reach the CLI as a raw traceback. Unrelated ValueErrors propagate untouched.
-    """
-    try:
-        yield
-    except ValueError as exc:
-        if "broadcast_shapes" in str(exc):
-            raise CacheNotQuantizableError(
-                f"kv_bits={kv_bits} crashed appending to a fresh QuantizedKVCache "
-                f"(mlx-lm packed-width truncation bug): {exc}"
-            ) from exc
-        raise
-
-
 def _kv_head_dim(model: object) -> int | None:
     """Best-effort per-head KV dim for the group-size gate. None if not derivable.
 
@@ -141,26 +120,6 @@ def _kv_head_dim(model: object) -> int | None:
     return None
 
 
-def _head_dim_gate(*, head_dim: int | None, kv_group_size: int, model_type: str) -> str | None:
-    """Validate kv_group_size divides the per-head KV dim. Raise if it doesn't; warn if unknown.
-
-    The quantity is the per-head head_dim (QuantizedKVCache quantizes the per-head last axis;
-    mlx_lm/models/cache.py). Returns a warning string when head_dim can't be derived (do not
-    silently pass on odd architectures), else None.
-    """
-    if head_dim is None:
-        return (
-            f"head_dim/kv_group_size compatibility unverified for '{model_type}'; "
-            "relying on MLX to surface a mismatch at first use."
-        )
-    if head_dim % kv_group_size != 0:
-        raise CacheNotQuantizableError(
-            f"kv_group_size={kv_group_size} does not divide the model's KV head_dim={head_dim}; "
-            f"choose a group size that divides {head_dim} (e.g. 32 or 64)."
-        )
-    return None
-
-
 def packed_width_mismatch(head_dim: int, bits: int) -> bool:
     """True when mlx-lm's QuantizedKVCache pre-allocation disagrees with mx.quantize.
 
@@ -170,36 +129,6 @@ def packed_width_mismatch(head_dim: int, bits: int) -> bool:
     broadcast_shapes. Affects bits=6 at e.g. head_dim=128 on mlx-lm 0.31.x.
     """
     return head_dim // (32 // bits) != head_dim * bits // 32
-
-
-def _cache_is_quantizable(cache: list[object], *, group_size: int, bits: int) -> bool:
-    """Return True if every layer cache has a NON-RAISING to_quantized; else raise, naming the type.
-
-    Validates ``bits`` up front (MLX only supports 2/3/4/6/8). An attribute check alone is
-    insufficient: RotatingKVCache / BatchRotatingKVCache (sliding-window) HAVE to_quantized but
-    raise NotImplementedError. So probe by actually calling it on the (empty, cheap) cache.
-    """
-    if bits not in (2, 3, 4, 6, 8):
-        raise CacheNotQuantizableError(f"unsupported kv_bits={bits}; MLX supports 2/3/4/6/8.")
-    for layer in cache:
-        to_q = getattr(layer, "to_quantized", None)
-        if to_q is None:
-            raise CacheNotQuantizableError(
-                f"cache layer {type(layer).__name__} has no to_quantized; "
-                "this model's KV cache cannot be quantized (e.g. sliding-window / MLA)."
-            )
-        try:
-            to_q(group_size=group_size, bits=bits)
-        except NotImplementedError as exc:
-            raise CacheNotQuantizableError(
-                f"cache layer {type(layer).__name__} declares to_quantized but it is NYI: {exc}"
-            ) from exc
-        except (ValueError, RuntimeError) as exc:
-            raise CacheNotQuantizableError(
-                f"cache layer {type(layer).__name__} cannot quantize at "
-                f"group_size={group_size}, bits={bits}: {exc}"
-            ) from exc
-    return True
 
 
 def _score_chunk(
@@ -221,6 +150,28 @@ def _score_chunk(
     return _reduce_pair(ref_logits, quant_logits, targets)
 
 
+def _resolve_method(
+    method: KVCacheMethod | None, kv_bits: int, kv_group_size: int
+) -> KVCacheMethod:
+    """Explicit ``method`` wins; the 0.5.x ``kv_bits``/``kv_group_size`` sugar builds stock."""
+    if method is None:
+        return StockKVMethod(bits=kv_bits, group_size=kv_group_size)
+    if kv_bits != 4 or kv_group_size != 64:
+        raise CompareConfigError(
+            "pass either method= or kv_bits/kv_group_size, not both "
+            "(the sugar only builds the stock method)."
+        )
+    return method
+
+
+def _measured_bytes_per_token(method: KVCacheMethod, cache: list[object]) -> int | None:
+    """Stored bytes / stored positions of a filled cache list; None if the cache has no offset."""
+    offset = getattr(cache[0], "offset", None) if cache else None
+    if not isinstance(offset, int) or offset <= 0:
+        return None
+    return round(method.measured_bytes(cache) / offset)
+
+
 def _score_chunk_deployment(
     model: object,
     ids: mx.array,
@@ -228,15 +179,14 @@ def _score_chunk_deployment(
     quant_cache: list[object],
     *,
     quantize_start: int,
-    group_size: int,
-    bits: int,
+    method: KVCacheMethod,
 ) -> tuple[mx.array, mx.array, mx.array, mx.array]:
     """Deployment split: compute the prefix in full precision, then convert the stored cache.
 
     Returns per-position (kl, flips, ref_nll, quant_nll) over ALL L-1 prediction positions.
-    `quant_cache` starts full-precision (make_prompt_cache) and is converted to quantized at the
-    boundary via `to_quantized` (mirrors mlx-lm's maybe_quantize_kv_cache). The caller aggregates
-    only [quantize_start:] for the reported metrics.
+    `quant_cache` starts full-precision (make_prompt_cache) and is converted at the boundary
+    via ``method.convert_prefix`` (mirrors mlx-lm's maybe_quantize_kv_cache). The caller
+    aggregates only [quantize_start:] for the reported metrics.
     """
     n = quantize_start
     targets = ids[1:]
@@ -249,8 +199,7 @@ def _score_chunk_deployment(
     del seg1  # free the prefix logits before the boundary + seg2 forward (one segment live)
     mx.eval([c.state for c in quant_cache])  # type: ignore[attr-defined]  # collapse seg-1 graph before boundary
     # Boundary: convert each layer cache (quantizes the stored [0:n) prefix).
-    for i in range(len(quant_cache)):
-        quant_cache[i] = quant_cache[i].to_quantized(group_size=group_size, bits=bits)  # type: ignore[attr-defined]
+    quant_cache[:] = method.convert_prefix(quant_cache)  # in place: the caller's list sees it
     # Segment 2: [n:L-1) through the now-quantized cache. NOTE ids[n:-1], not ids[n:].
     seg2 = model(ids[None, n:-1], cache=quant_cache)[0].astype(mx.float32)  # type: ignore[operator]
     kl2, flip2, refnll2, qnll2 = _reduce_pair(ref_logits[n:], seg2, targets[n:])
@@ -271,6 +220,7 @@ def score_kv_config(
     model_revision: str | None = None,
     kv_bits: int = 4,
     kv_group_size: int = 64,
+    method: KVCacheMethod | None = None,
     quantize_start: int = 0,
     max_chunks: int | None = None,
 ) -> FidelityReport:
@@ -280,39 +230,23 @@ def score_kv_config(
     (load once -> loop configs). Applies ``max_chunks`` to the provided corpus,
     so a caller-supplied corpus is capped identically to the weight probe.
     """
+    method = _resolve_method(method, kv_bits, kv_group_size)
     probe_warnings: list[str] = []
     model_type = str(getattr(getattr(model, "args", None), "model_type", "unknown"))
     head_dim = _kv_head_dim(model)
-    head_dim_warning = _head_dim_gate(
-        head_dim=head_dim, kv_group_size=kv_group_size, model_type=model_type
-    )
-    if head_dim_warning is not None:
-        probe_warnings.append(head_dim_warning)
-    # Pre-flight the per-chunk logits budget BEFORE any cache construction or forward pass.
+    # Pure pre-flight first (keeps the 0.5.x warnings order: head_dim, then budget). It allocates
+    # nothing, so the kernel-panic budget gate below still precedes any cache construction.
+    probe_warnings.extend(method.check(head_dim=head_dim, model_type=model_type))
     budget_warning = _preflight_logits_budget(
         getattr(corpus.provenance, "chunk_length", None),
         getattr(getattr(model, "args", None), "vocab_size", None),
     )
     if budget_warning is not None:
         probe_warnings.append(budget_warning)
-    if kv_bits not in (2, 3, 4, 6, 8):
-        raise CacheNotQuantizableError(f"unsupported kv_bits={kv_bits}; MLX supports 2/3/4/6/8.")
-    if head_dim is not None and packed_width_mismatch(head_dim, kv_bits):
-        usable = [b for b in (2, 3, 4, 6, 8) if not packed_width_mismatch(head_dim, b)]
-        remedy = (
-            f"use bits {'/'.join(str(b) for b in usable)} or a group-compatible head_dim."
-            if usable
-            else "no supported bit width packs cleanly at this head_dim."
-        )
-        raise CacheNotQuantizableError(
-            f"kv_bits={kv_bits} cannot append to a fresh QuantizedKVCache at "
-            f"head_dim={head_dim} on this mlx-lm version (packed-width truncation bug); "
-            f"{remedy}"
-        )
 
     probe_cache = make_prompt_cache(model)
     n_layers = len(probe_cache)
-    _cache_is_quantizable(probe_cache, group_size=kv_group_size, bits=kv_bits)
+    method.probe_capability(probe_cache)
     del probe_cache
 
     mode = "stress" if quantize_start == 0 else "deployment"
@@ -322,31 +256,25 @@ def score_kv_config(
     ref_nlls: list[mx.array] = []
     quant_nlls: list[mx.array] = []
     n_scored = 0
+    measured_bpt: int | None = None
     for ids in chunks:
         if quantize_start > 0 and int(ids.size) < quantize_start + 2:
             continue  # too short to have a post-boundary position; skip
         ref_cache = make_prompt_cache(model)
-        with _packed_width_belt(kv_bits):
+        with method.guard():
             if quantize_start == 0:
-                quant_cache: list[object] = [
-                    QuantizedKVCache(group_size=kv_group_size, bits=kv_bits)
-                    for _ in range(n_layers)
-                ]
+                quant_cache: list[object] = method.make_cache(n_layers=n_layers)
                 kl, flip, ref_nll, quant_nll = _score_chunk(model, ids, ref_cache, quant_cache)
             else:
                 quant_cache = make_prompt_cache(model)
                 kl, flip, ref_nll, quant_nll = _score_chunk_deployment(
-                    model,
-                    ids,
-                    ref_cache,
-                    quant_cache,
-                    quantize_start=quantize_start,
-                    group_size=kv_group_size,
-                    bits=kv_bits,
+                    model, ids, ref_cache, quant_cache, quantize_start=quantize_start, method=method
                 )
                 kl, flip = kl[quantize_start:], flip[quantize_start:]
                 ref_nll, quant_nll = ref_nll[quantize_start:], quant_nll[quantize_start:]
         mx.eval(kl, flip, ref_nll, quant_nll)
+        if measured_bpt is None:
+            measured_bpt = _measured_bytes_per_token(method, quant_cache)
         kls.append(kl)
         flips.append(flip)
         ref_nlls.append(ref_nll)
@@ -382,11 +310,23 @@ def score_kv_config(
                 "(drift-by-depth requires a fixed-window corpus)."
             )
 
+    args = getattr(model, "args", None)
+    n_kv = getattr(args, "num_key_value_heads", None) or getattr(args, "num_attention_heads", None)
+    if measured_bpt is not None and head_dim is not None and isinstance(n_kv, int):
+        analytic = method.bytes_per_token(n_layers=n_layers, n_kv_heads=n_kv, head_dim=head_dim)
+        if analytic != measured_bpt:
+            probe_warnings.append(
+                f"measured KV bytes/token {measured_bpt} differs from the analytic {analytic} for "
+                f"method {method.name!r} (ranking uses the analytic figure; a scale/bias dtype other "
+                "than fp16/bf16 is the usual cause)."
+            )
+    probe_warnings.extend(method.report_warnings())
+
     return FidelityReport(
         model_id=model_id,
         model_revision=model_revision,
-        kv_bits=kv_bits,
-        kv_group_size=kv_group_size,
+        kv_bits=method.params.get("bits"),
+        kv_group_size=method.params.get("group_size"),
         quantize_start=quantize_start,
         quantize_mode=mode,
         kl=agg.kl,
@@ -405,6 +345,10 @@ def score_kv_config(
         warnings=tuple(probe_warnings),
         device=device_string(),
         kl_by_depth=kl_by_depth,
+        kv_method=method.name,
+        kv_method_params=dict(method.params),
+        kv_method_provenance=method.provenance(),
+        measured_kv_bytes_per_token=measured_bpt,
     )
 
 
@@ -413,6 +357,7 @@ def measure_kv_fidelity(
     *,
     kv_bits: int = 4,
     kv_group_size: int = 64,
+    method: KVCacheMethod | None = None,
     quantize_start: int = 0,
     corpus: Corpus | None = None,
     max_chunks: int | None = None,
@@ -425,6 +370,8 @@ def measure_kv_fidelity(
         model_id: HuggingFace model ID (e.g. ``mlx-community/Llama-3.2-1B-Instruct-4bit``).
         kv_bits: KV-cache quantization bits (default 4).
         kv_group_size: KV-cache quantization group size (default 64).
+        method: an explicit :class:`KVCacheMethod`; when given, ``kv_bits``/``kv_group_size``
+            must stay at their defaults.
         quantize_start: 0 = stress mode (default); ``1 ≤ N ≤ chunk_length-2`` = deployment
             mode (first N positions computed with a full-precision cache, then the stored prefix
             converts too; metrics cover the post-boundary region).
@@ -508,6 +455,7 @@ def measure_kv_fidelity(
         model_revision=model_revision,
         kv_bits=kv_bits,
         kv_group_size=kv_group_size,
+        method=method,
         quantize_start=quantize_start,
         max_chunks=max_chunks,
     )

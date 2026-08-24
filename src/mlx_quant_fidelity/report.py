@@ -21,8 +21,8 @@ class FidelityReport:
 
     model_id: str
     model_revision: str | None
-    kv_bits: int
-    kv_group_size: int
+    kv_bits: int | None
+    kv_group_size: int | None
     quantize_start: int
     quantize_mode: str
     kl: ScalarSummary
@@ -41,6 +41,10 @@ class FidelityReport:
     warnings: tuple[str, ...]
     device: str | None = None
     kl_by_depth: tuple[DepthBucketSummary, ...] | None = None
+    kv_method: str = "stock"
+    kv_method_params: dict[str, int] = dataclasses.field(default_factory=dict)
+    kv_method_provenance: dict[str, str] = dataclasses.field(default_factory=dict)
+    measured_kv_bytes_per_token: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -146,8 +150,10 @@ def fidelity_report_from_dict(d: dict[str, object]) -> FidelityReport:
 def render_markdown(report: FidelityReport) -> str:
     """Human-readable report. Always qualifies the number by corpus + context length."""
     c = report.corpus
+    group = "—" if report.kv_group_size is None else str(report.kv_group_size)
+    method_tag = "" if report.kv_method == "stock" else f" via {report.kv_method}"
     lines = [
-        f"# KV-fidelity: `{report.model_id}` @ {report.kv_bits}-bit (group {report.kv_group_size})",
+        f"# KV-fidelity: `{report.model_id}` @ {report.kv_bits}-bit (group {group}){method_tag}",
         "",
         f"**Verdict:** {report.verdict} · **mode:** {report.quantize_mode} "
         f"(quantize_start={report.quantize_start})",

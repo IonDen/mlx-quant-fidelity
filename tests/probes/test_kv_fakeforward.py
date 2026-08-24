@@ -1,13 +1,16 @@
 """Offline fake-forward tests for the KV-quant probe (no real model load)."""
 
+import dataclasses
 import math
 
 import mlx.core as mx
 import pytest
+from tests.probes.fake_kv_method import FakeFullCache, FakeKVMethod, FakeMethodModel
 
 from mlx_quant_fidelity.corpora.provenance import Corpus, CorpusProvenance
 from mlx_quant_fidelity.errors import (
     CacheNotQuantizableError,
+    CompareConfigError,
     CorpusError,
     ExactZeroError,
 )
@@ -15,33 +18,18 @@ from mlx_quant_fidelity.probes import kv as kvmod
 from mlx_quant_fidelity.probes.kv import (
     MAX_CHUNK_LENGTH,
     _aggregate_chunks,
-    _cache_is_quantizable,
     _check_exact_zero,
-    _head_dim_gate,
     _kv_head_dim,
     _score_chunk,
     measure_kv_fidelity,
     packed_width_mismatch,
     score_kv_config,
 )
+from mlx_quant_fidelity.probes.kv_methods import StockKVMethod
 
 # ---------------------------------------------------------------------------
 # Task 4.1 — pure helpers: capability gate, exact-zero guard, aggregation
 # ---------------------------------------------------------------------------
-
-
-class _NoQuantCache:
-    pass  # no to_quantized attribute
-
-
-class _RaisingQuantCache:
-    def to_quantized(self, **_kwargs):
-        raise NotImplementedError
-
-
-class _OkCache:
-    def to_quantized(self, **_kwargs):
-        return self
 
 
 def test_exact_zero_guard_raises_on_identical():
@@ -52,15 +40,6 @@ def test_exact_zero_guard_raises_on_identical():
 
 def test_exact_zero_guard_silent_when_nonzero():
     _check_exact_zero(kl_mean=0.3, flip_rate=0.1, context="quantization did not engage")  # no raise
-
-
-def test_capability_gate_flags_unsupported():
-    # (b) NYI cache (has the attr but raises) => flagged unsupported, naming the type, not a crash
-    with pytest.raises(CacheNotQuantizableError, match="_RaisingQuantCache"):
-        _cache_is_quantizable([_RaisingQuantCache()], group_size=64, bits=4)
-    with pytest.raises(CacheNotQuantizableError, match="_NoQuantCache"):
-        _cache_is_quantizable([_NoQuantCache()], group_size=64, bits=4)
-    assert _cache_is_quantizable([_OkCache()], group_size=64, bits=4) is True
 
 
 def test_two_chunk_aggregation_combines_both():
@@ -125,28 +104,6 @@ def test_score_chunk_identical_paths_is_exactly_zero():
     mx.eval(kl, flips, ref_nll, quant_nll)
     assert float(kl.mean()) == 0.0
     assert int(flips.astype(mx.int32).sum()) == 0
-
-
-# ---------------------------------------------------------------------------
-# Task 4.4 — gate ValueError branch and unsupported-bits check
-# ---------------------------------------------------------------------------
-
-
-class _ValueErrorCache:
-    def to_quantized(self, **_kwargs):
-        raise ValueError("group_size=64 does not divide head_dim=48")
-
-
-def test_capability_gate_value_error_branch():
-    # ValueError from to_quantized -> CacheNotQuantizableError naming the type
-    with pytest.raises(CacheNotQuantizableError, match="_ValueErrorCache"):
-        _cache_is_quantizable([_ValueErrorCache()], group_size=64, bits=4)
-
-
-def test_capability_gate_unsupported_bits():
-    # bits=5 is not in (2,3,4,6,8) -> CacheNotQuantizableError naming kv_bits=5
-    with pytest.raises(CacheNotQuantizableError, match="kv_bits=5"):
-        _cache_is_quantizable([_OkCache()], group_size=64, bits=5)
 
 
 # ---------------------------------------------------------------------------
@@ -226,21 +183,6 @@ def test_kv_head_dim_prefers_explicit_then_derives():
     assert _kv_head_dim(_ModelWithArgs(_Args(head_dim=None))) is None  # nothing derivable
 
 
-def test_head_dim_gate_raises_on_non_divisor():
-    with pytest.raises(CacheNotQuantizableError, match="head_dim=48"):
-        _head_dim_gate(head_dim=48, kv_group_size=64, model_type="llama")
-
-
-def test_head_dim_gate_passes_on_divisor():
-    assert _head_dim_gate(head_dim=64, kv_group_size=64, model_type="llama") is None
-
-
-def test_head_dim_gate_warns_when_unknown():
-    warning = _head_dim_gate(head_dim=None, kv_group_size=64, model_type="mystery")
-    assert warning is not None
-    assert "mystery" in warning
-
-
 def test_measure_kv_rejects_incompatible_group_size_before_scoring(monkeypatch):
     """An incompatible kv_group_size raises CacheNotQuantizableError after load but BEFORE
     make_prompt_cache / any scoring (monkeypatched load + make_prompt_cache record order).
@@ -308,6 +250,14 @@ class _FakeDivergentModel:
     Returns peak on token 0 for ref cache (no .bits) and peak on token 1 for quant cache
     (has .bits), producing divergent logits so KLD > 0 and _check_exact_zero runs live.
     head_dim=64, kv_group_size default 64: 64 % 64 == 0 so no head_dim warning fires.
+
+    vocab_size=4 (not 3): _kv_corpus's default chunk_len=4 yields targets up to 3, and
+    mx.take_along_axis on an out-of-range target index is an undefined-behavior memory read
+    (proven via test_sugar_kwargs_and_explicit_stock_method_agree, which compares two runs'
+    NLL-derived perplexity bit-for-bit and flaked across process runs at vocab_size=3 — KL and
+    flip did not flake, since neither metric gathers at the target index). 4 classes keeps every
+    target from _kv_corpus(_, 4) in range; no test in this file pins an exact KL/perplexity
+    number against this model, so the small shift from the extra always-zero class is harmless.
     """
 
     def __init__(self, head_dim=64):
@@ -319,13 +269,13 @@ class _FakeDivergentModel:
                 "head_dim": head_dim,
                 "hidden_size": None,
                 "num_attention_heads": None,
-                "vocab_size": 3,
+                "vocab_size": 4,
             },
         )()
 
-    def __call__(self, inp, cache=None):  # inp [1, L]; returns [1, L, 3]
+    def __call__(self, inp, cache=None):  # inp [1, L]; returns [1, L, 4]
         bump = 1 if (cache is not None and getattr(cache[0], "bits", None) is not None) else 0
-        out = mx.zeros((1, inp.shape[1], 3))
+        out = mx.zeros((1, inp.shape[1], 4))
         out[:, :, bump] = 5.0
         return out
 
@@ -354,12 +304,8 @@ def _kv_corpus(n_chunks, chunk_len=4):
 
 
 def _patch_kv_caches_divergent(monkeypatch, n_layers=2):
-    """Patch cache helpers so ref and quant caches are distinguishable by .bits.
+    from mlx_quant_fidelity.probes import kv_methods
 
-    make_prompt_cache returns _FakeLayerCache (no .bits → ref peak 0).
-    QuantizedKVCache returns _FakeQuantCache (has .bits=4 → quant peak 1).
-    _check_exact_zero is NOT silenced: divergent logits yield KLD > 0.
-    """
     monkeypatch.setattr(
         kvmod,
         "make_prompt_cache",
@@ -367,7 +313,9 @@ def _patch_kv_caches_divergent(monkeypatch, n_layers=2):
         raising=False,
     )
     monkeypatch.setattr(
-        kvmod, "QuantizedKVCache", lambda group_size, bits: _FakeQuantCache(), raising=False
+        kv_methods.StockKVMethod,
+        "make_cache",
+        lambda self, *, n_layers: [_FakeQuantCache() for _ in range(n_layers)],
     )
 
 
@@ -406,10 +354,10 @@ def test_score_kv_config_caps_provided_corpus(monkeypatch):
 
 
 def test_score_kv_config_emits_warning_when_head_dim_unknown(monkeypatch):
-    """score_kv_config appends a warning when head_dim is not derivable (covers kv.py line 135).
+    """score_kv_config appends a warning when head_dim is not derivable.
 
     Uses _FakeDivergentModel with head_dim=None and no hidden_size/num_attention_heads
-    so _kv_head_dim returns None → _head_dim_gate returns a warning string → line 135 runs.
+    so _kv_head_dim returns None → method.check(...) returns a warning string.
     KLD is still > 0 (divergent caches) so _check_exact_zero does not fire.
     """
 
@@ -446,6 +394,8 @@ def test_score_kv_config_raises_exact_zero_when_quant_indistinguishable(monkeypa
     emit a silent "perfect fidelity" report. Guard mutation: deleting the _check_exact_zero(...)
     call in score_kv_config makes this return a report instead of raising.
     """
+    from mlx_quant_fidelity.probes import kv_methods
+
     monkeypatch.setattr(
         kvmod,
         "make_prompt_cache",
@@ -453,7 +403,9 @@ def test_score_kv_config_raises_exact_zero_when_quant_indistinguishable(monkeypa
         raising=False,
     )
     monkeypatch.setattr(
-        kvmod, "QuantizedKVCache", lambda group_size, bits: _FakeLayerCache(), raising=False
+        kv_methods.StockKVMethod,
+        "make_cache",
+        lambda self, *, n_layers: [_FakeLayerCache() for _ in range(n_layers)],
     )
     with pytest.raises(ExactZeroError):
         score_kv_config(_FakeDivergentModel(), _kv_corpus(1), model_id="org/m")
@@ -487,7 +439,12 @@ def test_score_chunk_deployment_boundary():
     ref_cache = [_FakeLayerCachePreQ()]
     quant_cache = [_FakeLayerCachePreQ()]  # full-precision; converted at the boundary
     kl, flips, ref_nll, quant_nll = _score_chunk_deployment(
-        model, ids, ref_cache, quant_cache, quantize_start=n, group_size=64, bits=4
+        model,
+        ids,
+        ref_cache,
+        quant_cache,
+        quantize_start=n,
+        method=StockKVMethod(bits=4, group_size=64),
     )
     mx.eval(kl, flips, ref_nll, quant_nll)
     assert kl.shape == (5,)  # all L-1 positions returned
@@ -874,3 +831,113 @@ def test_score_kv_config_reports_device_from_device_string(monkeypatch):
     monkeypatch.setattr(kvmod, "device_string", lambda: "Sentinel Chip, 99 GB")
     report = score_kv_config(_FakeDivergentModel(), _kv_corpus(1), model_id="org/m")
     assert report.device == "Sentinel Chip, 99 GB"
+
+
+# ---------------------------------------------------------------------------
+# 0046 — score_kv_config routed through the KV-cache method seam
+# ---------------------------------------------------------------------------
+
+
+def _patch_prompt_cache(monkeypatch, n_layers=2):
+    monkeypatch.setattr(
+        kvmod,
+        "make_prompt_cache",
+        lambda model: [FakeFullCache() for _ in range(n_layers)],
+        raising=False,
+    )
+
+
+def test_seam_stress_consumes_make_cache_and_records_method(monkeypatch):
+    _patch_prompt_cache(monkeypatch)
+    method = FakeKVMethod()
+    report = score_kv_config(FakeMethodModel(), _kv_corpus(2, 4), model_id="org/m", method=method)
+    # peak-shift [5,0,0] vs [0,5,0] -> 4.90 nats per position, hand-computed (same as _score_chunk test)
+    assert math.isclose(report.kl.mean, 4.90, abs_tol=0.02)
+    # pre-flight order is load-bearing (spec §2): check -> probe_capability -> guard -> make_cache
+    assert method.calls[:4] == ["check", "probe_capability", "guard", "make_cache"]
+    assert report.kv_method == "fake"
+    assert report.kv_method_params == {"bits": 1}
+    assert report.kv_method_provenance == {"package": "fake", "version": "0"}
+    assert "fake method note" in report.warnings
+    assert report.kv_bits == 1
+    assert report.kv_group_size is None
+
+
+def test_seam_records_measured_bytes_from_first_chunk_only(monkeypatch):
+    _patch_prompt_cache(monkeypatch)
+    method = FakeKVMethod()
+    report = score_kv_config(FakeMethodModel(), _kv_corpus(3, 4), model_id="org/m", method=method)
+    # first (and only) measurement: 144 B * 1 * 2 layers / offset 4 = 72 B/token
+    assert report.measured_kv_bytes_per_token == 72
+    assert method.calls.count("measured_bytes") == 1
+    assert method.calls.count("make_cache") == 3
+
+
+def test_seam_warns_when_measured_disagrees_with_analytic(monkeypatch):
+    _patch_prompt_cache(monkeypatch)
+    # kv_heads known -> analytic = 100 * 2 layers = 200 B/token; measured = 72 -> warning
+    report = score_kv_config(
+        FakeMethodModel(kv_heads=2), _kv_corpus(1, 4), model_id="org/m", method=FakeKVMethod()
+    )
+    assert any(
+        "measured KV bytes/token 72 differs from the analytic 200" in w for w in report.warnings
+    )
+
+
+def test_seam_deployment_consumes_convert_prefix_positive(monkeypatch):
+    _patch_prompt_cache(monkeypatch, n_layers=1)
+    method = FakeKVMethod()
+    report = score_kv_config(
+        FakeMethodModel(), _kv_corpus(1, 6), model_id="org/m", method=method, quantize_start=2
+    )
+    assert "convert_prefix" in method.calls
+    assert report.quantize_mode == "deployment"
+    assert report.n_positions == 6 - 1 - 2
+    assert math.isclose(
+        report.kl.mean, 4.90, abs_tol=0.02
+    )  # the RETURNED marked cache drove segment 2
+
+
+def test_seam_deployment_noop_convert_trips_exact_zero(monkeypatch):
+    _patch_prompt_cache(monkeypatch, n_layers=1)
+    with pytest.raises(ExactZeroError):
+        score_kv_config(
+            FakeMethodModel(),
+            _kv_corpus(1, 6),
+            model_id="org/m",
+            method=FakeKVMethod(convert_noop=True),
+            quantize_start=2,
+        )
+
+
+def test_sugar_kwargs_and_explicit_stock_method_agree(monkeypatch):
+    _patch_kv_caches_divergent(monkeypatch)
+    a = score_kv_config(
+        _FakeDivergentModel(), _kv_corpus(2, 4), model_id="org/m", kv_bits=4, kv_group_size=64
+    )
+    b = score_kv_config(
+        _FakeDivergentModel(),
+        _kv_corpus(2, 4),
+        model_id="org/m",
+        method=StockKVMethod(bits=4, group_size=64),
+    )
+    da, db = dataclasses.asdict(a), dataclasses.asdict(b)
+    da.pop("peak_memory_bytes"), db.pop("peak_memory_bytes")  # process-wide high-water mark
+    assert da == db
+
+
+def test_method_with_non_default_sugar_raises():
+    with pytest.raises(CompareConfigError, match="method"):
+        score_kv_config(
+            FakeMethodModel(), _kv_corpus(1, 4), model_id="org/m", method=FakeKVMethod(), kv_bits=8
+        )
+
+
+def test_warnings_order_head_dim_then_budget(monkeypatch):
+    """Stock byte-identity depends on the 0.5.x warnings order: head_dim warning, then budget."""
+    _patch_kv_caches_divergent(monkeypatch)
+    monkeypatch.setattr(kvmod, "_preflight_logits_budget", lambda window, vocab: "budget note")
+    report = score_kv_config(_FakeDivergentModel(head_dim=None), _kv_corpus(1, 4), model_id="org/m")
+    assert len(report.warnings) == 2
+    assert "unverified for 'llama'" in report.warnings[0]
+    assert report.warnings[1] == "budget note"

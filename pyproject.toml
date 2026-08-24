@@ -95,6 +95,10 @@ convention = "google"
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**/*.py" = ["D", "ANN", "S101"]
+"src/mlx_quant_fidelity/probes/kv_methods.py" = ["TID251"]
+
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+"mlx_lm.models.cache.QuantizedKVCache".msg = "method-specific: use probes/kv_methods.py"
 
 [tool.ruff.format]
 docstring-code-format = true
