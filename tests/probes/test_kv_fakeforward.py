@@ -295,10 +295,19 @@ class _FakeQuantCache:
         return self
 
 
-def _kv_corpus(n_chunks, chunk_len=4):
-    chunks = tuple(mx.arange(chunk_len) for _ in range(n_chunks))
+def _kv_corpus(n_chunks, chunk_len=4, prov_chunk_len=None):
+    chunks = tuple(mx.arange(chunk_len) % 3 for _ in range(n_chunks))
+    declared_len = chunk_len if prov_chunk_len is None else prov_chunk_len
     prov = CorpusProvenance(
-        "x", "test", "org/m", chunk_len, chunk_len, "none", "drop", "raw", chunk_len * n_chunks
+        "x",
+        "test",
+        "org/m",
+        declared_len,
+        declared_len,
+        "none",
+        "drop",
+        "raw",
+        chunk_len * n_chunks,
     )
     return Corpus(chunks=chunks, provenance=prov)
 
@@ -483,7 +492,7 @@ def test_score_kv_config_deployment_skips_short_chunk(monkeypatch):
     # A mixed corpus: one full (len 6) + one short (len 3 < N+2 for N=2). Short is skipped, not fatal.
     _patch_kv_caches_deployment(monkeypatch)
     mixed = Corpus(
-        chunks=(mx.arange(6), mx.arange(3)),
+        chunks=(mx.arange(6) % 4, mx.arange(3)),  # vocab_size=4: keep the long chunk in-vocab
         provenance=CorpusProvenance("x", "test", "org/m", 6, 6, "none", "drop", "raw", 9),
     )
     report = score_kv_config(_FakeDivergentModel(), mixed, model_id="org/m", quantize_start=2)
@@ -884,6 +893,38 @@ def test_seam_warns_when_measured_disagrees_with_analytic(monkeypatch):
     )
 
 
+class _NoOffsetCache:
+    """A stored cache with no `.offset` — some third-party caches may not report one.
+
+    ``marker = True`` keeps it on the quantized (peak-shifted) path in FakeMethodModel,
+    same convention as fake_kv_method.FakeQuantCache.
+    """
+
+    marker = True
+
+    @property
+    def state(self):
+        return (mx.zeros((1, 1, 4, 8), dtype=mx.uint32), mx.zeros((1, 1, 4), dtype=mx.float32))
+
+
+class _NoOffsetMethod(FakeKVMethod):
+    """FakeKVMethod whose make_cache returns caches without .offset."""
+
+    def make_cache(self, *, n_layers):
+        self.calls.append("make_cache")
+        return [_NoOffsetCache() for _ in range(n_layers)]
+
+
+def test_measured_bytes_per_token_is_none_without_offset(monkeypatch):
+    """A cache with no `.offset` must report measured_kv_bytes_per_token=None, not crash or warn."""
+    _patch_prompt_cache(monkeypatch)
+    report = score_kv_config(
+        FakeMethodModel(), _kv_corpus(1, 4), model_id="org/m", method=_NoOffsetMethod()
+    )
+    assert report.measured_kv_bytes_per_token is None
+    assert not any("differs from the analytic" in w for w in report.warnings)
+
+
 def test_seam_deployment_consumes_convert_prefix_positive(monkeypatch):
     _patch_prompt_cache(monkeypatch, n_layers=1)
     method = FakeKVMethod()
@@ -941,3 +982,54 @@ def test_warnings_order_head_dim_then_budget(monkeypatch):
     assert len(report.warnings) == 2
     assert "unverified for 'llama'" in report.warnings[0]
     assert report.warnings[1] == "budget note"
+
+
+# ---------------------------------------------------------------------------
+# review follow-up — non-stock large window gets a validation warning; stock never does
+# ---------------------------------------------------------------------------
+
+
+def test_nonstock_large_window_warns_stock_stays_silent(monkeypatch):
+    """The chunk-length memory ceiling was validated on the stock cache only.
+
+    Uses ``_kv_corpus``'s ``prov_chunk_len`` to declare a >512-token window while the
+    actual scored chunk stays tiny, so this exercises the warning without a real
+    long-window forward pass. Stock at the identical declared window must stay silent —
+    the byte-identity gate (test_samples_regression.py) requires stock never carry a
+    warning this rule wasn't already producing.
+    """
+    _patch_prompt_cache(monkeypatch)
+    fake_report = score_kv_config(
+        FakeMethodModel(),
+        _kv_corpus(1, 4, prov_chunk_len=1024),
+        model_id="org/m",
+        method=FakeKVMethod(),
+    )
+    assert any(
+        "chunk_length=1024" in w and "'fake'" in w and "additional full-precision" in w
+        for w in fake_report.warnings
+    )
+
+    _patch_kv_caches_divergent(monkeypatch)
+    stock_report = score_kv_config(
+        _FakeDivergentModel(), _kv_corpus(1, 4, prov_chunk_len=1024), model_id="org/m"
+    )
+    assert not any("memory ceiling was validated" in w for w in stock_report.warnings)
+
+
+# ---------------------------------------------------------------------------
+# review follow-up — out-of-vocab corpus tokens raise before any scoring
+# ---------------------------------------------------------------------------
+
+
+def test_out_of_vocab_corpus_raises_before_scoring(monkeypatch):
+    _patch_prompt_cache(monkeypatch)
+    chunks = (mx.array([0, 1, 5]),)  # 5 >= vocab_size 3
+    prov = CorpusProvenance("x", "test", "org/m", 3, 3, "none", "drop", "raw", 3)
+    with pytest.raises(CorpusError, match="vocab_size is 3"):
+        score_kv_config(
+            FakeMethodModel(),
+            Corpus(chunks=chunks, provenance=prov),
+            model_id="org/m",
+            method=FakeKVMethod(),
+        )

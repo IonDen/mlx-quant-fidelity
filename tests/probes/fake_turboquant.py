@@ -27,12 +27,14 @@ class FakeTurboQuantKVCache:
         self._shape = None
         self.trim_calls = []
         self._k_deq_buf = None
+        self._v_deq_buf = None
 
     def update_and_fetch(self, keys, values):
         b, h, s, d = keys.shape
         self._shape = (b, h, d)
         self.offset += s
-        self._k_deq_buf = keys  # the real port retains a dequant buffer until trim()
+        self._k_deq_buf = keys  # the real port retains dequant buffers until trim()
+        self._v_deq_buf = values
         # "dequantize": a lossy but deterministic round-trip so KLD is non-zero downstream
         return mx.round(keys, 1), mx.round(values, 1)
 
@@ -48,6 +50,7 @@ class FakeTurboQuantKVCache:
     def trim(self, n):
         self.trim_calls.append(n)
         self._k_deq_buf = None
+        self._v_deq_buf = None
         return 0
 
 
@@ -56,6 +59,14 @@ class _WrongOffsetCache(FakeTurboQuantKVCache):
         out = super().update_and_fetch(keys, values)
         self.offset -= 1  # under-counts: the behavioural contract must catch this
         return out
+
+
+class _StickyTrimCache(FakeTurboQuantKVCache):
+    """A port whose trim() records the call but leaves the dequant buffers resident."""
+
+    def trim(self, n):
+        self.trim_calls.append(n)
+        return 0
 
 
 def _raising_property(name):
@@ -74,12 +85,18 @@ def install_fake_port(
     no_cache_module=False,
     with_bits_attr=False,
     wrong_behaviour=False,
+    bad_trim=False,
 ):
     """Install a fake ``turboquant_mlx`` into sys.modules; returns the fake cache class."""
     pkg = types.ModuleType("turboquant_mlx")
     if not no_version:
         pkg.__version__ = version
-    base = _WrongOffsetCache if wrong_behaviour else FakeTurboQuantKVCache
+    if bad_trim:
+        base = _StickyTrimCache
+    elif wrong_behaviour:
+        base = _WrongOffsetCache
+    else:
+        base = FakeTurboQuantKVCache
     cls = type("TurboQuantKVCache", (base,), {})
     for name in missing:
         setattr(cls, name, _raising_property(name))

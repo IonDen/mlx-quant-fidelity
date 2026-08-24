@@ -186,6 +186,8 @@ pip install "turboquant-mlx @ git+https://github.com/arozanov/turboquant-mlx@6e9
 mlx-quant-fidelity compare kv mlx-community/Llama-3.2-1B-Instruct-4bit --configs 8:64,4:64,turboquant:4,turboquant:3
 ```
 
+With uv, `uv sync --group turboquant` installs the same pin.
+
 ```
 # Quant comparison (kv) vs `mlx-community/Llama-3.2-1B-Instruct-4bit`
 
@@ -200,8 +202,9 @@ mlx-quant-fidelity compare kv mlx-community/Llama-3.2-1B-Instruct-4bit --configs
 Read this table with two caveats. In a teacher-forced pass the TurboQuant cache dequantizes on
 fetch and runs standard attention, so its number is the quantizer alone, while the stock number
 also includes mlx-lm's quantized attention path. And the cost column is stored bytes: in this path
-the TurboQuant cache also keeps full-precision working copies, about 2.3× the size of an fp16
-cache, so peak memory does not show the compression that a fused decode deployment would. Only the
+the TurboQuant cache also keeps full-precision working copies, roughly 2.3× the size of an fp16
+cache (derived from its retained dequantization buffers), so peak memory does not show the
+compression that a fused decode deployment would. Only the
 uniform-bit cache at the port's default seed is measured; its asymmetric and layer-adaptive
 configurations are not. Sample captured on Apple M1 Max, 32 GB, revision `08231374…`, 100 chunks
 of 512 tokens, stress mode.

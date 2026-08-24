@@ -243,6 +243,13 @@ def score_kv_config(
     )
     if budget_warning is not None:
         probe_warnings.append(budget_warning)
+    window = getattr(corpus.provenance, "chunk_length", None)
+    if method.name != "stock" and isinstance(window, int) and window > 512:
+        probe_warnings.append(
+            f"chunk_length={window}: the memory ceiling was validated on the stock method; "
+            f"method {method.name!r} retains additional full-precision working buffers, so "
+            "validate peak memory before trusting large windows."
+        )
 
     probe_cache = make_prompt_cache(model)
     n_layers = len(probe_cache)
@@ -251,6 +258,15 @@ def score_kv_config(
 
     mode = "stress" if quantize_start == 0 else "deployment"
     chunks = corpus.chunks[:max_chunks] if max_chunks is not None else corpus.chunks
+    vocab_size = getattr(getattr(model, "args", None), "vocab_size", None)
+    if isinstance(vocab_size, int) and vocab_size > 0 and chunks:
+        max_id = max(int(mx.max(ids)) for ids in chunks)
+        if max_id >= vocab_size:
+            raise CorpusError(
+                f"corpus contains token id {max_id} but the model's vocab_size is {vocab_size}; "
+                "a mismatched tokenizer or corpus would gather out of range and produce "
+                "garbage perplexity silently."
+            )
     kls: list[mx.array] = []
     flips: list[mx.array] = []
     ref_nlls: list[mx.array] = []

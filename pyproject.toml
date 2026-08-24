@@ -52,6 +52,9 @@ test = ["pytest>=8.3", "pytest-cov>=5.0", "hypothesis>=6.130"]
 typecheck = ["mypy>=1.13"]
 lint = ["ruff>=0.7"]
 docs = ["matplotlib>=3.9"]
+turboquant = [
+  "turboquant-mlx @ git+https://github.com/arozanov/turboquant-mlx@6e928d715595dee9f6b6cc3968baa44e1f408d28",
+]
 dev = [
   { include-group = "test" },
   { include-group = "typecheck" },

@@ -83,7 +83,12 @@ def main(argv: list[str] | None = None) -> int:
     kv = sub.add_parser("kv", help="measure KV-cache quantization fidelity")
     kv.add_argument("model")
     kv.add_argument("--kv-bits", type=int, default=4)
-    kv.add_argument("--kv-method", choices=sorted(METHODS), default="stock")
+    kv.add_argument(
+        "--kv-method",
+        choices=sorted(METHODS),
+        default="stock",
+        help="cache method to measure (default stock)",
+    )
     kv.add_argument("--kv-group-size", type=int, default=None)
     kv.add_argument("--kv-seed", type=int, default=None)
     kv.add_argument("--quantize-start", type=int, default=0)
@@ -110,7 +115,12 @@ def main(argv: list[str] | None = None) -> int:
 
     ck = csub.add_parser("kv", help="rank N (bits:group_size) KV configs on one model")
     ck.add_argument("model")
-    ck.add_argument("--configs", default=None, help="e.g. '4:32,4:64,8:64'")
+    ck.add_argument(
+        "--configs",
+        default=None,
+        help="e.g. '4:32,4:64,8:64,turboquant:4' (methods: bits:group_size = stock; "
+        "turboquant:bits[:seed], seed >= 1)",
+    )
     ck.add_argument(
         "--sweep",
         action="store_true",

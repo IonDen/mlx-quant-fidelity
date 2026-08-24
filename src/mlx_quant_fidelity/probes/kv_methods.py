@@ -36,7 +36,10 @@ class KVCacheMethod(Protocol):
 
     Pure members (``name``, ``label``, ``params``, ``check``, ``bytes_per_token``,
     ``provenance``, ``report_warnings``) run without a model. Impure members build or
-    inspect real cache objects.
+    inspect real cache objects. Implementations must not force evaluation in
+    ``make_cache``, ``measured_bytes``, ``bytes_per_token`` or ``guard`` (they run inside
+    the probe's chunk loop); ``convert_prefix`` must return caches whose ``state`` has
+    been evaluated.
     """
 
     @property
@@ -217,11 +220,19 @@ class StockKVMethod:
         ]
 
     def convert_prefix(self, fp_cache: list[object]) -> list[object]:
-        """``to_quantized`` on each stored full-precision layer (mirrors mlx-lm's boundary)."""
-        return [
+        """``to_quantized`` on each stored full-precision layer (mirrors mlx-lm's boundary).
+
+        Evaluates every converted layer's state immediately: the values are unchanged, only
+        the materialization point moves earlier, releasing the full-precision prefix before
+        segment 2 (the seam's contract requires ``convert_prefix`` to return already-evaluated
+        state; see :class:`KVCacheMethod`).
+        """
+        out = [
             c.to_quantized(group_size=self.group_size, bits=self.bits)  # type: ignore[attr-defined]
             for c in fp_cache
         ]
+        mx.eval([c.state for c in out])
+        return out
 
     def guard(self) -> AbstractContextManager[None]:
         """The packed-width belt."""
@@ -260,17 +271,26 @@ def _packed_dim(head_dim: int, bits: int) -> int:
     return -(-head_dim // _VALS_PER_WORD[bits])
 
 
-def _gate_turboquant_head_dim(head_dim: int | None, *, model_type: str) -> None:
+def _gate_turboquant_head_dim(head_dim: int | None, *, model_type: str | None = None) -> None:
     """Raise unless head_dim is known, a power of two, and <= 256.
 
     The port's fused Metal kernels have no dimension assert: a non-power-of-two head_dim returns
     plausible but wrong values and > 256 overruns the threadgroup arrays. Nothing downstream can
-    catch either, so this pure gate is the only line of defence.
+    catch either, so this pure gate is the only line of defence. ``model_type`` names the model in
+    the message when the caller has one (``check``); ``turboquant_bytes_per_token`` is called with
+    only a geometry, so it passes None and the clause naming the model is omitted rather than
+    printing a placeholder like ``model '?'``.
     """
-    if head_dim is None or head_dim & (head_dim - 1) or head_dim > _TURBOQUANT_MAX_HEAD_DIM:
+    if (
+        head_dim is None
+        or head_dim <= 0
+        or head_dim & (head_dim - 1)
+        or head_dim > _TURBOQUANT_MAX_HEAD_DIM
+    ):
+        model_clause = f" model '{model_type}' has" if model_type is not None else " got"
         raise CacheNotQuantizableError(
             f"TurboQuant-MLX kernels require a known power-of-two head_dim <= "
-            f"{_TURBOQUANT_MAX_HEAD_DIM}; model '{model_type}' has head_dim={head_dim}. This is a "
+            f"{_TURBOQUANT_MAX_HEAD_DIM};{model_clause} head_dim={head_dim}. This is a "
             "limitation of the port's kernels, not of the model."
         )
 
@@ -282,7 +302,7 @@ def turboquant_bytes_per_token(*, n_layers: int, n_kv_heads: int, head_dim: int,
     K and V; every layer. Reproduces 9216 / 8192 / 5120 B/token at 4/3/2 bits on Llama-3.2-1B
     (16 layers x 8 heads x 64 dims), including the 3-bit round-up from ``VALS_PER_WORD[3] == 10``.
     """
-    _gate_turboquant_head_dim(head_dim, model_type="?")
+    _gate_turboquant_head_dim(head_dim)
     per_token_head = _packed_dim(head_dim, bits) * 4 + 4
     return per_token_head * 2 * n_kv_heads * n_layers
 
@@ -397,7 +417,10 @@ class TurboQuantKVMethod:
         The contract feeds 8 tokens through a throwaway cache and forces the graph, so a Metal
         compile/dispatch failure surfaces here as MethodUnavailableError instead of mid-run
         (where ``guard()`` is a no-op for this method). Costs one JIT per process (~50 ms),
-        then well under a millisecond per call.
+        then well under a millisecond per call. Also proves ``trim(0)`` actually releases the
+        retained dequantized working buffers (the basis of the 2.3x memory note): a port whose
+        trim leaves them resident would silently make ``convert_prefix`` retain full-precision
+        working copies of the prefix past the boundary.
         """
         from mlx_lm.models.cache import KVCache
 
@@ -425,6 +448,15 @@ class TurboQuantKVMethod:
             raise MethodUnavailableError(
                 f"TurboQuantKVCache behaviour differs from the pinned port (offset {got_offset} != 8 "
                 f"or stored bytes {got_bytes} != {expected}); expected {TURBOQUANT_PINNED_COMMIT}."
+            )
+        probe.trim(0)  # type: ignore[attr-defined]
+        if (
+            getattr(probe, "_k_deq_buf", None) is not None
+            or getattr(probe, "_v_deq_buf", None) is not None
+        ):
+            raise MethodUnavailableError(
+                "TurboQuantKVCache.trim(0) did not release the dequantized working buffers; "
+                f"expected the port at {TURBOQUANT_PINNED_COMMIT}."
             )
 
     def make_cache(self, *, n_layers: int) -> list[object]:
@@ -490,8 +522,9 @@ class TurboQuantKVMethod:
             "quantizer round-trip only, while stock bundles quantizer + quantized-attention "
             "numerics; uniform-bit cache at the port's default seed — its asymmetric and "
             "layer-adaptive configurations are not measured; resident memory in this path is the "
-            "stored bytes plus two full-precision working copies, about 2.3x an fp16 cache "
-            "(measured on Llama-3.2-1B), so peak memory does not show the compression."
+            "stored bytes plus two full-precision working copies — roughly 2.3x an fp16 cache on "
+            "Llama-3.2-1B geometry, derived from the port's retained dequantization buffers — so "
+            "peak memory does not show the compression."
         ]
         commit = _installed_commit()
         if commit != TURBOQUANT_PINNED_COMMIT:
@@ -503,7 +536,7 @@ class TurboQuantKVMethod:
 
 
 def _positive_ints(parts: list[str], *, spec: str, expected: str) -> list[int]:
-    if not parts or not all(p.isdigit() and int(p) > 0 for p in parts):
+    if not parts or not all(p.isascii() and p.isdigit() and int(p) > 0 for p in parts):
         raise CompareConfigError(f"--configs entry {spec!r} must be {expected} (e.g. 4:64).")
     return [int(p) for p in parts]
 
@@ -513,7 +546,8 @@ def parse_method_spec(spec: str) -> KVCacheMethod:
 
     A bare ``bits:group_size`` is stock (backward-compatible). Raises CompareConfigError
     (a ValueError) on anything malformed. The parser enumerates the shipped methods by
-    hand; ``METHODS`` is the CLI's choices list, not a registry (a registry is 0022's job).
+    hand; ``METHODS`` is the CLI's choices list, not a registry (a plugin registry is
+    future work).
     """
     parts = spec.split(":")
     if parts and parts[0].isdigit():

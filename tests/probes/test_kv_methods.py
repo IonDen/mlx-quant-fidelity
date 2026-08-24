@@ -39,7 +39,19 @@ def test_parse_stock_specs(spec, expected):
 
 @pytest.mark.parametrize(
     "spec",
-    ["", "4", "stock:4", "4:0", "0:64", "4:64:1", "four:64", "nosuch:4", "stock:4:64:9"],
+    [
+        "",
+        "4",
+        "stock:4",
+        "4:0",
+        "0:64",
+        "4:64:1",
+        "four:64",
+        "nosuch:4",
+        "stock:4:64:9",
+        "²:64",  # unicode superscript digit: isdigit() but not isascii()
+        "turboquant:²",
+    ],
 )
 def test_parse_rejects_malformed(spec):
     with pytest.raises(CompareConfigError):
@@ -211,7 +223,7 @@ def test_turboquant_check_accepts_power_of_two_up_to_256(head_dim):
     assert TurboQuantKVMethod(bits=4).check(head_dim=head_dim, model_type="llama") == []
 
 
-@pytest.mark.parametrize("head_dim", [None, 48, 80, 96, 160, 512])
+@pytest.mark.parametrize("head_dim", [None, 0, 48, 80, 96, 160, 512])
 def test_turboquant_check_raises_on_unsupported_head_dim(head_dim):
     with pytest.raises(CacheNotQuantizableError, match="TurboQuant-MLX kernels"):
         TurboQuantKVMethod(bits=4).check(head_dim=head_dim, model_type="phi3")
@@ -291,6 +303,12 @@ def test_bits_attribute_is_rejected_to_keep_standard_sdpa(monkeypatch):
 def test_behavioural_contract_catches_wrong_offset(monkeypatch):
     install_fake_port(monkeypatch, wrong_behaviour=True)
     with pytest.raises(MethodUnavailableError, match="behaviour differs"):
+        TurboQuantKVMethod(bits=4).probe_capability([KVCache()])
+
+
+def test_behavioural_contract_catches_sticky_trim(monkeypatch):
+    install_fake_port(monkeypatch, bad_trim=True)
+    with pytest.raises(MethodUnavailableError, match="did not release"):
         TurboQuantKVMethod(bits=4).probe_capability([KVCache()])
 
 

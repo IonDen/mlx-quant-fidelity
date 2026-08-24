@@ -41,3 +41,11 @@ def test_badge_sample_matches_committed():
         render_badge_markdown(fidelity_report_from_dict(src)).strip()
         == (SAMPLES / "kv-badge.md").read_text().strip()
     )
+
+
+def test_readme_method_table_matches_committed_sample():
+    readme = (SAMPLES.parents[1] / "README.md").read_text()
+    table = (SAMPLES / "compare" / "kv-llama-3.2-1b-methods.md").read_text()
+    for line in table.splitlines():
+        if line.startswith("|"):
+            assert line in readme, line

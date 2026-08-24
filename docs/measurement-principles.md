@@ -98,7 +98,7 @@ The KV probe scores any cache implementation that satisfies its method protocol,
 | stock | two `mx.quantized_matmul` calls against the packed K/V, then a precise softmax | quantizer error plus the quantized-attention kernel's own numerics (see "What the numbers don't say" above) |
 | turboquant | dequantizes the cache on fetch and runs standard SDPA, the same kernel the reference run uses | quantizer error alone |
 
-Dequantizing on fetch has a memory cost the stored-bytes column doesn't show: TurboQuant keeps full-precision working copies of the cache resident alongside its packed store. Measured on Llama-3.2-1B, that puts its resident memory at roughly 2.3× an fp16 cache.
+Dequantizing on fetch has a memory cost the stored-bytes column doesn't show: TurboQuant keeps full-precision working copies of the cache resident alongside its packed store. Derived from the port's retained dequantization buffers on Llama-3.2-1B geometry, that puts its resident memory at roughly 2.3× an fp16 cache. The chunk-length memory ceiling was validated on the stock cache; a method that retains full-precision working buffers narrows that margin, and the report warns when a third-party method runs above the 512-token default.
 
 Deployment mode for a third-party cache can't reuse mlx-lm's in-place `to_quantized` conversion, since that method doesn't exist on a third-party cache. Instead, each layer's full-precision state is sliced to `offset` (the stored tokens, never the step-padded buffer mlx-lm allocates ahead of use), replayed through a fresh quantized cache with a single `update_and_fetch`, and then trimmed with `trim(0)` to drop the dequantized working buffers the port retains after that call.
 
