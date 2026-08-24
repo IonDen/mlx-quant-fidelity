@@ -5,6 +5,7 @@ import importlib.metadata
 import json
 import subprocess
 import sys
+from collections.abc import Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -12,7 +13,12 @@ import mlx.core as mx
 
 from mlx_quant_fidelity._memory_caps import install_memory_caps
 from mlx_quant_fidelity.costs import kv_bytes_per_token
-from mlx_quant_fidelity.errors import CompareConfigError, QuantizeStartError, ReportSchemaError
+from mlx_quant_fidelity.errors import (
+    CacheNotQuantizableError,
+    CompareConfigError,
+    QuantizeStartError,
+    ReportSchemaError,
+)
 from mlx_quant_fidelity.policy import VALID_VERDICTS, qualifies
 from mlx_quant_fidelity.probes.kv import (
     MAX_CHUNK_LENGTH,
@@ -20,6 +26,7 @@ from mlx_quant_fidelity.probes.kv import (
     packed_width_mismatch,
     score_kv_config,
 )
+from mlx_quant_fidelity.probes.kv_methods import KVCacheMethod, StockKVMethod
 from mlx_quant_fidelity.ranking import RankPoint, budget_pick, dominated_by, pareto_frontier
 from mlx_quant_fidelity.report import (
     ComparisonReport,
@@ -36,7 +43,7 @@ _asdict = _dc.asdict
 # Bump the relevant constant when that mode's partial format or cost formula changes, so only
 # that mode's old partials are rejected. The two modes' partials are independent — a KV-only
 # change (e.g. adding chunk_length to the identity) must not force weight partials to recompute.
-_KV_PARTIAL_SCHEMA_VERSION = 2
+_KV_PARTIAL_SCHEMA_VERSION = 3
 _WEIGHT_PARTIAL_SCHEMA_VERSION = 1
 
 
@@ -325,8 +332,16 @@ def compare_weight_fidelity(
 
 
 def _kv_config_label(bits: int, group_size: int) -> str:
-    """Human-readable config label used in the report (e.g. '4:64')."""
-    return f"{bits}:{group_size}"
+    """Stock label for the (tuple-typed) sweep helpers — the sweep is stock-only by design."""
+    return StockKVMethod(bits=bits, group_size=group_size).label
+
+
+def _as_method(config: tuple[int, int] | KVCacheMethod) -> KVCacheMethod:
+    """Element-wise normalization: a (bits, group_size) tuple is the stock method."""
+    if isinstance(config, tuple):
+        bits, gs = config
+        return StockKVMethod(bits=bits, group_size=gs)
+    return config
 
 
 _SWEEP_BITS: tuple[int, ...] = (2, 3, 4, 6, 8)
@@ -434,14 +449,20 @@ def filter_configs_by_kv_budget(
 
 
 def _validate_compare_kv_args(
-    configs: list[tuple[int, int]],
+    configs: list[KVCacheMethod],
     *,
     quantize_start: int,
     max_chunks: int | None,
     chunk_length: int,
 ) -> None:
-    """Validate KV-compare arguments. Raise CompareConfigError on bad input."""
-    if len(configs) < 2:
+    """Validate KV-compare arguments. Raise CompareConfigError on bad input.
+
+    Also accepts (bits, group_size) tuples (the pre-0.6.0 call shape) even though the
+    declared type is `KVCacheMethod` — each entry is normalized via `_as_method` before the
+    label/filename checks, so a direct tuple-only call still validates correctly.
+    """
+    methods = [_as_method(c) for c in configs]
+    if len(methods) < 2:
         raise CompareConfigError("compare needs at least 2 KV configs; use the `kv` probe for one.")
     if not (2 <= chunk_length <= MAX_CHUNK_LENGTH):
         raise CompareConfigError(
@@ -455,15 +476,27 @@ def _validate_compare_kv_args(
         )
     if max_chunks is not None and max_chunks < 1:
         raise CompareConfigError(f"max_chunks must be >= 1 (got {max_chunks}).")
-    labels = [_kv_config_label(b, g) for b, g in configs]
+    labels = [m.label for m in methods]
     if len(set(labels)) != len(labels):
         duplicates = {lbl for lbl in labels if labels.count(lbl) > 1}
         raise CompareConfigError(f"duplicate configs produce the same label: {duplicates}")
+    seen: dict[str, str] = {}
+    for m in methods:
+        fname = _kv_partial_filename(m)
+        if "\x00" in fname or "/" in fname or "\\" in fname or ".." in fname:
+            raise CompareConfigError(f"config label {m.label!r} contains a path separator or NUL")
+        if len(fname.encode()) > 255:
+            raise CompareConfigError(f"config label {m.label!r} produces a filename over 255 bytes")
+        if fname in seen:
+            raise CompareConfigError(
+                f"partial-filename collision: {m.label!r} and {seen[fname]!r} both map to {fname!r}"
+            )
+        seen[fname] = m.label
 
 
-def _kv_partial_filename(bits: int, group_size: int) -> str:
-    """Filesystem-safe partial JSON filename: ':' sanitized to '_' (e.g. '4_64.json')."""
-    return f"{bits}_{group_size}.json"
+def _kv_partial_filename(method: KVCacheMethod) -> str:
+    """Filesystem-safe partial JSON filename: the label with ':' -> '_' (e.g. '4_64.json')."""
+    return f"{method.label.replace(':', '_')}.json"
 
 
 def _load_model(model_id: str, revision: str | None) -> tuple[object, object]:  # pragma: no cover
@@ -575,7 +608,7 @@ def _kv_envelope_to_result(label: str, env: dict[str, object]) -> ComparisonTarg
 
 def compare_kv_fidelity(
     model_id: str,
-    configs: list[tuple[int, int]],
+    configs: Sequence[tuple[int, int] | KVCacheMethod],
     *,
     quantize_start: int = 0,
     max_chunks: int | None = None,
@@ -586,7 +619,7 @@ def compare_kv_fidelity(
     chunk_length: int = 512,
     skipped_configs: list[tuple[str, str]] | None = None,
 ) -> ComparisonReport:
-    """Rank N (bits, group_size) KV-cache configs on one model, quality-per-KV-byte-per-token.
+    """Rank N KV-cache methods/configs on one model, quality-per-KV-byte-per-token.
 
     Loads the model ONCE and loops configs via score_kv_config (one model resident — that's
     the whole point vs weight compare which spawns per target). Writes a partial JSON per
@@ -597,7 +630,8 @@ def compare_kv_fidelity(
 
     Args:
         model_id: HuggingFace model ID.
-        configs: List of (bits, group_size) tuples; must contain at least 2 distinct entries.
+        configs: tuples (stock) or `KVCacheMethod` instances, mixed freely; the cost axis is
+            each method's analytic `bytes_per_token`. Must contain at least 2 distinct entries.
         quantize_start: 0 = stress mode (default); ``1 ≤ N ≤ chunk_length - 2`` = deployment
             mode (first N positions computed with a full-precision cache, then the stored prefix
             converts too; metrics cover the post-boundary region).
@@ -623,23 +657,24 @@ def compare_kv_fidelity(
         CompareConfigError: If fewer than 2 configs, max_chunks < 1, duplicate configs, or
             chunk_length is out of range. Subclasses ValueError for backward compatibility.
     """
+    methods = [_as_method(c) for c in configs]
     # ── Validation guards (score_kv_config has none; must live here) ──────────
     _validate_compare_kv_args(
-        configs, quantize_start=quantize_start, max_chunks=max_chunks, chunk_length=chunk_length
+        methods, quantize_start=quantize_start, max_chunks=max_chunks, chunk_length=chunk_length
     )
 
     out_dir = artifacts_dir or Path("_artifacts/compare/kv")
     out_dir.mkdir(parents=True, exist_ok=True)
 
     # ── Determine which configs need scoring (resume: skip valid partials) ────
-    def _read_partial(bits: int, gs: int) -> dict[str, object] | None:
+    def _read_partial(method: KVCacheMethod) -> dict[str, object] | None:
         """Return parsed envelope if the partial matches the current run's full identity.
 
         Returns None (recompute) when the partial is absent, corrupt/truncated, has a
         non-ok status, or its stored run_identity doesn't exactly match the expected
-        identity for this config + current call arguments.
+        identity for this method + current call arguments.
         """
-        partial = out_dir / _kv_partial_filename(bits, gs)
+        partial = out_dir / _kv_partial_filename(method)
         if not partial.exists():
             return None
         try:
@@ -654,8 +689,8 @@ def compare_kv_fidelity(
             "mode": "kv",
             "model_id": model_id,
             "model_revision": model_revision,
-            "bits": bits,
-            "group_size": gs,
+            "method": method.name,
+            "params": dict(method.params),
             "quantize_start": quantize_start,
             "max_chunks": max_chunks,
             "chunk_length": chunk_length,
@@ -665,7 +700,7 @@ def compare_kv_fidelity(
             return None
         return raw
 
-    pending = [(b, g) for b, g in configs if _read_partial(b, g) is None]
+    pending = [m for m in methods if _read_partial(m) is None]
 
     n_layers: int | None = None
     n_kv_heads: int | None = None
@@ -676,37 +711,35 @@ def compare_kv_fidelity(
         model, tokenizer = _load_model(model_id, model_revision)
         n_layers, n_kv_heads, head_dim = _kv_dims(model)
         corpus = _load_corpus_for_kv(tokenizer, model_id, max_chunks, chunk_length=chunk_length)
-        for bits, gs in pending:
+        for method in pending:
             mx.reset_peak_memory()
-            partial = out_dir / _kv_partial_filename(bits, gs)
+            partial = out_dir / _kv_partial_filename(method)
             try:
                 fid_report = score_kv_config(
                     model,
                     corpus,  # type: ignore[arg-type]  # monkeypatched to object in tests
                     model_id=model_id,
                     model_revision=model_revision,
-                    kv_bits=bits,
-                    kv_group_size=gs,
+                    method=method,
                     quantize_start=quantize_start,
                     max_chunks=max_chunks,
                 )
                 cost: int | None
                 if n_layers is not None and n_kv_heads is not None and head_dim is not None:
-                    cost = kv_bytes_per_token(
-                        n_layers=n_layers,
-                        n_kv_heads=n_kv_heads,
-                        head_dim=head_dim,
-                        bits=bits,
-                        group_size=gs,
-                    )
+                    try:
+                        cost = method.bytes_per_token(
+                            n_layers=n_layers, n_kv_heads=n_kv_heads, head_dim=head_dim
+                        )
+                    except CacheNotQuantizableError:
+                        cost = None  # a method that cannot cost this geometry is "cost unavailable"
                 else:
                     cost = None
                 run_identity: dict[str, object] = {
                     "mode": "kv",
                     "model_id": model_id,
                     "model_revision": model_revision,
-                    "bits": bits,
-                    "group_size": gs,
+                    "method": method.name,
+                    "params": dict(method.params),
                     "quantize_start": quantize_start,
                     "max_chunks": max_chunks,
                     "chunk_length": chunk_length,
@@ -730,11 +763,11 @@ def compare_kv_fidelity(
     # ── Collect results (resumed or just-written) ──────────────────────────────
     results: list[ComparisonTargetResult] = []
     corpus_prov: CorpusProvenance | None = None
-    for bits, gs in configs:
-        label = _kv_config_label(bits, gs)
+    for method in methods:
+        label = method.label
         try:
             env: dict[str, object] = json.loads(
-                (out_dir / _kv_partial_filename(bits, gs)).read_text()
+                (out_dir / _kv_partial_filename(method)).read_text()
             )
             result = _kv_envelope_to_result(label, env)
         except (json.JSONDecodeError, OSError, ValueError):

@@ -9,6 +9,7 @@ from tests.test_cli import _fake_report
 
 from mlx_quant_fidelity.errors import CompareConfigError
 from mlx_quant_fidelity.metrics import ScalarSummary
+from mlx_quant_fidelity.probes.kv_methods import StockKVMethod, TurboQuantKVMethod
 from mlx_quant_fidelity.runners import compare as cmp
 
 
@@ -54,9 +55,10 @@ def _patch_kv_compare(
     monkeypatch.setattr(cmp, "_kv_dims", lambda model: dims)
     calls: list[tuple[int, int]] = []
 
-    def fake_score(model, corpus, *, kv_bits, kv_group_size, **kw):  # type: ignore[return]
-        calls.append((kv_bits, kv_group_size))
-        rep = reports.get((kv_bits, kv_group_size))
+    def fake_score(model, corpus, *, method, **kw):  # type: ignore[return]
+        key = (method.params["bits"], method.params.get("group_size", method.params.get("seed")))
+        calls.append(key)
+        rep = reports.get(key)
         if isinstance(rep, Exception):
             raise rep
         return rep
@@ -248,8 +250,9 @@ def test_compare_kv_model_loaded_once(monkeypatch, tmp_path):
         corpus_calls.append(model_id)
         return object()
 
-    def fake_score(model, corpus, *, kv_bits, kv_group_size, **kw):  # type: ignore[return]
-        return reports[(kv_bits, kv_group_size)]
+    def fake_score(model, corpus, *, method, **kw):  # type: ignore[return]
+        key = (method.params["bits"], method.params.get("group_size", method.params.get("seed")))
+        return reports[key]
 
     monkeypatch.setattr(cmp, "score_kv_config", fake_score)
     monkeypatch.setattr(cmp, "_load_corpus_for_kv", counting_load_corpus)
@@ -291,8 +294,9 @@ def test_compare_kv_threads_revision_and_tokenizer(monkeypatch, tmp_path):
 
     reports = {(4, 64): _fid((4, 64), 0.09), (8, 64): _fid((8, 64), 0.01)}
 
-    def fake_score(model, corpus, *, kv_bits, kv_group_size, **kw):  # type: ignore[return]
-        return reports[(kv_bits, kv_group_size)]
+    def fake_score(model, corpus, *, method, **kw):  # type: ignore[return]
+        key = (method.params["bits"], method.params.get("group_size", method.params.get("seed")))
+        return reports[key]
 
     monkeypatch.setattr(cmp, "score_kv_config", fake_score)
 
@@ -545,8 +549,8 @@ def test_compare_kv_collect_loop_isolates_bad_cost_partial(monkeypatch, tmp_path
         "mode": "kv",
         "model_id": "m",
         "model_revision": None,
-        "bits": 4,
-        "group_size": 64,
+        "method": "stock",
+        "params": {"bits": 4, "group_size": 64},
         "quantize_start": 0,
         "max_chunks": None,
         "chunk_length": 512,
@@ -670,8 +674,8 @@ def _kv_partial_with_identity(
         "mode": "kv",
         "model_id": model_id,
         "model_revision": model_revision,
-        "bits": bits,
-        "group_size": group_size,
+        "method": "stock",
+        "params": {"bits": bits, "group_size": group_size},
         "quantize_start": quantize_start,
         "max_chunks": max_chunks,
         "chunk_length": chunk_length,
@@ -787,8 +791,8 @@ def _kv_partial_env(bits: int, gs: int, *, kl_mean: float, cost: int) -> dict[st
             "mode": "kv",
             "model_id": "org/m",
             "model_revision": None,
-            "bits": bits,
-            "group_size": gs,
+            "method": "stock",
+            "params": {"bits": bits, "group_size": gs},
             "quantize_start": 0,
             "max_chunks": None,
             "chunk_length": 512,
@@ -891,11 +895,11 @@ def test_kv_envelope_non_dict_is_corrupt_partial():
 # ── Task 6 (0033 part 3): chunk_length as a first-class knob ──────────────────
 
 
-def test_kv_partial_schema_version_is_2():
+def test_kv_partial_schema_version_is_3():
     # Literal pin (mirrors the weight-side == 1 pin in test_compare_weight.py): a future
     # unrelated edit that accidentally bumps or resets this constant goes red here, not just
     # against whatever the constant happens to be at the time.
-    assert cmp._KV_PARTIAL_SCHEMA_VERSION == 2
+    assert cmp._KV_PARTIAL_SCHEMA_VERSION == 3
 
 
 def test_kv_partial_identity_includes_chunk_length(monkeypatch, tmp_path):
@@ -907,9 +911,9 @@ def test_kv_partial_identity_includes_chunk_length(monkeypatch, tmp_path):
     cmp.compare_kv_fidelity("m", [(4, 64), (8, 64)], chunk_length=1024, artifacts_dir=tmp_path)
     env = json.loads((tmp_path / "4_64.json").read_text())
     assert env["run_identity"]["chunk_length"] == 1024
-    # Literal (not compared against the live constant -- see test_kv_partial_schema_version_is_2
-    # for that pin; this asserts the ACTUAL persisted value is the one Task 6 shipped).
-    assert env["run_identity"]["schema_version"] == 2
+    # Literal (not compared against the live constant -- see test_kv_partial_schema_version_is_3
+    # for that pin; this asserts the ACTUAL persisted value is the one Task 4 shipped).
+    assert env["run_identity"]["schema_version"] == 3
 
 
 def test_chunk_length_change_invalidates_partials(monkeypatch, tmp_path):
@@ -1044,3 +1048,99 @@ def test_skipped_configs_appear_in_report_not_frontier(monkeypatch, tmp_path):
     md = render_comparison_markdown(report)
     assert "**Excluded (not ranked):**" in md
     assert "`6:64` — 17408 B/token exceeds the --max-kv-bytes-per-token budget of 1000" in md
+
+
+# ── Task 4 (0.6.0): compare kv over methods ────────────────────────────────────
+
+
+def _fid_method(method_name: str, params: dict, kl_mean: float):
+    rep = _fid((params["bits"], params.get("group_size", 0)), kl_mean)
+    return dataclasses.replace(
+        rep,
+        kv_group_size=params.get("group_size"),
+        kv_method=method_name,
+        kv_method_params=params,
+        kv_method_provenance={"package": "x", "version": "0"},
+    )
+
+
+def test_compare_kv_accepts_mixed_tuple_and_method_list(monkeypatch, tmp_path):
+    reports = {
+        (4, 64): _fid((4, 64), 0.09),
+        (4, 42): _fid_method("turboquant", {"bits": 4, "seed": 42}, 0.03),
+    }
+    calls = _patch_kv_compare(monkeypatch, reports)
+    report = cmp.compare_kv_fidelity(
+        "m", [(4, 64), TurboQuantKVMethod(bits=4)], artifacts_dir=tmp_path
+    )
+    assert calls == [(4, 64), (4, 42)]
+    assert {r.label for r in report.results} == {"4:64", "turboquant:4"}
+    # cost comes from each method's analytic formula at dims (16, 8, 64): both 9216
+    costs = {r.label: r.point.cost_bytes for r in report.results if r.point is not None}
+    assert costs == {"4:64": 9216, "turboquant:4": 9216}
+    # equal cost, better quality -> turboquant dominates stock (ranking.dominates)
+    assert "turboquant:4" in report.frontier
+    assert dict(report.dominated) == {"4:64": "turboquant:4"}
+    assert (tmp_path / "4_64.json").exists()
+    assert (tmp_path / "turboquant_4.json").exists()
+
+
+def test_compare_kv_partial_identity_carries_method_and_schema_3(monkeypatch, tmp_path):
+    reports = {(4, 64): _fid((4, 64), 0.09), (8, 64): _fid((8, 64), 0.01)}
+    _patch_kv_compare(monkeypatch, reports)
+    cmp.compare_kv_fidelity("m", [(4, 64), (8, 64)], artifacts_dir=tmp_path)
+    ident = json.loads((tmp_path / "4_64.json").read_text())["run_identity"]
+    assert ident["schema_version"] == 3
+    assert ident["method"] == "stock"
+    assert ident["params"] == {"bits": 4, "group_size": 64}
+    assert "bits" not in ident
+    assert "group_size" not in ident
+
+
+def test_compare_kv_recomputes_schema_2_partial(monkeypatch, tmp_path):
+    reports = {(4, 64): _fid((4, 64), 0.09), (8, 64): _fid((8, 64), 0.01)}
+    calls = _patch_kv_compare(monkeypatch, reports)
+    legacy = {
+        "status": "ok",
+        "report": dataclasses.asdict(reports[(4, 64)]),
+        "cost": 9216,
+        "run_identity": {
+            "mode": "kv",
+            "model_id": "m",
+            "model_revision": None,
+            "bits": 4,
+            "group_size": 64,
+            "quantize_start": 0,
+            "max_chunks": None,
+            "chunk_length": 512,
+            "schema_version": 2,
+        },
+    }
+    (tmp_path / "4_64.json").write_text(json.dumps(legacy))
+    cmp.compare_kv_fidelity("m", [(4, 64), (8, 64)], artifacts_dir=tmp_path)
+    assert (4, 64) in calls  # not resumed: identity shape changed
+
+
+def test_compare_kv_duplicate_methods_by_params_rejected():
+    with pytest.raises(CompareConfigError, match="duplicate"):
+        cmp._validate_compare_kv_args(
+            [TurboQuantKVMethod(bits=4), TurboQuantKVMethod(bits=4, seed=42)],
+            quantize_start=0,
+            max_chunks=None,
+            chunk_length=512,
+        )
+
+
+def test_compare_kv_filename_validation_rejects_bad_labels():
+    class _Bad(StockKVMethod):
+        @property
+        def label(self):
+            return "a/../b"
+
+    with pytest.raises(CompareConfigError, match="path separator"):
+        cmp._validate_compare_kv_args(
+            [_Bad(bits=4, group_size=64), StockKVMethod(bits=8, group_size=64)],
+            quantize_start=0,
+            max_chunks=None,
+            chunk_length=512,
+        )
