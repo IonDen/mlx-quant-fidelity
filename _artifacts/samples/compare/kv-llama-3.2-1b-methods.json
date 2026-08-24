@@ -256,7 +256,7 @@
         "model_revision": "08231374eeacb049a0eade7922910865b8fce912",
         "n_chunks": 100,
         "n_positions": 51100,
-        "peak_memory_bytes": 2618186173,
+        "peak_memory_bytes": 2436341997,
         "perplexity_delta": 4.121097638366695,
         "perplexity_quant": 27.06214792192995,
         "perplexity_ref": 22.941050283563253,
@@ -382,7 +382,7 @@
         "model_revision": "08231374eeacb049a0eade7922910865b8fce912",
         "n_chunks": 100,
         "n_positions": 51100,
-        "peak_memory_bytes": 2438461178,
+        "peak_memory_bytes": 2438467821,
         "perplexity_delta": 2.25544917037238,
         "perplexity_quant": 25.196499453935633,
         "perplexity_ref": 22.941050283563253,
@@ -390,7 +390,7 @@
         "quantize_start": 0,
         "verdict": "bad",
         "warnings": [
-          "turboquant: the quantized run dequantizes on fetch and rides standard SDPA in prefill (the port's fused kernel is decode-only and not exercised), so drift measures the quantizer round-trip only, while stock bundles quantizer + quantized-attention numerics; uniform-bit cache at the port's default seed \u2014 its asymmetric and layer-adaptive configurations are not measured; resident memory in this path is the stored bytes plus two full-precision working copies, about 2.3x an fp16 cache (measured on Llama-3.2-1B), so peak memory does not show the compression."
+          "turboquant: the quantized run dequantizes on fetch and rides standard SDPA in prefill (the port's fused kernel is decode-only and not exercised), so drift measures the quantizer round-trip only, while stock bundles quantizer + quantized-attention numerics; uniform-bit cache at the port's default seed \u2014 its asymmetric and layer-adaptive configurations are not measured; resident memory in this path is the stored bytes plus two full-precision working copies \u2014 roughly 2.3x an fp16 cache on Llama-3.2-1B geometry, derived from the port's retained dequantization buffers \u2014 so peak memory does not show the compression."
         ]
       },
       "status": "ok"
@@ -510,7 +510,7 @@
         "model_revision": "08231374eeacb049a0eade7922910865b8fce912",
         "n_chunks": 100,
         "n_positions": 51100,
-        "peak_memory_bytes": 2699988898,
+        "peak_memory_bytes": 2437941445,
         "perplexity_delta": 12.850533441038014,
         "perplexity_quant": 35.79158372460127,
         "perplexity_ref": 22.941050283563253,
@@ -518,7 +518,7 @@
         "quantize_start": 0,
         "verdict": "bad",
         "warnings": [
-          "turboquant: the quantized run dequantizes on fetch and rides standard SDPA in prefill (the port's fused kernel is decode-only and not exercised), so drift measures the quantizer round-trip only, while stock bundles quantizer + quantized-attention numerics; uniform-bit cache at the port's default seed \u2014 its asymmetric and layer-adaptive configurations are not measured; resident memory in this path is the stored bytes plus two full-precision working copies, about 2.3x an fp16 cache (measured on Llama-3.2-1B), so peak memory does not show the compression."
+          "turboquant: the quantized run dequantizes on fetch and rides standard SDPA in prefill (the port's fused kernel is decode-only and not exercised), so drift measures the quantizer round-trip only, while stock bundles quantizer + quantized-attention numerics; uniform-bit cache at the port's default seed \u2014 its asymmetric and layer-adaptive configurations are not measured; resident memory in this path is the stored bytes plus two full-precision working copies \u2014 roughly 2.3x an fp16 cache on Llama-3.2-1B geometry, derived from the port's retained dequantization buffers \u2014 so peak memory does not show the compression."
         ]
       },
       "status": "ok"
