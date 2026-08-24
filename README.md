@@ -46,7 +46,7 @@ That model at 8-bit KV clears the good tier on this corpus. Apple Silicon, Pytho
 
 ### Common options
 
-- `--kv-bits` / `--kv-group-size` — the KV configuration to score, default `4` / `64`. The `4:32,4:64` shorthand in `compare kv --configs` is `bits:group_size`.
+- `--kv-bits` / `--kv-group-size` — the KV configuration to score, default `4` / `64`. The `4:32,4:64` shorthand in `compare kv --configs` is `bits:group_size`. `--kv-method turboquant` swaps `kv` to the TurboQuant-MLX cache instead, and `compare kv --configs` mixes it in with entries like `turboquant:4`.
 - `--max-chunks N` — score only the first N corpus chunks. Every number in this README uses `--max-chunks 100`; leave it off and the run covers the whole WikiText-2 test split.
 - `--chunk-length N` — the scoring window, default 512, hard ceiling 4096.
 - `--quantize-start N` — `0` for stress mode, the default; any N above 0 for deployment mode.
@@ -173,6 +173,39 @@ mlx-quant-fidelity compare kv <model> --sweep --max-kv-bytes-per-token 200
 
 Add `--max-kld 0.05` to get the cheapest configuration whose mean KLD stays under a threshold, or `--min-tier good` to get the cheapest one that passes the good-tier verdict. `--sweep` builds the (bits × group-size) grid from the model's config alone, no weight download needed, and drops any combination that would crash the upstream KV cache implementation; `--max-kv-bytes-per-token` narrows that grid to configurations under a memory budget. Either way, skipped configurations are listed in the report rather than silently dropped. [docs/ranking-principles.md](docs/ranking-principles.md) explains how each axis is computed, what Pareto domination means in practice, and where the ranking has limits.
 
+### Measuring a third-party cache
+
+The KV probe is not tied to mlx-lm's cache. `--kv-method turboquant` measures the
+[TurboQuant-MLX](https://github.com/arozanov/turboquant-mlx) uniform-bit cache on the same
+paired, teacher-forced, full-vocabulary yardstick, and `compare kv` ranks it against the stock
+configurations memory-normalized. Install the pinned port first — the PyPI package named
+`turboquant-mlx` is unrelated:
+
+```bash
+pip install "turboquant-mlx @ git+https://github.com/arozanov/turboquant-mlx@6e928d715595dee9f6b6cc3968baa44e1f408d28"
+mlx-quant-fidelity compare kv mlx-community/Llama-3.2-1B-Instruct-4bit --configs 8:64,4:64,turboquant:4,turboquant:3
+```
+
+```
+# Quant comparison (kv) vs `mlx-community/Llama-3.2-1B-Instruct-4bit`
+
+| target | cost | KL mean | KL p99 | flip | verdict | frontier |
+|---|---|---|---|---|---|---|
+| `turboquant:3` | 8.2 KB | 0.4229 | 2.3559 | 0.3259 | bad | ✓ |
+| `4:64` | 9.2 KB | 0.1477 | 0.9225 | 0.2048 | bad | ✗ dominated by `turboquant:4` |
+| `turboquant:4` | 9.2 KB | 0.0825 | 0.5663 | 0.1582 | bad | ✓ |
+| `8:64` | 17.4 KB | 0.0004 | 0.0029 | 0.0126 | marginal | ✓ |
+```
+
+Read this table with two caveats. In a teacher-forced pass the TurboQuant cache dequantizes on
+fetch and runs standard attention, so its number is the quantizer alone, while the stock number
+also includes mlx-lm's quantized attention path. And the cost column is stored bytes: in this path
+the TurboQuant cache also keeps full-precision working copies, about 2.3× the size of an fp16
+cache, so peak memory does not show the compression that a fused decode deployment would. Only the
+uniform-bit cache at the port's default seed is measured; its asymmetric and layer-adaptive
+configurations are not. Sample captured on Apple M1 Max, 32 GB, revision `08231374…`, 100 chunks
+of 512 tokens, stress mode.
+
 ## How it works
 
 Teacher-forced scoring, not generation. For each fixed-length corpus chunk the model runs twice on the *same* tokens — once with a full-precision KV cache, once with a quantized one — and the two next-token distributions are compared position by position. Generation would let the runs diverge in their own inputs the moment quantization changed a sampled token, turning the measurement into trajectory drift instead of cache cost. Logits collapse to per-position scalars inside the chunk loop and are released before the next chunk, so a long corpus never holds full distributions in memory.
@@ -229,7 +262,7 @@ print(report.kl.mean, report.flip_rate, report.verdict)
 
 ## Status
 
-0.5.1, released on PyPI as `mlx-quant-fidelity`. The measurement surface is unchanged from 0.5.0, which added depth-resolved KV drift over a configurable `--chunk-length`, an auto-generated `compare kv --sweep`, and device provenance in every report. Downstream-task accuracy and a quantizer-only control are on the [roadmap](ROADMAP.md).
+0.6.0, released on PyPI as `mlx-quant-fidelity`. The KV probe now measures any per-layer cache implementation: `--kv-method turboquant` adds the TurboQuant-MLX uniform-bit cache alongside mlx-lm's stock cache, and `compare kv` ranks both on the same memory-normalized yardstick. Threshold validation and more cache methods are on the [roadmap](ROADMAP.md).
 
 ## License
 
