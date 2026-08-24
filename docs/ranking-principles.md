@@ -32,7 +32,7 @@ For KV quantization, cost is KV-cache bytes per token:
 
 The `4/group_size` term is the per-group overhead: a fp16 scale (2 bytes) and a fp16 bias (2 bytes), amortized over `group_size` elements. This formula applies to the bf16/fp16 KV path used by MLX's `QuantizedKVCache` on Apple Silicon. An fp32 KV cache would carry `8/group_size` bytes of overhead per element, but that path is not currently supported.
 
-The formula is exact for the supported path. Group overhead matters for ranking: a smaller group size improves accuracy but increases bytes per token, so two configurations at the same bit width can land at different positions on the cost axis. Ignoring group size would misrank them.
+The formula is exact for the supported path. Each KV-cache method supplies its own formula for the bytes it stores per token; every report also records the bytes actually stored in the cache after the first scored window, and the two are tested to agree for every method this package ships. Group overhead matters for ranking: a smaller group size improves accuracy but increases bytes per token, so two configurations at the same bit width can land at different positions on the cost axis. Ignoring group size would misrank them.
 
 Memory normalization is what makes the comparison meaningful. Without it, comparing q4 and q8 on quality alone is tautological — q8 wins by definition because the cost difference is not part of the comparison. The question is whether q8's quality gain is worth the extra bytes.
 
