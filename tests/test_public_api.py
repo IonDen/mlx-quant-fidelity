@@ -27,3 +27,16 @@ def test_badge_public_exports():
     for name in ("badge_color", "badge_for_report", "render_badge_markdown"):
         assert hasattr(qf, name)
         assert name in qf.__all__
+
+
+def test_kv_method_public_exports():
+    assert hasattr(qf, "KVCacheMethod")
+    assert "KVCacheMethod" in qf.__all__
+    assert hasattr(qf, "StockKVMethod")
+    assert "StockKVMethod" in qf.__all__
+    assert hasattr(qf, "TurboQuantKVMethod")
+    assert "TurboQuantKVMethod" in qf.__all__
+    assert hasattr(qf, "parse_method_spec")
+    assert "parse_method_spec" in qf.__all__
+    assert hasattr(qf, "MethodUnavailableError")
+    assert "MethodUnavailableError" in qf.__all__

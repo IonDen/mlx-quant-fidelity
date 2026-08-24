@@ -1,3 +1,4 @@
+import dataclasses
 import re
 
 import pytest
@@ -51,3 +52,10 @@ def test_render_badge_markdown_percent_encodes_url_unsafe_chars():
     # shields.io field escaping is still intact (dashes doubled, not encoded away)
     assert "4--bit" in md
     assert "wikitext--2--raw" in md
+
+
+def test_badge_message_names_non_stock_method():
+    base = _fake_report()
+    assert " · turboquant" not in badge_for_report(base)["message"]
+    tagged = dataclasses.replace(base, kv_method="turboquant", kv_group_size=None)
+    assert badge_for_report(tagged)["message"].endswith(" · turboquant")

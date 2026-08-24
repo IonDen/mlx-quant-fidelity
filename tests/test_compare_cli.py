@@ -5,6 +5,7 @@ import pytest
 
 from mlx_quant_fidelity import cli
 from mlx_quant_fidelity.cli import main
+from mlx_quant_fidelity.probes.kv_methods import StockKVMethod
 from mlx_quant_fidelity.report import ComparisonReport
 
 
@@ -53,7 +54,11 @@ def test_compare_kv_parses_configs(monkeypatch, capsys):
     monkeypatch.setattr(cli, "compare_kv_fidelity", fake)
     rc = cli.main(["compare", "kv", "m", "--configs", "4:32,4:64,8:64", "--min-tier", "good"])
     assert rc == 0
-    assert captured["args"][1] == [(4, 32), (4, 64), (8, 64)]
+    assert captured["args"][1] == [
+        StockKVMethod(bits=4, group_size=32),
+        StockKVMethod(bits=4, group_size=64),
+        StockKVMethod(bits=8, group_size=64),
+    ]
     assert captured["args"][2]["min_tier"] == "good"
 
 
@@ -185,7 +190,7 @@ def test_cli_sweep_dispatches_generated_grid(monkeypatch, capsys):
     assert rc == 0
     model, configs, kw = captured["args"]
     assert model == "m"
-    assert (4, 64) in configs
+    assert StockKVMethod(bits=4, group_size=64) in configs
     assert len(configs) == 10  # 5 bits x {32, 64}; 128 doesn't divide head_dim=64
     assert kw["skipped_configs"] == []
 

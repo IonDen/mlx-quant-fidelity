@@ -134,3 +134,48 @@ def test_from_dict_rejects_non_list_depth():
     d["kl_by_depth"] = "boom"
     with pytest.raises(ReportSchemaError):
         fidelity_report_from_dict(d)
+
+
+def test_from_dict_defaults_method_fields_for_legacy_json():
+    d = json.loads(render_json(_report()))
+    for key in (
+        "kv_method",
+        "kv_method_params",
+        "kv_method_provenance",
+        "measured_kv_bytes_per_token",
+    ):
+        d.pop(key, None)
+    r = fidelity_report_from_dict(d)
+    assert r.kv_method == "stock"
+    assert r.kv_method_params == {}
+    assert r.kv_method_provenance == {}
+    assert r.measured_kv_bytes_per_token is None
+
+
+def test_markdown_header_unchanged_for_stock_and_tagged_for_other_methods():
+    base = _report()
+    assert render_markdown(base).splitlines()[0] == (
+        f"# KV-fidelity: `{base.model_id}` @ {base.kv_bits}-bit (group {base.kv_group_size})"
+    )
+    other = dataclasses.replace(base, kv_method="turboquant", kv_group_size=None)
+    assert render_markdown(other).splitlines()[0].endswith("(group —) via turboquant")
+
+
+def test_json_gains_exactly_four_keys_over_legacy():
+    # Compare JSON to JSON (asdict keeps `warnings` as a tuple; JSON makes it a list).
+    legacy = json.loads(render_json(_report()))
+    for key in (
+        "kv_method",
+        "kv_method_params",
+        "kv_method_provenance",
+        "measured_kv_bytes_per_token",
+    ):
+        legacy.pop(key, None)
+    now = json.loads(render_json(fidelity_report_from_dict(legacy)))
+    assert set(now) - set(legacy) == {
+        "kv_method",
+        "kv_method_params",
+        "kv_method_provenance",
+        "measured_kv_bytes_per_token",
+    }
+    assert all(now[k] == legacy[k] for k in legacy)

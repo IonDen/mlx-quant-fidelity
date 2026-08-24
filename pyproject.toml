@@ -52,6 +52,9 @@ test = ["pytest>=8.3", "pytest-cov>=5.0", "hypothesis>=6.130"]
 typecheck = ["mypy>=1.13"]
 lint = ["ruff>=0.7"]
 docs = ["matplotlib>=3.9"]
+turboquant = [
+  "turboquant-mlx @ git+https://github.com/arozanov/turboquant-mlx@6e928d715595dee9f6b6cc3968baa44e1f408d28",
+]
 dev = [
   { include-group = "test" },
   { include-group = "typecheck" },
@@ -95,6 +98,10 @@ convention = "google"
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**/*.py" = ["D", "ANN", "S101"]
+"src/mlx_quant_fidelity/probes/kv_methods.py" = ["TID251"]
+
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+"mlx_lm.models.cache.QuantizedKVCache".msg = "method-specific: use probes/kv_methods.py"
 
 [tool.ruff.format]
 docstring-code-format = true
@@ -107,7 +114,7 @@ enable_error_code = ["redundant-expr", "truthy-bool", "ignore-without-code"]
 files = ["src/mlx_quant_fidelity"]
 
 [[tool.mypy.overrides]]
-module = ["mlx.*", "mlx_lm.*", "pyarrow.*"]
+module = ["mlx.*", "mlx_lm.*", "pyarrow.*", "turboquant_mlx.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
@@ -120,6 +127,7 @@ filterwarnings = [
   "error",
   'ignore::DeprecationWarning:mlx\..*',
   'ignore::DeprecationWarning:mlx_lm\..*',
+  'ignore::DeprecationWarning:turboquant_mlx\..*',
 ]
 markers = [
   "slow: real-model probe integration test (opt in with --run-slow)",

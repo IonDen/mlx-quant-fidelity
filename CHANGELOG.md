@@ -3,6 +3,27 @@
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - 2026-08-24
+
+The KV probe measures any per-layer cache implementation, and the first third-party cache — TurboQuant-MLX — is ranked against mlx-lm's stock cache on one memory-normalized yardstick.
+
+### Added
+
+- `--kv-method turboquant` on `kv`, and `turboquant:<bits>[:<seed>]` entries in `compare kv --configs`, for the TurboQuant-MLX uniform-bit cache (git-pinned manual install; see the README).
+- A committed `compare kv` sample ranking stock 8-bit and 4-bit against TurboQuant 4-bit and 3-bit on Llama-3.2-1B.
+- Four report fields: `kv_method`, `kv_method_params`, `kv_method_provenance`, and `measured_kv_bytes_per_token` (stored bytes after the first scored window; tested to equal the analytic cost for every shipped method).
+- A Python `KVCacheMethod` protocol with `StockKVMethod` and `TurboQuantKVMethod`, exported from the package root.
+- The release build now runs on every pull request, so a distribution that would fail at tag time fails on the PR.
+
+### Changed
+
+- `kv_bits` and `kv_group_size` in `FidelityReport` are optional (a method without a group size reports `null`), and the report carries two dictionary fields, so report objects are no longer hashable. Stock reports keep every value and their Markdown unchanged; older sample JSON files predate the four new fields and load with defaults.
+- `compare kv` partials carry the method in their identity (schema 3); partials from 0.5.x are recomputed.
+
+### Notes
+
+- Through a teacher-forced pass the TurboQuant cache dequantizes on fetch and runs standard attention, so its drift is the quantizer alone while stock's also includes the quantized attention path; every TurboQuant report says so. Only the uniform-bit cache is measured, and its resident memory in this path is roughly 2.3× an fp16 cache (derived from its retained dequantization buffers).
+
 ## [0.5.1] - 2026-08-18
 
 Documentation release: a rewritten README, diagrams for the measurement model, and a fidelity chart rendered from the committed sample reports.

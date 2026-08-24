@@ -6,6 +6,7 @@ from mlx_quant_fidelity import cli
 from mlx_quant_fidelity.corpora.provenance import CorpusProvenance
 from mlx_quant_fidelity.errors import QuantFidelityError
 from mlx_quant_fidelity.metrics import ScalarSummary
+from mlx_quant_fidelity.probes.kv_methods import StockKVMethod, TurboQuantKVMethod
 from mlx_quant_fidelity.report import FidelityReport, WeightFidelityReport
 
 
@@ -249,3 +250,57 @@ def test_compare_kv_cli_passes_chunk_length(monkeypatch: pytest.MonkeyPatch) -> 
     )
     assert rc == 0
     assert captured["kw"]["chunk_length"] == 1024
+
+
+def test_kv_cli_defaults_to_stock_method(monkeypatch):
+    seen = {}
+
+    def fake_measure(model, *, method, **kw):
+        seen["method"] = method
+        return _fake_report()
+
+    monkeypatch.setattr(cli, "measure_kv_fidelity", fake_measure)
+    assert cli.main(["kv", "org/m"]) == 0
+    assert seen["method"] == StockKVMethod(bits=4, group_size=64)
+
+
+def test_kv_cli_turboquant_method_and_seed(monkeypatch):
+    seen = {}
+
+    def fake_measure(model, *, method, **kw):
+        seen["method"] = method
+        return _fake_report()
+
+    monkeypatch.setattr(cli, "measure_kv_fidelity", fake_measure)
+    assert (
+        cli.main(["kv", "org/m", "--kv-method", "turboquant", "--kv-bits", "3", "--kv-seed", "7"])
+        == 0
+    )
+    assert seen["method"] == TurboQuantKVMethod(bits=3, seed=7)
+
+
+def test_kv_cli_rejects_group_size_with_turboquant(capsys):
+    assert cli.main(["kv", "org/m", "--kv-method", "turboquant", "--kv-group-size", "64"]) == 2
+    assert "--kv-group-size" in capsys.readouterr().err
+
+
+def test_kv_cli_rejects_seed_with_stock(capsys):
+    assert cli.main(["kv", "org/m", "--kv-seed", "7"]) == 2
+    assert "--kv-seed" in capsys.readouterr().err
+
+
+def test_kv_cli_rejects_non_positive_seed(monkeypatch, capsys):
+    def _unexpected(*_a, **_k):
+        raise AssertionError("measure_kv_fidelity must not be reached")
+
+    monkeypatch.setattr(cli, "measure_kv_fidelity", _unexpected)
+    rc = cli.main(["kv", "org/m", "--kv-method", "turboquant", "--kv-seed", "0"])
+    assert rc == 2
+    assert "seed" in capsys.readouterr().err
+
+
+def test_parse_kv_configs_accepts_method_specs():
+    assert cli._parse_kv_configs("4:64,turboquant:3") == [
+        StockKVMethod(bits=4, group_size=64),
+        TurboQuantKVMethod(bits=3),
+    ]

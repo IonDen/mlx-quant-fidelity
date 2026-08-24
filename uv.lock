@@ -918,6 +918,9 @@ test = [
     { name = "pytest" },
     { name = "pytest-cov" },
 ]
+turboquant = [
+    { name = "turboquant-mlx" },
+]
 typecheck = [
     { name = "mypy" },
 ]
@@ -946,6 +949,7 @@ test = [
     { name = "pytest", specifier = ">=8.3" },
     { name = "pytest-cov", specifier = ">=5.0" },
 ]
+turboquant = [{ name = "turboquant-mlx", git = "https://github.com/arozanov/turboquant-mlx?rev=6e928d715595dee9f6b6cc3968baa44e1f408d28" }]
 typecheck = [{ name = "mypy", specifier = ">=1.13" }]
 
 [[package]]
@@ -1738,6 +1742,14 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/0c/f9/4552e2ba55db1c943aea0d4c09a32e9cbe5445b9eabe9856900de503dc8f/transformers-5.12.0.tar.gz", hash = "sha256:f0cf42ae1464c2eb41e7e0e66d7fd4b66145f48af17093b4cc0b2e9781faa7f4", size = 8923020, upload-time = "2026-06-12T14:39:20.43Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/ff/1f/d385913c38e900d23b728a4188fee625f2fccb306aeebc59be9d91404a5a/transformers-5.12.0-py3-none-any.whl", hash = "sha256:500be9eb644ede81c3103eee7687fc36d05dd75d1c76686c3820b26396fe7c7c", size = 11150246, upload-time = "2026-06-12T14:39:17.009Z" },
+]
+
+[[package]]
+name = "turboquant-mlx"
+version = "0.3.0"
+source = { git = "https://github.com/arozanov/turboquant-mlx?rev=6e928d715595dee9f6b6cc3968baa44e1f408d28#6e928d715595dee9f6b6cc3968baa44e1f408d28" }
+dependencies = [
+    { name = "mlx" },
 ]
 
 [[package]]

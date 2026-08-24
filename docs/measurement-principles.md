@@ -85,9 +85,24 @@ In the mlx-lm 0.31.x path used by the current reports, the quantized run compose
 
 Post-boundary positions therefore read through a quantized prefix as well as quantized new entries. That storage state resembles stress mode, but the computation history differs: deployment mode produced the prefix activations while attention still used a full-precision cache. The committed deployment sample and the stress samples run the same corpus geometry — 100 chunks of 512 tokens — but they do not score the same positions. At `quantize_start=256` the deployment run reports 25,500 positions, the tail of each window, while stress reports all 51,100. The deployment average is therefore taken over positions that sit deeper in the window than stress's, on top of the differing computation history above, so reading the two numbers side by side does not establish equal drift.
 
-Deployment mode exercises the `to_quantized` conversion path that mlx-lm uses in practice. Stress mode quantizes from an empty cache and never touches the path that converts existing full-precision entries. A quantizer that behaves differently on pre-filled data is therefore invisible to stress mode. Deployment mode also preserves the exact pre-boundary computation history, even though it does not preserve the prefix's storage type after conversion.
+For the stock cache, deployment mode exercises the `to_quantized` conversion path that mlx-lm uses in practice; for a third-party cache the stored prefix is replayed into a fresh cache, which no shipped deployment does, so those deployment numbers describe a hypothetical deployment. Stress mode quantizes from an empty cache and never touches the path that converts existing full-precision entries. A quantizer that behaves differently on pre-filled data is therefore invisible to stress mode. Deployment mode also preserves the exact pre-boundary computation history, even though it does not preserve the prefix's storage type after conversion.
 
 What these numbers do not cover: the probe's 512-token chunk window is not a long document. mlx-lm's own generate command delays conversion until token 5000, but it then quantizes those stored prefix entries too. The probe measures post-boundary cost one chunk at a time. Deployment numbers are a per-chunk proxy, not a real-deployment average over long-form generation.
+
+## Measuring a third-party cache
+
+The KV probe scores any cache implementation that satisfies its method protocol, not only mlx-lm's `QuantizedKVCache`. What differs between methods is the attention path each one rides, and that difference is exactly what the drift number bundles:
+
+| method | attention path | what the drift measures |
+|---|---|---|
+| stock | two `mx.quantized_matmul` calls against the packed K/V, then a precise softmax | quantizer error plus the quantized-attention kernel's own numerics (see "What the numbers don't say" above) |
+| turboquant | dequantizes the cache on fetch and runs standard SDPA, the same kernel the reference run uses | quantizer error alone |
+
+Dequantizing on fetch has a memory cost the stored-bytes column doesn't show: TurboQuant keeps full-precision working copies of the cache resident alongside its packed store. Derived from the port's retained dequantization buffers on Llama-3.2-1B geometry, that puts its resident memory at roughly 2.3× an fp16 cache. The chunk-length memory ceiling was validated on the stock cache; a method that retains full-precision working buffers narrows that margin, and the report warns when a third-party method runs above the 512-token default.
+
+Deployment mode for a third-party cache can't reuse mlx-lm's in-place `to_quantized` conversion, since that method doesn't exist on a third-party cache. Instead, each layer's full-precision state is sliced to `offset` (the stored tokens, never the step-padded buffer mlx-lm allocates ahead of use), replayed through a fresh quantized cache with a single `update_and_fetch`, and then trimmed with `trim(0)` to drop the dequantized working buffers the port retains after that call.
+
+Every report carries four fields identifying what produced it: `kv_method` (`"stock"` or `"turboquant"`), `kv_method_params` (the method's own parameters — `bits`/`group_size` for stock, `bits`/`seed` for TurboQuant), `kv_method_provenance` (package name, installed version, and, for a git-pinned port, the installed and pinned commit hashes), and `measured_kv_bytes_per_token` (the stored bytes per token actually measured at runtime, alongside the analytic cost `compare` ranks on). A method may also carry its own seeded rotation: TurboQuant seeds its Key rotation from `seed` and its Value rotation from `seed + 1`, both recorded in `kv_method_provenance`.
 
 ## Drift by position depth
 
@@ -122,6 +137,7 @@ Neither external result is directly comparable to the table above. Both study ge
 - `metrics/perplexity.py`: `token_nll` — `-log softmax(logits)[target]`, fp32.
 - `probes/_paired.py`: `_check_exact_zero` — `ExactZeroError` on exact-zero KLD and flip.
 - `metrics/depth.py`: `bucket_by_depth` — equal-width depth buckets pooled across scored chunks.
+- `probes/kv_methods.py`: `StockKVMethod`, `TurboQuantKVMethod` — the cache-method protocol, provenance, and prefix-replay logic behind "Measuring a third-party cache."
 - `scripts/spike_long_window_memory.py` — the chunk-length memory measurement above.
 - llama.cpp `llama-perplexity --kl-divergence-base` — the KLD direction convention this tool follows.
 - *Accuracy Is Not All You Need* — arXiv:2407.09141.

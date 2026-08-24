@@ -339,12 +339,14 @@ about 72% of fp16 decode speed. Greedy output was identical to baseline. The rep
 "4.6× compression at 98% FP16 speed" describes a different configuration and does not appear
 in the README's results table. The table is the source used here.
 
-Neither community project publishes a distribution-level quality measurement. turboquant-mlx
-verifies that greedy decode reproduces the baseline's text; that is a meaningful
-check and a weak oracle, binary over one decoding mode and silent about how much probability
-mass moved underneath the argmax. This repository measures that hidden difference with KL, flip
-rate, and perplexity across more than fifty thousand scored positions. The same method can be
-used for any cache implementation that plugs into mlx-lm, including custom kernels.
+Neither community project publishes a distribution-level quality measurement. This repository now
+measures turboquant-mlx's uniform-bit cache against the stock cache on one yardstick (see the
+committed sample); the asymmetric K8/V4 configuration its README recommends is not yet measured.
+turboquant-mlx's own check verifies that greedy decode reproduces the baseline's text; that is a
+meaningful check and a weak oracle, binary over one decoding mode and silent about how much
+probability mass moved underneath the argmax. This repository measures that hidden difference with
+KL, flip rate, and perplexity across more than fifty thousand scored positions. The same method can
+be used for any cache implementation that plugs into mlx-lm, including custom kernels.
 
 ## 6. What remains missing
 
@@ -394,6 +396,7 @@ the literature and one repository-reported K-vs-V split but not demonstrated her
 | Fused codebook PoC: reported cosine similarity 1.0 against its dequantized reference, 17.9× (2K) to 3.4× (32K to 64K) slower in a single-layer prefill microbench; author's revised diagnosis attributes the bottleneck to codebook lookup (3 to 5× vs scalar dequant, C++ included) and recommends the scalar `mx.quantize` format | reported in the public issue record by its author (initial attribution superseded by his follow-up); not independently reproduced here | [mlx #3404](https://github.com/ml-explore/mlx/issues/3404) |
 | TurboQuant-specific built-in declined in favor of generic quantized SDPA first; [PR #3026](https://github.com/ml-explore/mlx/pull/3026) is open with affine 4/6/8 at group size 32 plus MX formats, shape-dependent community benchmarks, and a current conflict with `main` | verified from the public issue/PR records on 2026-07-25 | [mlx #3404](https://github.com/ml-explore/mlx/issues/3404), [PR #3026](https://github.com/ml-explore/mlx/pull/3026) |
 | turboquant-mlx README table: K8+V4 at −18% memory, ~72% fp16 decode speed, identical greedy text (Qwen2.5-7B, 32K); mlx-qsdpa: 1.7× at 128K decode via `mx.fast.metal_kernel`, <16K routed to dequant+SDPA | repo-reported; no independent verification and no published distribution-level quality numbers | [turboquant-mlx](https://github.com/arozanov/turboquant-mlx), [mlx-qsdpa](https://github.com/Thump604/mlx-qsdpa) |
+| stock 8/4-bit vs turboquant-mlx's uniform-bit 4/3-bit cache, ranked memory-normalized on Llama-3.2-1B, stress mode, 100 chunks: turboquant:3 8.2 KB/token (KL mean 0.4229, bad); stock 4:64 9.2 KB/token (KL mean 0.1477, bad, dominated by turboquant:4); turboquant:4 9.2 KB/token (KL mean 0.0825, bad); stock 8:64 17.4 KB/token (KL mean 0.0004, marginal) | measured in this repository; quantizer-only path for TurboQuant (dequantize → standard SDPA), bundled path for stock | [`_artifacts/samples/compare/kv-llama-3.2-1b-methods.md`](https://github.com/IonDen/mlx-quant-fidelity/blob/v0.6.0/_artifacts/samples/compare/kv-llama-3.2-1b-methods.md) |
 | Whether Key outlier channels caused the Qwen2.5-7B kv4 collapse | hypothesis, consistent with the literature and one repo-reported K-vs-V split on the same checkpoint; no discriminating experiment run here | sections 2 and 3 |
 
 ## 8. Practical lessons
