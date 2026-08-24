@@ -5,11 +5,19 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+from typing import TYPE_CHECKING
 
 from mlx_quant_fidelity._memory_caps import install_memory_caps
 from mlx_quant_fidelity.badge import render_badge_markdown
 from mlx_quant_fidelity.errors import QuantFidelityError
 from mlx_quant_fidelity.probes.kv import measure_kv_fidelity
+from mlx_quant_fidelity.probes.kv_methods import (
+    METHODS,
+    TURBOQUANT_DEFAULT_SEED,
+    StockKVMethod,
+    TurboQuantKVMethod,
+    parse_method_spec,
+)
 from mlx_quant_fidelity.probes.weights import measure_weight_fidelity
 from mlx_quant_fidelity.report import (
     render_comparison_json,
@@ -26,6 +34,9 @@ from mlx_quant_fidelity.runners.compare import (
     kv_geometry_from_config,
 )
 
+if TYPE_CHECKING:
+    from mlx_quant_fidelity.probes.kv_methods import KVCacheMethod
+
 
 def _fetch_model_config(model_id: str) -> dict[str, object]:  # pragma: no cover - network
     """Fetch just ``config.json`` from a HuggingFace repo — no weight download."""
@@ -38,19 +49,25 @@ def _fetch_model_config(model_id: str) -> dict[str, object]:  # pragma: no cover
         return _json.load(f)  # type: ignore[no-any-return]
 
 
-def _parse_kv_configs(raw: str) -> list[tuple[int, int]]:
-    """Parse '4:32,4:64,8:64' -> [(4,32),(4,64),(8,64)]. Raises ValueError on a malformed entry."""
-    configs = []
-    for item in raw.split(","):
-        bits_s, sep, gs_s = item.partition(":")
-        if not sep or not bits_s.isdigit() or not gs_s.isdigit():
-            raise ValueError(f"--configs entry {item!r} must be 'bits:group_size' (e.g. 4:64).")
-        if int(bits_s) <= 0 or int(gs_s) <= 0:
-            raise ValueError(
-                f"--configs entry {item!r}: bits and group_size must be positive integers."
-            )
-        configs.append((int(bits_s), int(gs_s)))
-    return configs
+def _parse_kv_configs(raw: str) -> list[KVCacheMethod]:
+    """Parse '4:32,turboquant:3' -> [StockKVMethod(4,32), TurboQuantKVMethod(3)].
+
+    Raises ValueError (via CompareConfigError) on a malformed entry.
+    """
+    return [parse_method_spec(item) for item in raw.split(",")]
+
+
+def _resolve_kv_method(args: argparse.Namespace) -> KVCacheMethod:
+    """Build the method from the kv flags; reject flags that do not belong to the method."""
+    if args.kv_method == "stock":
+        if args.kv_seed is not None:
+            raise ValueError("--kv-seed is only valid with --kv-method turboquant")
+        gs = 64 if args.kv_group_size is None else args.kv_group_size
+        return StockKVMethod(bits=args.kv_bits, group_size=gs)
+    if args.kv_group_size is not None:
+        raise ValueError("--kv-group-size is only valid with --kv-method stock")
+    seed = TURBOQUANT_DEFAULT_SEED if args.kv_seed is None else args.kv_seed
+    return TurboQuantKVMethod(bits=args.kv_bits, seed=seed)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -66,7 +83,9 @@ def main(argv: list[str] | None = None) -> int:
     kv = sub.add_parser("kv", help="measure KV-cache quantization fidelity")
     kv.add_argument("model")
     kv.add_argument("--kv-bits", type=int, default=4)
-    kv.add_argument("--kv-group-size", type=int, default=64)
+    kv.add_argument("--kv-method", choices=sorted(METHODS), default="stock")
+    kv.add_argument("--kv-group-size", type=int, default=None)
+    kv.add_argument("--kv-seed", type=int, default=None)
     kv.add_argument("--quantize-start", type=int, default=0)
     kv.add_argument("--max-chunks", type=int, default=None)
     kv.add_argument("--chunk-length", type=int, default=512)
@@ -114,10 +133,14 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         if args.command == "kv":
+            try:
+                method = _resolve_kv_method(args)
+            except ValueError as exc:
+                print(f"error: {exc}", file=sys.stderr)
+                return 2
             report = measure_kv_fidelity(
                 args.model,
-                kv_bits=args.kv_bits,
-                kv_group_size=args.kv_group_size,
+                method=method,
                 quantize_start=args.quantize_start,
                 max_chunks=args.max_chunks,
                 chunk_length=args.chunk_length,
@@ -164,6 +187,7 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 return 2
             skipped_configs: list[tuple[str, str]] = []
+            configs: list[KVCacheMethod]
             if args.sweep:
                 config_json = _fetch_model_config(args.model)
                 n_layers, n_kv_heads, head_dim = kv_geometry_from_config(config_json)
@@ -198,7 +222,7 @@ def main(argv: list[str] | None = None) -> int:
                         file=sys.stderr,
                     )
                     return 2
-                configs = kept
+                configs = [StockKVMethod(bits=b, group_size=g) for b, g in kept]
                 skipped_configs = sweep_skipped + budget_skipped
             else:
                 try:
