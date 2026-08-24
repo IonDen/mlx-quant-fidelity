@@ -6,8 +6,9 @@ Stock mlx-lm ``QuantizedKVCache`` is the reference implementation; third-party c
 """
 
 import importlib.metadata
+import json
 from collections.abc import Iterator
-from contextlib import AbstractContextManager, contextmanager
+from contextlib import AbstractContextManager, contextmanager, nullcontext
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -17,6 +18,7 @@ from mlx_quant_fidelity.costs import kv_bytes_per_token
 from mlx_quant_fidelity.errors import (
     CacheNotQuantizableError,
     CompareConfigError,
+    MethodUnavailableError,
 )
 
 TURBOQUANT_PINNED_COMMIT = "6e928d715595dee9f6b6cc3968baa44e1f408d28"
@@ -248,6 +250,258 @@ class StockKVMethod:
         return []
 
 
+_TURBOQUANT_BITS: tuple[int, ...] = (2, 3, 4)
+_VALS_PER_WORD: dict[int, int] = {1: 32, 2: 16, 3: 10, 4: 8}  # vendored from turboquant_mlx.packing
+_TURBOQUANT_MAX_HEAD_DIM = 256
+_TURBOQUANT_REQUIRED = ("update_and_fetch", "state", "trim", "offset")
+
+
+def _packed_dim(head_dim: int, bits: int) -> int:
+    return -(-head_dim // _VALS_PER_WORD[bits])
+
+
+def _gate_turboquant_head_dim(head_dim: int | None, *, model_type: str) -> None:
+    """Raise unless head_dim is known, a power of two, and <= 256.
+
+    The port's fused Metal kernels have no dimension assert: a non-power-of-two head_dim returns
+    plausible but wrong values and > 256 overruns the threadgroup arrays. Nothing downstream can
+    catch either, so this pure gate is the only line of defence.
+    """
+    if head_dim is None or head_dim & (head_dim - 1) or head_dim > _TURBOQUANT_MAX_HEAD_DIM:
+        raise CacheNotQuantizableError(
+            f"TurboQuant-MLX kernels require a known power-of-two head_dim <= "
+            f"{_TURBOQUANT_MAX_HEAD_DIM}; model '{model_type}' has head_dim={head_dim}. This is a "
+            "limitation of the port's kernels, not of the model."
+        )
+
+
+def turboquant_bytes_per_token(*, n_layers: int, n_kv_heads: int, head_dim: int, bits: int) -> int:
+    """Stored bytes per token for TurboQuant's uniform-bit cache.
+
+    Per (token, head): ``packed_dim(head_dim, bits)`` uint32 words of codes plus one fp32 norm;
+    K and V; every layer. Reproduces 9216 / 8192 / 5120 B/token at 4/3/2 bits on Llama-3.2-1B
+    (16 layers x 8 heads x 64 dims), including the 3-bit round-up from ``VALS_PER_WORD[3] == 10``.
+    """
+    _gate_turboquant_head_dim(head_dim, model_type="?")
+    per_token_head = _packed_dim(head_dim, bits) * 4 + 4
+    return per_token_head * 2 * n_kv_heads * n_layers
+
+
+def _turboquant_dist_version() -> str:
+    try:
+        return importlib.metadata.version("turboquant-mlx")
+    except importlib.metadata.PackageNotFoundError:
+        return "unknown"
+
+
+def _turboquant_direct_url() -> str | None:
+    try:
+        return importlib.metadata.distribution("turboquant-mlx").read_text("direct_url.json")
+    except importlib.metadata.PackageNotFoundError:
+        return None
+
+
+def _installed_commit() -> str:
+    raw = _turboquant_direct_url()
+    if not raw:
+        return "unknown"
+    try:
+        info = json.loads(raw)
+    except json.JSONDecodeError:
+        return "unknown"
+    vcs = info.get("vcs_info") if isinstance(info, dict) else None
+    commit = vcs.get("commit_id") if isinstance(vcs, dict) else None
+    return commit if isinstance(commit, str) and commit else "unknown"
+
+
+@dataclass(frozen=True, slots=True)
+class TurboQuantKVMethod:
+    """arozanov/turboquant-mlx's uniform-bit ``TurboQuantKVCache`` (dequantize-on-fetch path).
+
+    Install: ``TURBOQUANT_INSTALL_HINT``. Never ``pip install turboquant-mlx`` by name — the PyPI
+    package of that name is an unrelated squatter.
+    """
+
+    bits: int
+    seed: int = TURBOQUANT_DEFAULT_SEED
+
+    def __post_init__(self) -> None:
+        """Reject bit widths the port does not implement."""
+        if self.bits not in _TURBOQUANT_BITS:
+            raise ValueError(f"turboquant supports bits 2/3/4, got bits={self.bits}")
+
+    @property
+    def name(self) -> str:
+        """``'turboquant'``."""
+        return "turboquant"
+
+    @property
+    def label(self) -> str:
+        """``'turboquant:bits'``, plus ``':seed'`` only when the seed is not the port's default."""
+        base = f"turboquant:{self.bits}"
+        return base if self.seed == TURBOQUANT_DEFAULT_SEED else f"{base}:{self.seed}"
+
+    @property
+    def params(self) -> dict[str, int]:
+        """``{"bits", "seed"}``."""
+        return {"bits": self.bits, "seed": self.seed}
+
+    def check(self, *, head_dim: int | None, model_type: str) -> list[str]:
+        """The head_dim gate (see :func:`_gate_turboquant_head_dim`); no warnings."""
+        _gate_turboquant_head_dim(head_dim, model_type=model_type)
+        return []
+
+    def _cache_cls(self) -> type:
+        """Import the port and verify its API shape; raise MethodUnavailableError with the pin."""
+        try:
+            import turboquant_mlx
+        except ImportError as exc:
+            raise MethodUnavailableError(
+                f"turboquant_mlx is not installed. Install the pinned port: {TURBOQUANT_INSTALL_HINT}"
+            ) from exc
+        try:
+            from turboquant_mlx.cache import TurboQuantKVCache
+        except ImportError as exc:
+            raise MethodUnavailableError(
+                "the installed `turboquant_mlx` has no `cache` module — this is the PyPI "
+                "`turboquant-mlx` squatter, not the arozanov port. Uninstall it and run: "
+                f"{TURBOQUANT_INSTALL_HINT}"
+            ) from exc
+        if not hasattr(turboquant_mlx, "__version__"):
+            raise MethodUnavailableError(
+                f"turboquant_mlx has no __version__; expected the port at {TURBOQUANT_PINNED_COMMIT}."
+            )
+        inst = TurboQuantKVCache()
+        missing = [a for a in _TURBOQUANT_REQUIRED if not hasattr(inst, a)]
+        if missing:
+            raise MethodUnavailableError(
+                f"TurboQuantKVCache is missing {missing}; expected the port at "
+                f"{TURBOQUANT_PINNED_COMMIT} ({TURBOQUANT_INSTALL_HINT})."
+            )
+        if hasattr(inst, "bits"):
+            raise MethodUnavailableError(
+                "TurboQuantKVCache exposes `bits`, which would route it through mlx-lm's quantized "
+                "attention instead of standard SDPA; the measured path would no longer be the "
+                f"quantizer alone. Expected the port at {TURBOQUANT_PINNED_COMMIT}."
+            )
+        return TurboQuantKVCache  # type: ignore[no-any-return]
+
+    def _new(self, cls: type) -> object:
+        return cls(
+            bits=self.bits, seed=self.seed, fused=False, v_only=False, sparse_v_threshold=None
+        )
+
+    def probe_capability(self, empty_cache: list[object]) -> None:
+        """Every layer must be a plain mlx-lm ``KVCache``; then run and EVALUATE the contract.
+
+        The contract feeds 8 tokens through a throwaway cache and forces the graph, so a Metal
+        compile/dispatch failure surfaces here as MethodUnavailableError instead of mid-run
+        (where ``guard()`` is a no-op for this method). Costs one JIT per process (~50 ms),
+        then well under a millisecond per call.
+        """
+        from mlx_lm.models.cache import KVCache
+
+        for layer in empty_cache:
+            if type(layer) is not KVCache:
+                raise CacheNotQuantizableError(
+                    f"cache layer {type(layer).__name__} is not a plain KVCache; TurboQuant-MLX "
+                    "only replaces plain per-layer caches (sliding-window / MLA / mixed models are "
+                    "not supported)."
+                )
+        cls = self._cache_cls()
+        probe = self._new(cls)
+        try:
+            probe.update_and_fetch(mx.zeros((1, 1, 8, 64)), mx.zeros((1, 1, 8, 64)))  # type: ignore[attr-defined]
+            mx.eval(probe.state)  # type: ignore[attr-defined]
+        except Exception as exc:
+            raise MethodUnavailableError(
+                f"TurboQuantKVCache failed to execute its kernels: {exc}; expected the port at "
+                f"{TURBOQUANT_PINNED_COMMIT}."
+            ) from exc
+        expected = self.bytes_per_token(n_layers=1, n_kv_heads=1, head_dim=64) * 8
+        got_offset = getattr(probe, "offset", None)
+        got_bytes = stored_state_bytes([probe])
+        if got_offset != 8 or got_bytes != expected:
+            raise MethodUnavailableError(
+                f"TurboQuantKVCache behaviour differs from the pinned port (offset {got_offset} != 8 "
+                f"or stored bytes {got_bytes} != {expected}); expected {TURBOQUANT_PINNED_COMMIT}."
+            )
+
+    def make_cache(self, *, n_layers: int) -> list[object]:
+        """Fresh uniform-bit caches with every knob pinned (fused/v_only off, no sparse V)."""
+        cls = self._cache_cls()
+        return [self._new(cls) for _ in range(n_layers)]
+
+    def convert_prefix(self, fp_cache: list[object]) -> list[object]:
+        """Replay each layer's stored full-precision prefix through a fresh cache, then trim.
+
+        ``KVCache.state`` is sliced to ``offset`` (never the step-padded buffer). ``trim(0)`` drops
+        the dequantized working buffers the port retains after ``update_and_fetch`` (otherwise a
+        step-padded fp16 copy of the prefix stays resident per layer and short segments take a
+        different, fp16-output kernel). One batched eval for all layers, as kv.py does.
+        """
+        cls = self._cache_cls()
+        out: list[object] = []
+        for layer in fp_cache:
+            k, v = layer.state  # type: ignore[attr-defined]
+            new = self._new(cls)
+            new.update_and_fetch(k, v)  # type: ignore[attr-defined]
+            new.trim(0)  # type: ignore[attr-defined]
+            out.append(new)
+        mx.eval([c.state for c in out])  # type: ignore[attr-defined]
+        return out
+
+    def guard(self) -> AbstractContextManager[None]:
+        """No known crash to translate."""
+        return nullcontext()
+
+    def bytes_per_token(self, *, n_layers: int, n_kv_heads: int, head_dim: int) -> int:
+        """Analytic stored bytes (see :func:`turboquant_bytes_per_token`); gates geometry too."""
+        return turboquant_bytes_per_token(
+            n_layers=n_layers, n_kv_heads=n_kv_heads, head_dim=head_dim, bits=self.bits
+        )
+
+    def measured_bytes(self, cache: list[object]) -> int:
+        """Trimmed stored bytes (see :func:`stored_state_bytes`)."""
+        return stored_state_bytes(cache)
+
+    def provenance(self) -> dict[str, str]:
+        """Package / module versions, installed vs pinned commit, seeds and pinned knobs."""
+        import turboquant_mlx
+
+        return {
+            "package": "turboquant-mlx",
+            "dist_version": _turboquant_dist_version(),
+            "module_version": str(getattr(turboquant_mlx, "__version__", "unknown")),
+            "commit": _installed_commit(),
+            "pinned_commit": TURBOQUANT_PINNED_COMMIT,
+            "k_seed": str(self.seed),
+            "v_seed": str(self.seed + 1),
+            "fused": "false",
+            "v_only": "false",
+            "sparse_v_threshold": "none",
+        }
+
+    def report_warnings(self) -> list[str]:
+        """The numerics/scope/memory note, plus a pin-mismatch warning when the commit differs."""
+        notes = [
+            "turboquant: the quantized run dequantizes on fetch and rides standard SDPA in prefill "
+            "(the port's fused kernel is decode-only and not exercised), so drift measures the "
+            "quantizer round-trip only, while stock bundles quantizer + quantized-attention "
+            "numerics; uniform-bit cache at the port's default seed — its asymmetric and "
+            "layer-adaptive configurations are not measured; resident memory in this path is the "
+            "stored bytes plus two full-precision working copies, about 2.3x an fp16 cache "
+            "(measured on Llama-3.2-1B), so peak memory does not show the compression."
+        ]
+        commit = _installed_commit()
+        if commit != TURBOQUANT_PINNED_COMMIT:
+            notes.append(
+                f"turboquant: installed commit {commit} is not the pinned {TURBOQUANT_PINNED_COMMIT}; "
+                "numbers may not reproduce the committed sample."
+            )
+        return notes
+
+
 def _positive_ints(parts: list[str], *, spec: str, expected: str) -> list[int]:
     if not parts or not all(p.isdigit() and int(p) > 0 for p in parts):
         raise CompareConfigError(f"--configs entry {spec!r} must be {expected} (e.g. 4:64).")
@@ -255,7 +509,7 @@ def _positive_ints(parts: list[str], *, spec: str, expected: str) -> list[int]:
 
 
 def parse_method_spec(spec: str) -> KVCacheMethod:
-    """Parse ``'4:64'`` | ``'stock:4:64'`` (Task 3 adds ``'turboquant:bits[:seed]'``).
+    """Parse ``'4:64'`` | ``'stock:4:64'`` | ``'turboquant:bits[:seed]'``.
 
     A bare ``bits:group_size`` is stock (backward-compatible). Raises CompareConfigError
     (a ValueError) on anything malformed. The parser enumerates the shipped methods by
@@ -272,9 +526,20 @@ def parse_method_spec(spec: str) -> KVCacheMethod:
             )
         bits, gs = _positive_ints(args, spec=spec, expected="'bits:group_size'")
         return StockKVMethod(bits=bits, group_size=gs)
+    if name == "turboquant":
+        if len(args) not in (1, 2):
+            raise CompareConfigError(
+                f"--configs entry {spec!r} must be 'turboquant:bits' or 'turboquant:bits:seed'."
+            )
+        nums = _positive_ints(args, spec=spec, expected="'turboquant:bits[:seed]'")
+        seed = nums[1] if len(nums) == 2 else TURBOQUANT_DEFAULT_SEED
+        try:
+            return TurboQuantKVMethod(bits=nums[0], seed=seed)
+        except ValueError as exc:
+            raise CompareConfigError(f"--configs entry {spec!r}: {exc}") from exc
     raise CompareConfigError(
         f"--configs entry {spec!r}: unknown method {name!r}; known: {sorted(METHODS)}."
     )
 
 
-METHODS: dict[str, type] = {"stock": StockKVMethod}
+METHODS: dict[str, type] = {"stock": StockKVMethod, "turboquant": TurboQuantKVMethod}

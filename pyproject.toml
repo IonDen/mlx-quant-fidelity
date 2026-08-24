@@ -111,7 +111,7 @@ enable_error_code = ["redundant-expr", "truthy-bool", "ignore-without-code"]
 files = ["src/mlx_quant_fidelity"]
 
 [[tool.mypy.overrides]]
-module = ["mlx.*", "mlx_lm.*", "pyarrow.*"]
+module = ["mlx.*", "mlx_lm.*", "pyarrow.*", "turboquant_mlx.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
@@ -124,6 +124,7 @@ filterwarnings = [
   "error",
   'ignore::DeprecationWarning:mlx\..*',
   'ignore::DeprecationWarning:mlx_lm\..*',
+  'ignore::DeprecationWarning:turboquant_mlx\..*',
 ]
 markers = [
   "slow: real-model probe integration test (opt in with --run-slow)",
