@@ -199,6 +199,14 @@ def test_control_block_renders_and_roundtrips():
     assert back.control_kl == r.control_kl
 
 
+def test_control_table_renders_dash_for_missing_flip_rate():
+    """Reds if a control_kl-without-flip-rate report crashes the renderer instead of degrading."""
+    r = _mk_report(control_kl=ScalarSummary(mean=0.05, median=0.04, p99=0.1, max=0.2))
+    md = render_markdown(r)
+    assert "quantizer-only" in md
+    assert "—" in md
+
+
 def test_no_control_no_new_markdown_lines():
     """Reds if a default stock report's markdown gains any new line (byte-identity guard)."""
     plain = render_markdown(_mk_report())

@@ -239,6 +239,9 @@ def render_markdown(report: FidelityReport) -> str:
         lines.append(f"\n_drift footing: {report.drift_footing}._")
     if report.control_kl is not None:
         ctrl = report.control_kl
+        control_flip = (
+            "—" if report.control_flip_rate is None else f"{report.control_flip_rate:.4f}"
+        )
         lines += [
             "",
             "**Quantizer-only control** (dequantize → standard SDPA; same corpus, third forward):",
@@ -247,7 +250,7 @@ def render_markdown(report: FidelityReport) -> str:
             "|---|---|---|---|",
             f"| bundled (deployed path) | {report.kl.mean:.4f} | {report.kl.p99:.4f} | "
             f"{report.flip_rate:.4f} |",
-            f"| quantizer-only | {ctrl.mean:.4f} | {ctrl.p99:.4f} | {report.control_flip_rate:.4f} |",
+            f"| quantizer-only | {ctrl.mean:.4f} | {ctrl.p99:.4f} | {control_flip} |",
             "",
             "> The difference between the lanes reflects the attention-path change plus "
             "compounded layer-wise divergence; it is not a pure kernel-numerics metric.",
