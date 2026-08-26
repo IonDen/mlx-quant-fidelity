@@ -269,6 +269,14 @@ class ComparisonTargetResult:
     excluded_reason: str | None  # e.g. "cost unavailable"; None when ranked
     error_type: str | None  # set iff status=="failed"
     message: str | None  # set iff status=="failed"
+    # KV-only (weight mode leaves these None): the quantizer-only value this row is actually
+    # RANKED on, its verdict, and the footing that ranking uses — always "quantizer_only" for
+    # a `compare kv` row. `report.kl`/`report.verdict` stay the method's own native (possibly
+    # bundled) numbers; these three carry the ranking-time numbers, with a native fallback
+    # wherever they're None (see `assemble_comparison_report`/`_kv_envelope_to_result`).
+    ranked_kl: float | None = None
+    ranked_verdict: str | None = None
+    ranked_footing: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -323,16 +331,49 @@ def _human_bytes(n: int | None) -> str:
     return f"{n / 1e9:.2f} GB"
 
 
+def _kv_row_kl_and_flip(
+    report: FidelityReport | WeightFidelityReport, ranked_kl: float | None
+) -> tuple[float, float, float]:
+    """(KL mean, KL p99, flip) a kv-mode row shows in its ranked columns.
+
+    `kl`/`flip_rate` are shared by both report types; `control_kl`/`control_flip_rate` are
+    KV-only — `getattr` with a default guards a row whose `.report` happens to be a
+    `WeightFidelityReport` (existing kv-mode tests build rows that way) as well as a legacy
+    partial with no control lane recorded.
+    """
+    kl_mean = ranked_kl if ranked_kl is not None else report.kl.mean
+    control_kl = getattr(report, "control_kl", None)
+    if control_kl is not None:
+        control_flip = getattr(report, "control_flip_rate", None)
+        flip = control_flip if control_flip is not None else report.flip_rate
+        return kl_mean, control_kl.p99, flip
+    return kl_mean, report.kl.p99, report.flip_rate
+
+
 def render_comparison_markdown(report: ComparisonReport) -> str:
-    """Human-readable comparison: ranked table (cost ascending) + excluded rows + recommendation."""
+    """Human-readable comparison: ranked table (cost ascending) + excluded rows + recommendation.
+
+    A ``kv``-mode table carries two extra columns a ``weight``-mode table does not: ``bundled
+    KL`` (the method's own native number, shown only where it differs from the ranked one —
+    i.e. only for a stock row that ran the quantizer-only control) and ``resident +/token``
+    (the method's working-set overhead, from ``FidelityReport.working_set_bytes_per_token``).
+    """
     target = report.reference or report.model or "?"
     lines = [f"# Quant comparison ({report.mode}) vs `{target}`", ""]
     if report.mode == "kv" and report.quantize_mode == "deployment":
         lines += [f"_mode: {report.quantize_mode} (quantize_start={report.quantize_start})_", ""]
-    lines += [
-        "| target | cost | KL mean | KL p99 | flip | verdict | frontier |",
-        "|---|---|---|---|---|---|---|",
-    ]
+    is_kv = report.mode == "kv"
+    if is_kv:
+        lines += [
+            "| target | cost | KL mean | KL p99 | flip | bundled KL | resident +/token | "
+            "verdict | frontier |",
+            "|---|---|---|---|---|---|---|---|---|",
+        ]
+    else:
+        lines += [
+            "| target | cost | KL mean | KL p99 | flip | verdict | frontier |",
+            "|---|---|---|---|---|---|---|",
+        ]
     dominated_by: dict[str, str] = dict(report.dominated)
     ranked = [r for r in report.results if r.point is not None]
     for r in sorted(ranked, key=lambda r: r.point.cost_bytes):  # type: ignore[union-attr]
@@ -343,10 +384,24 @@ def render_comparison_markdown(report: ComparisonReport) -> str:
         else:
             dominator = dominated_by.get(r.label)
             mark = f"✗ dominated by `{dominator}`" if dominator is not None else "✗"
-        lines.append(
-            f"| `{r.label}` | {_human_bytes(r.point.cost_bytes)} | {r.report.kl.mean:.4f} | "
-            f"{r.report.kl.p99:.4f} | {r.report.flip_rate:.4f} | {r.report.verdict} | {mark} |"
-        )
+        if is_kv:
+            kl_mean, kl_p99, flip = _kv_row_kl_and_flip(r.report, r.ranked_kl)
+            verdict = r.ranked_verdict if r.ranked_verdict is not None else r.report.verdict
+            bundled = (
+                f"{r.report.kl.mean:.4f}"
+                if r.ranked_kl is not None and getattr(r.report, "kv_method", None) == "stock"
+                else "—"
+            )
+            resident = _human_bytes(getattr(r.report, "working_set_bytes_per_token", None))
+            lines.append(
+                f"| `{r.label}` | {_human_bytes(r.point.cost_bytes)} | {kl_mean:.4f} | "
+                f"{kl_p99:.4f} | {flip:.4f} | {bundled} | {resident} | {verdict} | {mark} |"
+            )
+        else:
+            lines.append(
+                f"| `{r.label}` | {_human_bytes(r.point.cost_bytes)} | {r.report.kl.mean:.4f} | "
+                f"{r.report.kl.p99:.4f} | {r.report.flip_rate:.4f} | {r.report.verdict} | {mark} |"
+            )
     excluded = [r for r in report.results if r.point is None]
     if excluded:
         lines += ["", "**Excluded (not ranked):**"]
@@ -360,6 +415,19 @@ def render_comparison_markdown(report: ComparisonReport) -> str:
         )
     elif report.budget is not None:
         lines.append(f"No target clears the budget ({report.budget}).")
+    if is_kv:
+        seen_warnings: set[str] = set()
+        for r in report.results:
+            if r.report is None:
+                continue
+            for w in r.report.warnings:
+                if w not in seen_warnings:
+                    seen_warnings.add(w)
+                    lines.append(f"\n> Note: {w}")
+        lines.append(
+            "\n_ranked on quantizer-only drift; stock rows carry their bundled deployment "
+            "drift alongside._"
+        )
     if report.mode == "weight":
         lines += [
             "",

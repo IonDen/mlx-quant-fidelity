@@ -48,6 +48,42 @@ def _wreport(label: str, kl_mean: float, cost: int) -> WeightFidelityReport:
     )
 
 
+def _kv_report_stock_with_control(*, warnings: tuple[str, ...] = ()) -> FidelityReport:
+    """A stock KV report with a control (quantizer-only) lane attached.
+
+    Bundled numbers (`kl`/`flip_rate`/`verdict`) are deliberately worse ("bad") than the
+    control lane ("marginal" by construction), so a renderer test asserting on one lane fails
+    if the wrong lane's numbers leak into the wrong column.
+    """
+    base = _freport()
+    return dataclasses.replace(
+        base,
+        kl=ScalarSummary(mean=0.1500, median=0.1500, p99=0.2000, max=0.2000),
+        flip_rate=0.0200,
+        verdict="bad",
+        kv_method="stock",
+        control_kl=ScalarSummary(mean=0.0800, median=0.0800, p99=0.0900, max=0.0900),
+        control_flip_rate=0.0050,
+        working_set_bytes_per_token=0,
+        warnings=warnings,
+    )
+
+
+def _kv_report_native_quantizer_only(*, warnings: tuple[str, ...] = ()) -> FidelityReport:
+    """A KV report from a method that's already quantizer-only (e.g. turboquant) — no control."""
+    base = _freport()
+    return dataclasses.replace(
+        base,
+        kl=ScalarSummary(mean=0.0500, median=0.0500, p99=0.0600, max=0.0600),
+        flip_rate=0.0100,
+        verdict="marginal",
+        kv_method="turboquant",
+        drift_footing="quantizer_only",
+        working_set_bytes_per_token=200_000,
+        warnings=warnings,
+    )
+
+
 def _freport() -> FidelityReport:
     return FidelityReport(
         model_id="m",
@@ -584,3 +620,219 @@ def test_comparison_markdown_dominated_row_shows_dominator_label() -> None:
     q8_row = q8_lines[0]
     assert "✗" in q8_row
     assert "q4" in q8_row, f"dominator label 'q4' not found in q8 row: {q8_row!r}"
+
+
+# ── Task 9 (0.7.0): compare ranks every config on quantizer-only drift ────────
+
+
+def _kv_target_result(
+    label: str,
+    report: FidelityReport,
+    *,
+    quality: float,
+    cost: int,
+    ranked_kl: float,
+    ranked_verdict: str,
+) -> ComparisonTargetResult:
+    return ComparisonTargetResult(
+        label=label,
+        status="ok",
+        report=report,
+        point=RankPoint(label, quality, cost),
+        excluded_reason=None,
+        error_type=None,
+        message=None,
+        ranked_kl=ranked_kl,
+        ranked_verdict=ranked_verdict,
+        ranked_footing="quantizer_only",
+    )
+
+
+def test_comparison_markdown_kv_mode_header_gains_two_columns() -> None:
+    """The kv-mode header carries 'bundled KL' and 'resident +/token' the weight header lacks."""
+    result = _kv_target_result(
+        "4:64",
+        _kv_report_stock_with_control(),
+        quality=0.08,
+        cost=9216,
+        ranked_kl=0.08,
+        ranked_verdict="marginal",
+    )
+    report = ComparisonReport(
+        mode="kv",
+        reference=None,
+        model="org/m",
+        corpus=None,
+        quantize_start=0,
+        quantize_mode="stress",
+        budget=None,
+        results=(result,),
+        frontier=("4:64",),
+        dominated=(),
+        budget_pick=None,
+        mlx_version="0.21",
+        mlx_lm_version="0.31.3",
+    )
+    md = render_comparison_markdown(report)
+    assert (
+        "| target | cost | KL mean | KL p99 | flip | bundled KL | resident +/token | "
+        "verdict | frontier |"
+    ) in md
+
+
+def test_comparison_markdown_kv_mode_shows_ranked_and_bundled_kl() -> None:
+    """A stock row that ran control shows the RANKED (quantizer-only) number under 'KL mean'
+    and the NATIVE bundled number under the new 'bundled KL' column — not the other way round.
+    """
+    result = _kv_target_result(
+        "4:64",
+        _kv_report_stock_with_control(),
+        quality=0.08,
+        cost=9216,
+        ranked_kl=0.08,
+        ranked_verdict="marginal",
+    )
+    report = ComparisonReport(
+        mode="kv",
+        reference=None,
+        model="org/m",
+        corpus=None,
+        quantize_start=0,
+        quantize_mode="stress",
+        budget=None,
+        results=(result,),
+        frontier=("4:64",),
+        dominated=(),
+        budget_pick=None,
+        mlx_version="0.21",
+        mlx_lm_version="0.31.3",
+    )
+    md = render_comparison_markdown(report)
+    row = next(line for line in md.splitlines() if "| `4:64` |" in line)
+    cells = [c.strip() for c in row.strip().strip("|").split("|")]
+    # target | cost | KL mean | KL p99 | flip | bundled KL | resident +/token | verdict | frontier
+    assert cells[2] == "0.0800", f"ranked KL mean: {cells}"
+    assert cells[3] == "0.0900", f"ranked (control) KL p99: {cells}"
+    assert cells[4] == "0.0050", f"ranked (control) flip: {cells}"
+    assert cells[5] == "0.1500", f"bundled KL (native report.kl.mean): {cells}"
+    assert cells[6] == "0 B", f"resident +/token: {cells}"
+    assert cells[7] == "marginal", f"ranked verdict, not the report's own 'bad': {cells}"
+
+
+def test_comparison_markdown_kv_mode_bundled_kl_dash_for_native_quantizer_only() -> None:
+    """A row whose method is already quantizer-only (kv_method != 'stock') shows '—' under
+    'bundled KL' — there is no separate bundled number to show.
+    """
+    result = _kv_target_result(
+        "turboquant:4",
+        _kv_report_native_quantizer_only(),
+        quality=0.05,
+        cost=9216,
+        ranked_kl=0.05,
+        ranked_verdict="marginal",
+    )
+    report = ComparisonReport(
+        mode="kv",
+        reference=None,
+        model="org/m",
+        corpus=None,
+        quantize_start=0,
+        quantize_mode="stress",
+        budget=None,
+        results=(result,),
+        frontier=("turboquant:4",),
+        dominated=(),
+        budget_pick=None,
+        mlx_version="0.21",
+        mlx_lm_version="0.31.3",
+    )
+    md = render_comparison_markdown(report)
+    row = next(line for line in md.splitlines() if "| `turboquant:4` |" in line)
+    cells = [c.strip() for c in row.strip().strip("|").split("|")]
+    assert cells[5] == "—", f"bundled KL column for a native quantizer-only row: {cells}"
+    assert cells[6] == "200.0 KB", f"resident +/token: {cells}"
+
+
+def test_comparison_markdown_kv_mode_dedups_distinct_warnings() -> None:
+    """Each distinct warning across all rows appears exactly once, however many rows share it."""
+    shared = "turboquant: dequantizes on fetch and rides standard SDPA"
+    unique = "turboquant-vonly: K stays fp16"
+    rep_a = _kv_report_native_quantizer_only(warnings=(shared,))
+    rep_b = dataclasses.replace(
+        _kv_report_native_quantizer_only(warnings=(shared, unique)), kv_method="turboquant-vonly"
+    )
+    result_a = _kv_target_result(
+        "turboquant:4", rep_a, quality=0.05, cost=100, ranked_kl=0.05, ranked_verdict="marginal"
+    )
+    result_b = _kv_target_result(
+        "turboquant-vonly:4",
+        rep_b,
+        quality=0.04,
+        cost=90,
+        ranked_kl=0.04,
+        ranked_verdict="marginal",
+    )
+    report = ComparisonReport(
+        mode="kv",
+        reference=None,
+        model="org/m",
+        corpus=None,
+        quantize_start=0,
+        quantize_mode="stress",
+        budget=None,
+        results=(result_a, result_b),
+        frontier=("turboquant-vonly:4", "turboquant:4"),
+        dominated=(),
+        budget_pick=None,
+        mlx_version="0.21",
+        mlx_lm_version="0.31.3",
+    )
+    md = render_comparison_markdown(report)
+    assert md.count(f"> Note: {shared}") == 1
+    assert md.count(f"> Note: {unique}") == 1
+
+
+def test_comparison_markdown_kv_mode_warnings_skip_reportless_rows() -> None:
+    """A failed row (report=None) is skipped by the warnings loop, not a crash."""
+    rep = _kv_report_native_quantizer_only(warnings=("only warning",))
+    ok = _kv_target_result(
+        "turboquant:4", rep, quality=0.05, cost=100, ranked_kl=0.05, ranked_verdict="marginal"
+    )
+    failed = ComparisonTargetResult(
+        label="broken",
+        status="failed",
+        report=None,
+        point=None,
+        excluded_reason=None,
+        error_type="CacheNotQuantizableError",
+        message="nope",
+    )
+    report = ComparisonReport(
+        mode="kv",
+        reference=None,
+        model="org/m",
+        corpus=None,
+        quantize_start=0,
+        quantize_mode="stress",
+        budget=None,
+        results=(ok, failed),
+        frontier=("turboquant:4",),
+        dominated=(),
+        budget_pick=None,
+        mlx_version="0.21",
+        mlx_lm_version="0.31.3",
+    )
+    md = render_comparison_markdown(report)  # must not raise
+    assert md.count("> Note: only warning") == 1
+
+
+def test_comparison_markdown_kv_mode_shows_footing_line() -> None:
+    """Every kv-mode comparison carries the fixed footing note explaining the ranking."""
+    md = render_comparison_markdown(_kv_comparison_report(quantize_start=0, quantize_mode="stress"))
+    assert "ranked on quantizer-only drift" in md
+
+
+def test_comparison_markdown_weight_mode_has_no_kv_footing_line() -> None:
+    """The kv-only footing note must not leak into a weight-mode comparison."""
+    md = render_comparison_markdown(_report())
+    assert "ranked on quantizer-only drift" not in md
