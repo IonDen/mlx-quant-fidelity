@@ -107,6 +107,36 @@ def test_compare_weights_forwards_filter_kwargs(monkeypatch, capsys):
     assert captured["kw"]["max_kld"] == 0.5
 
 
+def test_compare_weights_quant_and_reference_revision_thread(monkeypatch, capsys):
+    """RED if `compare weights` has no --quant-revision/--reference-revision flags, or they
+    are not forwarded to compare_weight_fidelity.
+    """
+    captured = {}
+
+    def fake(quant_ids, reference, **kw):
+        captured["kw"] = kw
+        return _fake_comparison("weight")
+
+    monkeypatch.setattr(cli, "compare_weight_fidelity", fake)
+    rc = cli.main(
+        [
+            "compare",
+            "weights",
+            "q4",
+            "q6",
+            "--reference",
+            "ref",
+            "--quant-revision",
+            "rev-q",
+            "--reference-revision",
+            "rev-r",
+        ]
+    )
+    assert rc == 0
+    assert captured["kw"]["quant_revision"] == "rev-q"
+    assert captured["kw"]["reference_revision"] == "rev-r"
+
+
 def test_compare_kv_forwards_filter_kwargs(monkeypatch, capsys):
     captured = {}
 
@@ -153,7 +183,31 @@ def test_compare_does_not_swallow_unexpected_valueerror():
         main(["compare", "weights", "a/x-4bit", "b/y-8bit", "--reference", "ref/repo"])
 
 
-# ── Task 8 (0035): compare kv --sweep + KV-byte budget filter ─────────────────
+def test_fetch_model_config_requests_config_json(monkeypatch, tmp_path):
+    """`_fetch_model_config` must request exactly 'config.json' — the sweep only needs the
+    architecture geometry (head_dim, n_layers, n_kv_heads), never the model weights.
+    """
+    import huggingface_hub
+
+    captured = {}
+    fake_path = tmp_path / "config.json"
+    fake_path.write_text(json.dumps({"hidden_size": 512}))
+
+    def fake_hf_hub_download(repo_id, filename, **kwargs):
+        captured["repo_id"] = repo_id
+        captured["filename"] = filename
+        return str(fake_path)
+
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", fake_hf_hub_download)
+
+    result = cli._fetch_model_config("org/model")
+
+    assert captured["filename"] == "config.json"
+    assert captured["repo_id"] == "org/model"
+    assert result == {"hidden_size": 512}
+
+
+# ── regression: compare kv --sweep + KV-byte budget filter ────────────────────
 
 _SWEEP_CONFIG_JSON = {
     "num_hidden_layers": 16,

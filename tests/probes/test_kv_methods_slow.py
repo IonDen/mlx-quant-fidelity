@@ -201,7 +201,7 @@ def test_deployment_three_chunks_peak_under_cap(loaded_with_port):
 
 
 # ---------------------------------------------------------------------------
-# Task 5 (0.7.0) — control lane + AffineKVMethod real-model checks
+# regression: control lane + AffineKVMethod real-model checks
 # ---------------------------------------------------------------------------
 #
 # These four tests need no third-party port (AffineKVMethod and the stock control lane are
@@ -309,7 +309,7 @@ def test_affine_consumption_oracle_corruption_raises_kl(loaded, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Task 6 (0.7.0) — TurboQuantVOnlyKVMethod real-port checks
+# regression: TurboQuantVOnlyKVMethod real-port checks
 # ---------------------------------------------------------------------------
 #
 # Needs the real port's ``v_only_cache`` module specifically (not just ``cache``), so these use

@@ -461,6 +461,16 @@ def score_kv_config(
 
     kl_by_depth = None
     if mode == "stress" and kls:
+        # This np.asarray conversion of kls is built exactly once here and reused for both
+        # the uniform-window check and bucket_by_depth below. _aggregate_chunks (called just
+        # above) does its own equivalent conversion of the SAME kls internally, so the array
+        # data is technically walked twice overall — but sharing the two would mean either
+        # changing _aggregate_chunks's list[mx.array] signature (it's exercised directly,
+        # with that exact signature, by tests/probes/test_kv_fakeforward.py) or passing it
+        # pre-converted numpy arrays where mypy --strict expects mx.array (an ignore-driven
+        # type lie). _aggregate_chunks is also shared verbatim with probes/weights.py, which
+        # has no depth-bucket concept at all. Not worth that churn for one extra host-side
+        # float64 cast over a per-chunk KLD list.
         arrays = [np.asarray(k, dtype=np.float64) for k in kls]
         if len({a.shape[0] for a in arrays}) == 1:  # uniform windows only
             kl_by_depth = bucket_by_depth(arrays)

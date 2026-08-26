@@ -28,7 +28,7 @@ from mlx_quant_fidelity.probes.kv import (
 from mlx_quant_fidelity.probes.kv_methods import StockKVMethod
 
 # ---------------------------------------------------------------------------
-# Task 4.1 — pure helpers: capability gate, exact-zero guard, aggregation
+# regression: pure helpers — capability gate, exact-zero guard, aggregation
 # ---------------------------------------------------------------------------
 
 
@@ -58,7 +58,7 @@ def test_two_chunk_aggregation_combines_both():
 
 
 # ---------------------------------------------------------------------------
-# Task 4.2 — _score_chunk: teacher-forced loop, reduce/eval, KLD detection
+# regression: _score_chunk — teacher-forced loop, reduce/eval, KLD detection
 # ---------------------------------------------------------------------------
 
 
@@ -107,7 +107,7 @@ def test_score_chunk_identical_paths_is_exactly_zero():
 
 
 # ---------------------------------------------------------------------------
-# Task 4.5 — memory cap is installed BEFORE the model load (safety ordering)
+# regression: memory cap is installed BEFORE the model load (safety ordering)
 # ---------------------------------------------------------------------------
 
 
@@ -137,7 +137,7 @@ def test_measure_installs_caps_before_model_load(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Task 4.6 — empty-corpus / bad max_chunks raise a clean CorpusError before load
+# regression: empty-corpus / bad max_chunks raise a clean CorpusError before load
 # ---------------------------------------------------------------------------
 
 
@@ -163,7 +163,7 @@ def test_empty_corpus_raises_clean_error():
 
 
 # ---------------------------------------------------------------------------
-# Task 0009 — head_dim gate: group-size divisibility check before scoring
+# regression: head_dim gate — group-size divisibility check before scoring
 # ---------------------------------------------------------------------------
 
 
@@ -222,7 +222,7 @@ def test_kv_head_dim_zero_falls_back_to_derived():
 
 
 # ---------------------------------------------------------------------------
-# Task 4 — score_kv_config: extracted helper operating on an already-loaded model
+# regression: score_kv_config — extracted helper operating on an already-loaded model
 # ---------------------------------------------------------------------------
 
 
@@ -421,7 +421,7 @@ def test_score_kv_config_raises_exact_zero_when_quant_indistinguishable(monkeypa
 
 
 # ---------------------------------------------------------------------------
-# Task 5 — _score_chunk_deployment: split-forward scorer for deployment mode
+# regression: _score_chunk_deployment — split-forward scorer for deployment mode
 # ---------------------------------------------------------------------------
 
 
@@ -465,7 +465,7 @@ def test_score_chunk_deployment_boundary():
 
 
 # ---------------------------------------------------------------------------
-# Task 6 — score_kv_config deployment mode (quantize_start > 0)
+# regression: score_kv_config deployment mode (quantize_start > 0)
 # ---------------------------------------------------------------------------
 
 
@@ -668,7 +668,7 @@ def test_packed_width_message_offers_only_workable_bits():
 
 
 # ---------------------------------------------------------------------------
-# Task 5 — score_kv_config populates kl_by_depth in stress mode only
+# regression: score_kv_config populates kl_by_depth in stress mode only
 # ---------------------------------------------------------------------------
 
 
@@ -706,7 +706,7 @@ def test_unequal_chunks_warn_when_depth_suppressed(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Task 6 (0033 part 3) — chunk_length as a first-class knob + memory warning
+# regression: chunk_length as a first-class knob + memory warning
 # ---------------------------------------------------------------------------
 
 
@@ -1179,7 +1179,7 @@ def test_out_of_vocab_corpus_raises_before_scoring(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Task 4 (0.7.0) — quantizer-only control lane in stress mode
+# regression: quantizer-only control lane in stress mode
 # ---------------------------------------------------------------------------
 
 
@@ -1258,7 +1258,7 @@ def test_control_rejected_for_methods_without_a_control():
 
 
 # ---------------------------------------------------------------------------
-# Task 5 (0.7.0) — control lane composed with deployment mode
+# regression: control lane composed with deployment mode
 # ---------------------------------------------------------------------------
 
 

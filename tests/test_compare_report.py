@@ -622,7 +622,7 @@ def test_comparison_markdown_dominated_row_shows_dominator_label() -> None:
     assert "q4" in q8_row, f"dominator label 'q4' not found in q8 row: {q8_row!r}"
 
 
-# ── Task 9 (0.7.0): compare ranks every config on quantizer-only drift ────────
+# ── regression: compare ranks every config on quantizer-only drift ────────────
 
 
 def _kv_target_result(

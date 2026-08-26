@@ -130,7 +130,7 @@ class FakeKVMethod:
 class FakeMethodModel:
     """Peak on token 0 with no marker; token 1 with ``.marker``; control-lane logic with
     ``.control_marker`` (uniform ``control_gain`` at ``control_peak``, or position-keyed
-    when ``control_gain`` is the sentinel ``None``, for Task 5's slicing oracle).
+    when ``control_gain`` is the sentinel ``None``, for the slicing-oracle tests below).
     """
 
     def __init__(self, head_dim=64, kv_heads=None, control_peak: int = 0, control_gain=5.0):

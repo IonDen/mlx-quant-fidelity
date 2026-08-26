@@ -817,7 +817,7 @@ def test_kv_envelope_with_invalid_verdict_is_corrupt_partial():
     assert result.error_type == "CorruptPartial"
 
 
-# ── Task 2: malformed persisted partials (backlog 0028) ───────────────────────
+# ── regression: malformed persisted partials ───────────────────────────────────
 
 
 def _kv_partial_env(bits: int, gs: int, *, kl_mean: float, cost: int) -> dict[str, object]:
@@ -878,7 +878,7 @@ def test_kv_collect_isolates_malformed_report_body(tmp_path):
     assert "4:64" in report.frontier
 
 
-# ── Task 7: deployment mode — resume regression ───────────────────────────────
+# ── regression: deployment mode — resume regression ────────────────────────────
 
 
 def test_compare_kv_stress_partial_recomputed_for_deployment(monkeypatch, tmp_path):
@@ -911,7 +911,7 @@ def test_compare_kv_stress_partial_recomputed_for_deployment(monkeypatch, tmp_pa
     assert loaded["n"] == 1  # both stress partials rejected → recompute triggered → load fires once
 
 
-# ── Task 1 (0030): non-dict top-level partial isolation ───────────────────────
+# ── regression: non-dict top-level partial isolation ───────────────────────────
 
 
 def test_compare_kv_non_dict_toplevel_partial_is_recomputed(monkeypatch, tmp_path):
@@ -939,7 +939,7 @@ def test_kv_envelope_non_dict_is_corrupt_partial():
     assert (result.status, result.error_type) == ("failed", "CorruptPartial")
 
 
-# ── Task 6 (0033 part 3): chunk_length as a first-class knob ──────────────────
+# ── regression: chunk_length as a first-class knob ─────────────────────────────
 
 
 def test_kv_partial_schema_version_is_4():
@@ -959,7 +959,7 @@ def test_kv_partial_identity_includes_chunk_length(monkeypatch, tmp_path):
     env = json.loads((tmp_path / "4_64.json").read_text())
     assert env["run_identity"]["chunk_length"] == 1024
     # Literal (not compared against the live constant -- see test_kv_partial_schema_version_is_4
-    # for that pin; this asserts the ACTUAL persisted value is the one Task 4 shipped).
+    # for that pin; this asserts the ACTUAL persisted value, not a hardcoded guess).
     assert env["run_identity"]["schema_version"] == 4
 
 
@@ -1005,7 +1005,7 @@ def test_validate_compare_kv_args_quantize_start_bound_follows_chunk_length():
     )
 
 
-# ── Task 8 (0035): compare kv --sweep + KV-byte budget filter ─────────────────
+# ── regression: compare kv --sweep + KV-byte budget filter ─────────────────────
 
 
 def test_sweep_grid_from_head_dim_64():
@@ -1097,7 +1097,7 @@ def test_skipped_configs_appear_in_report_not_frontier(monkeypatch, tmp_path):
     assert "`6:64` — 17408 B/token exceeds the --max-kv-bytes-per-token budget of 1000" in md
 
 
-# ── Task 4 (0.6.0): compare kv over methods ────────────────────────────────────
+# ── regression: compare kv over methods ─────────────────────────────────────────
 
 
 def _fid_method(method_name: str, params: dict, kl_mean: float):
@@ -1248,12 +1248,12 @@ def test_compare_kv_filename_validation_rejects_bad_labels():
         )
 
 
-# ── Task 9 (0.7.0): compare ranks every config on quantizer-only drift ────────
+# ── regression: compare ranks every config on quantizer-only drift ─────────────
 
 
 def test_ranked_kl_and_verdict_uses_control_when_present():
     """A report with a control lane ranks on the control (quantizer-only) numbers, not the
-    bundled `kl`/`verdict` — the whole point of Task 9.
+    bundled `kl`/`verdict` — that's the whole point of this ranking rule.
     """
     rep = _fid_with_control(
         (4, 64),

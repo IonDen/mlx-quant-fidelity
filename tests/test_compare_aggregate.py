@@ -111,7 +111,7 @@ def test_budget_pick_both_constraints_anded():
     assert r.budget_pick == "q8"
 
 
-# ── Task 7: deployment mode — assemble_comparison_report guards ───────────────
+# ── regression: deployment mode — assemble_comparison_report guards ───────────
 
 
 def test_assemble_weight_mode_does_not_touch_quantize_mode():

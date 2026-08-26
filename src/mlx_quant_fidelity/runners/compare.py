@@ -47,7 +47,7 @@ _asdict = _dc.asdict
 # that mode's old partials are rejected. The two modes' partials are independent — a KV-only
 # change (e.g. adding chunk_length to the identity) must not force weight partials to recompute.
 _KV_PARTIAL_SCHEMA_VERSION = 4
-_WEIGHT_PARTIAL_SCHEMA_VERSION = 1
+_WEIGHT_PARTIAL_SCHEMA_VERSION = 2
 
 # The footing every `compare kv` row is ranked on, regardless of a method's native footing
 # (see `_ranked_kl_and_verdict`). Recorded in the run identity too, so a future change to what
@@ -189,12 +189,20 @@ def _validate_compare_weights_args(quant_model_ids: list[str]) -> None:
 
 
 def _run_weight_target(
-    quant: str, reference: str, partial_path: Path, max_chunks: int | None
+    quant: str,
+    reference: str,
+    partial_path: Path,
+    max_chunks: int | None,
+    *,
+    quant_revision: str | None = None,
+    reference_revision: str | None = None,
 ) -> dict[str, object]:  # pragma: no cover - spawns a subprocess; covered by --run-slow
     """Spawn the weight worker for one target and return its parsed JSON envelope.
 
     If the worker exits non-zero or writes no parseable envelope, returns a failed envelope
     so the orchestrator can isolate the failure rather than aborting the whole compare run.
+    ``quant_revision``/``reference_revision`` are appended to the worker cmd only when set,
+    mirroring ``max_chunks``.
     """
     cmd = [
         sys.executable,
@@ -209,6 +217,10 @@ def _run_weight_target(
     ]
     if max_chunks is not None:
         cmd += ["--max-chunks", str(max_chunks)]
+    if quant_revision is not None:
+        cmd += ["--quant-revision", quant_revision]
+    if reference_revision is not None:
+        cmd += ["--reference-revision", reference_revision]
     try:
         result = subprocess.run(cmd, check=True, capture_output=True, text=True)
         stderr_hint = result.stderr.strip()
@@ -301,11 +313,23 @@ def compare_weight_fidelity(
     max_kld: float | None = None,
     min_tier: str | None = None,
     artifacts_dir: Path | None = None,
+    quant_revision: str | None = None,
+    reference_revision: str | None = None,
 ) -> ComparisonReport:
     """Rank N weight-quant repos vs one reference on quality-per-byte.
 
     Subprocess-per-target (each loads reference + quant); resumes by skipping targets whose
     partial JSON already exists. Mismatched/unrankable targets are isolated, not aborted.
+
+    Args:
+        quant_model_ids: HuggingFace repo ids (or local paths) of the quantized targets.
+        reference_model_id: Repo id (or local path) of the shared full-precision reference.
+        max_chunks: Score at most this many corpus chunks per target.
+        max_kld: Optional KLD budget for the recommended pick.
+        min_tier: Optional minimum tier for the recommended pick.
+        artifacts_dir: Directory for partial JSON files (default: _artifacts/compare/weight).
+        quant_revision: Optional git revision applied to every quant target's fetch.
+        reference_revision: Optional git revision for the one shared reference repo.
 
     Raises:
         CompareConfigError: If fewer than 2 targets, duplicate ids, malformed repo ids, or
@@ -337,12 +361,19 @@ def compare_weight_fidelity(
                 "reference": reference_model_id,
                 "max_chunks": max_chunks,
                 "schema_version": _WEIGHT_PARTIAL_SCHEMA_VERSION,
+                "quant_revision": quant_revision,
+                "reference_revision": reference_revision,
             }
             if env.get("run_identity") != expected_identity:
                 env = None
         if env is None:
             env = _run_weight_target(
-                repo, reference=reference_model_id, partial_path=partial, max_chunks=max_chunks
+                repo,
+                reference=reference_model_id,
+                partial_path=partial,
+                max_chunks=max_chunks,
+                quant_revision=quant_revision,
+                reference_revision=reference_revision,
             )
         result = _envelope_to_result(label, env)
         # fix 4: corpus from the FIRST successful result (don't overwrite once set)

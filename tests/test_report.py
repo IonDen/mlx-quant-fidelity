@@ -43,7 +43,7 @@ def _report() -> FidelityReport:
 
 
 def _mk_report(**overrides: object) -> FidelityReport:
-    """`_report()` with field overrides applied via `dataclasses.replace` (Task 3 test helper)."""
+    """`_report()` with field overrides applied via `dataclasses.replace` (a test helper)."""
     return dataclasses.replace(_report(), **overrides)  # type: ignore[arg-type]
 
 

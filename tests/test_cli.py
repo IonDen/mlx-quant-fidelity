@@ -183,7 +183,7 @@ def test_cli_compare_rejects_badge_format():
     assert exc.value.code == 2  # argparse usage error exit code
 
 
-# ── Task 6 (0033 part 3): --chunk-length CLI plumbing ──────────────────────────
+# ── regression: --chunk-length CLI plumbing ───────────────────────────────────
 
 
 def test_kv_cli_passes_chunk_length(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -311,7 +311,7 @@ def test_parse_kv_configs_accepts_method_specs():
     ]
 
 
-# ── Task 10 (0.7.0): spec-string --kv-method, --control, --model-revision ─────
+# ── regression: spec-string --kv-method, --control, --model-revision ──────────
 
 
 def test_kv_cli_kv_method_spec_string_resolves(monkeypatch: pytest.MonkeyPatch) -> None:

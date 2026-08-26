@@ -155,6 +155,8 @@ def main(argv: list[str] | None = None) -> int:
     cw.add_argument("--max-chunks", type=int, default=None)
     cw.add_argument("--max-kld", type=float, default=None)
     cw.add_argument("--min-tier", choices=["good", "marginal", "bad"], default=None)
+    cw.add_argument("--quant-revision", default=None)
+    cw.add_argument("--reference-revision", default=None)
     cw.add_argument("--format", choices=["json", "md"], default="md")
 
     ck = csub.add_parser("kv", help="rank N (bits:group_size) KV configs on one model")
@@ -227,6 +229,8 @@ def main(argv: list[str] | None = None) -> int:
                 max_chunks=args.max_chunks,
                 max_kld=args.max_kld,
                 min_tier=args.min_tier,
+                quant_revision=args.quant_revision,
+                reference_revision=args.reference_revision,
             )
             out = (
                 render_comparison_json(creport)
