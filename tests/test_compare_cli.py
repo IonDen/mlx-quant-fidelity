@@ -225,6 +225,22 @@ def test_cli_sweep_budget_below_two_kept_exits_2(monkeypatch, capsys):
     assert "max-kv-bytes-per-token" in capsys.readouterr().err.lower()
 
 
+def test_compare_kv_model_revision_threads(monkeypatch, capsys):
+    """RED if `compare kv` has no --model-revision flag, or it is not forwarded to
+    compare_kv_fidelity.
+    """
+    captured = {}
+
+    def fake(model, configs, **kw):
+        captured["kw"] = kw
+        return _fake_comparison("kv")
+
+    monkeypatch.setattr(cli, "compare_kv_fidelity", fake)
+    rc = cli.main(["compare", "kv", "m", "--configs", "4:64,8:64", "--model-revision", "abc123"])
+    assert rc == 0
+    assert captured["kw"]["model_revision"] == "abc123"
+
+
 def test_cli_sweep_budget_with_incomplete_geometry_exits_2(monkeypatch, capsys):
     """head_dim is resolvable (explicit key) but n_layers/n_kv_heads are not; the budget
     can't be costed, so this must exit 2 rather than crash inside filter_configs_by_kv_budget.

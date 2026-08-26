@@ -6,7 +6,12 @@ from mlx_quant_fidelity import cli
 from mlx_quant_fidelity.corpora.provenance import CorpusProvenance
 from mlx_quant_fidelity.errors import QuantFidelityError
 from mlx_quant_fidelity.metrics import ScalarSummary
-from mlx_quant_fidelity.probes.kv_methods import StockKVMethod, TurboQuantKVMethod
+from mlx_quant_fidelity.probes.kv_methods import (
+    AffineKVMethod,
+    StockKVMethod,
+    TurboQuantKVMethod,
+    TurboQuantVOnlyKVMethod,
+)
 from mlx_quant_fidelity.report import FidelityReport, WeightFidelityReport
 
 
@@ -304,3 +309,150 @@ def test_parse_kv_configs_accepts_method_specs():
         StockKVMethod(bits=4, group_size=64),
         TurboQuantKVMethod(bits=3),
     ]
+
+
+# ── Task 10 (0.7.0): spec-string --kv-method, --control, --model-revision ─────
+
+
+def test_kv_cli_kv_method_spec_string_resolves(monkeypatch: pytest.MonkeyPatch) -> None:
+    """RED if '--kv-method' does not route a colon-bearing value through parse_method_spec.
+
+    'affine' has no flag-based (name) form (see the affine-by-name test below), so a spec
+    string is the only way to reach it from the CLI -- this proves that path is wired.
+    """
+    seen = {}
+
+    def fake_measure(model, *, method, **kw):
+        seen["method"] = method
+        return _fake_report()
+
+    monkeypatch.setattr(cli, "measure_kv_fidelity", fake_measure)
+    assert cli.main(["kv", "org/m", "--kv-method", "affine:8:4"]) == 0
+    assert seen["method"] == AffineKVMethod(k_bits=8, v_bits=4)
+
+
+def test_kv_cli_spec_string_conflicts_with_kv_bits(capsys: pytest.CaptureFixture[str]) -> None:
+    """RED if a spec-string --kv-method silently ignores a simultaneous --kv-bits instead of
+    erroring -- the two forms must not both apply to the same invocation.
+    """
+    rc = cli.main(["kv", "org/m", "--kv-method", "turboquant:3", "--kv-bits", "4"])
+    assert rc == 2
+    assert "--kv-bits" in capsys.readouterr().err
+
+
+def test_kv_cli_spec_string_conflicts_with_kv_group_size(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """RED if a spec-string --kv-method silently ignores a simultaneous --kv-group-size."""
+    rc = cli.main(["kv", "org/m", "--kv-method", "4:64", "--kv-group-size", "32"])
+    assert rc == 2
+    assert "--kv-group-size" in capsys.readouterr().err
+
+
+def test_kv_cli_spec_string_conflicts_with_kv_seed(capsys: pytest.CaptureFixture[str]) -> None:
+    """RED if a spec-string --kv-method silently ignores a simultaneous --kv-seed."""
+    rc = cli.main(["kv", "org/m", "--kv-method", "turboquant:3", "--kv-seed", "9"])
+    assert rc == 2
+    assert "--kv-seed" in capsys.readouterr().err
+
+
+def test_kv_cli_affine_by_name_errors_with_spec_hint(capsys: pytest.CaptureFixture[str]) -> None:
+    """RED if bare '--kv-method affine' silently builds a method instead of erroring: affine
+    has no flag-based form and the error must point at the spec grammar (e.g. 'affine:8:4').
+    """
+    rc = cli.main(["kv", "org/m", "--kv-method", "affine"])
+    assert rc == 2
+    assert "affine:8:4" in capsys.readouterr().err
+
+
+def test_kv_cli_turboquant_vonly_by_name_uses_kv_bits_as_v_bits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """RED if the turboquant-vonly name path ignores --kv-bits or misreads it as k_bits."""
+    seen = {}
+
+    def fake_measure(model, *, method, **kw):
+        seen["method"] = method
+        return _fake_report()
+
+    monkeypatch.setattr(cli, "measure_kv_fidelity", fake_measure)
+    rc = cli.main(["kv", "org/m", "--kv-method", "turboquant-vonly", "--kv-bits", "3"])
+    assert rc == 0
+    assert seen["method"] == TurboQuantVOnlyKVMethod(v_bits=3)
+
+
+def test_kv_cli_turboquant_vonly_by_name_requires_kv_bits(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """RED if turboquant-vonly's name path defaults v_bits instead of requiring --kv-bits."""
+    rc = cli.main(["kv", "org/m", "--kv-method", "turboquant-vonly"])
+    assert rc == 2
+    assert "--kv-bits" in capsys.readouterr().err
+
+
+def test_kv_cli_unknown_method_name_lists_known_methods(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """RED if an unrecognized --kv-method name is silently accepted or the error omits the
+    known-methods list a user needs to fix the invocation (choices= was dropped, so this
+    validation must now happen in _resolve_kv_method itself).
+    """
+    rc = cli.main(["kv", "org/m", "--kv-method", "nonexistent"])
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "stock" in err
+    assert "turboquant" in err
+
+
+def test_kv_defaults_unchanged(monkeypatch: pytest.MonkeyPatch) -> None:
+    """RED if moving --kv-bits/--kv-group-size to default=None leaks None into StockKVMethod
+    instead of applying the 0.5.x legacy defaults (4:64) when the user passes neither flag.
+    """
+    seen = {}
+
+    def fake_measure(model, *, method, **kw):
+        seen["method"] = method
+        return _fake_report()
+
+    monkeypatch.setattr(cli, "measure_kv_fidelity", fake_measure)
+    assert cli.main(["kv", "org/m"]) == 0
+    assert seen["method"] == StockKVMethod(bits=4, group_size=64)
+
+
+def test_kv_cli_control_flag_threads(monkeypatch: pytest.MonkeyPatch) -> None:
+    """RED if --control is not threaded through main() into measure_kv_fidelity's control kwarg."""
+    captured: dict[str, object] = {}
+
+    def fake_measure(model, **kw):
+        captured["kw"] = kw
+        return _fake_report()
+
+    monkeypatch.setattr(cli, "measure_kv_fidelity", fake_measure)
+    assert cli.main(["kv", "org/m", "--control"]) == 0
+    assert captured["kw"]["control"] is True
+
+
+def test_kv_cli_control_flag_defaults_false(monkeypatch: pytest.MonkeyPatch) -> None:
+    """RED if omitting --control does not forward control=False (e.g. a stray default=True)."""
+    captured: dict[str, object] = {}
+
+    def fake_measure(model, **kw):
+        captured["kw"] = kw
+        return _fake_report()
+
+    monkeypatch.setattr(cli, "measure_kv_fidelity", fake_measure)
+    assert cli.main(["kv", "org/m"]) == 0
+    assert captured["kw"]["control"] is False
+
+
+def test_kv_cli_model_revision_threads(monkeypatch: pytest.MonkeyPatch) -> None:
+    """RED if `kv` has no --model-revision flag, or it is not forwarded to measure_kv_fidelity."""
+    captured: dict[str, object] = {}
+
+    def fake_measure(model, **kw):
+        captured["kw"] = kw
+        return _fake_report()
+
+    monkeypatch.setattr(cli, "measure_kv_fidelity", fake_measure)
+    assert cli.main(["kv", "org/m", "--model-revision", "abc123"]) == 0
+    assert captured["kw"]["model_revision"] == "abc123"

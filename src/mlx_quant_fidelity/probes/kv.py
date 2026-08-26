@@ -538,6 +538,7 @@ def measure_kv_fidelity(
     max_chunks: int | None = None,
     model_revision: str | None = None,
     chunk_length: int = 512,
+    control: bool = False,
 ) -> FidelityReport:
     """Measure how much KV-cache quantization costs, via teacher-forced paired scoring.
 
@@ -563,6 +564,9 @@ def measure_kv_fidelity(
             recommendation. ``MAX_CHUNK_LENGTH`` alone is vocabulary-blind, so a second,
             vocabulary-aware pre-flight also refuses any window whose paired fp32 logits
             would exceed a fraction of the installed wired cap.
+        control: stress mode only. Run a third, quantizer-only forward per chunk so the
+            report can separate quantizer error from quantized-attention-kernel numerics.
+            See :func:`~mlx_quant_fidelity.probes.kv.score_kv_config`'s ``control`` docs.
 
     Returns:
         A :class:`~mlx_quant_fidelity.report.FidelityReport` with all metrics and provenance.
@@ -635,4 +639,5 @@ def measure_kv_fidelity(
         method=method,
         quantize_start=quantize_start,
         max_chunks=max_chunks,
+        control=control,
     )

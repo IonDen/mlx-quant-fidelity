@@ -1101,4 +1101,9 @@ def parse_method_spec(spec: str) -> KVCacheMethod:
     )
 
 
-METHODS: dict[str, type] = {"stock": StockKVMethod, "turboquant": TurboQuantKVMethod}
+METHODS: dict[str, type] = {
+    "stock": StockKVMethod,
+    "turboquant": TurboQuantKVMethod,
+    "affine": AffineKVMethod,
+    "turboquant-vonly": TurboQuantVOnlyKVMethod,
+}

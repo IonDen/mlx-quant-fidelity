@@ -629,9 +629,12 @@ def test_parse_vonly_rejects_malformed(spec):
         parse_method_spec(spec)
 
 
-def test_methods_map_does_not_yet_include_vonly():
-    """Registration is a later task; the parse arm must not depend on METHODS containing it."""
-    assert "turboquant-vonly" not in METHODS
+def test_methods_map_includes_affine_and_vonly():
+    """0.7.0 task 10 registers both in METHODS (supersedes the prior 'registration is a
+    later task' placeholder, which asserted turboquant-vonly was absent).
+    """
+    assert METHODS["affine"] is AffineKVMethod
+    assert METHODS["turboquant-vonly"] is TurboQuantVOnlyKVMethod
 
 
 # --- TurboQuantVOnlyKVMethod: adapter wiring through the extended fake port ---------
