@@ -21,13 +21,13 @@ def badge_color(verdict: str) -> str:
 
 def badge_for_report(report: "FidelityReport | WeightFidelityReport") -> dict[str, str]:
     """Assemble {label, message, color} from a report. Message carries corpus + length + mode."""
-    from mlx_quant_fidelity.report import FidelityReport
+    from mlx_quant_fidelity.report import FidelityReport, method_bits_text
 
     corpus = report.corpus
     if isinstance(report, FidelityReport):
         label = "KV fidelity"
         message = (
-            f"{report.verdict} · {report.kv_bits}-bit · "
+            f"{report.verdict} · {method_bits_text(report)} · "
             f"{corpus.name}/{corpus.chunk_length} · {report.quantize_mode}"
         )
         if report.kv_method != "stock":

@@ -59,3 +59,16 @@ def test_badge_message_names_non_stock_method():
     assert " · turboquant" not in badge_for_report(base)["message"]
     tagged = dataclasses.replace(base, kv_method="turboquant", kv_group_size=None)
     assert badge_for_report(tagged)["message"].endswith(" · turboquant")
+
+
+def test_badge_message_uses_method_bits_text_for_adapter_methods():
+    """Reds if badge_for_report still interpolates kv_bits directly (renders 'None-bit')."""
+    tagged = dataclasses.replace(
+        _fake_report(),
+        kv_bits=None,
+        kv_method="turboquant-vonly",
+        kv_method_params={"v_bits": 3, "seed": 42},
+    )
+    msg = badge_for_report(tagged)["message"]
+    assert "None" not in msg
+    assert "v3-bit" in msg

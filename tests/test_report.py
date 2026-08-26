@@ -42,6 +42,11 @@ def _report() -> FidelityReport:
     )
 
 
+def _mk_report(**overrides: object) -> FidelityReport:
+    """`_report()` with field overrides applied via `dataclasses.replace` (Task 3 test helper)."""
+    return dataclasses.replace(_report(), **overrides)  # type: ignore[arg-type]
+
+
 def test_render_json_is_stable_and_complete():
     data = json.loads(render_json(_report()))
     assert data["kl"]["p99"] == 0.2
@@ -179,3 +184,85 @@ def test_json_gains_exactly_four_keys_over_legacy():
         "measured_kv_bytes_per_token",
     }
     assert all(now[k] == legacy[k] for k in legacy)
+
+
+def test_control_block_renders_and_roundtrips():
+    """Reds if the control table is dropped or round-trip yields a dict, not ScalarSummary."""
+    r = _mk_report(
+        control_kl=ScalarSummary(mean=0.05, median=0.04, p99=0.1, max=0.2), control_flip_rate=0.02
+    )
+    md = render_markdown(r)
+    assert "quantizer-only" in md
+    assert "0.0500" in md
+    back = fidelity_report_from_dict(json.loads(render_json(r)))
+    assert isinstance(back.control_kl, ScalarSummary)
+    assert back.control_kl == r.control_kl
+
+
+def test_no_control_no_new_markdown_lines():
+    """Reds if a default stock report's markdown gains any new line (byte-identity guard)."""
+    plain = render_markdown(_mk_report())
+    assert "quantizer-only" not in plain
+    assert "footing" not in plain
+
+
+def test_method_bits_text_variants():
+    """Reds if any of the four bits-text branches regresses (incl. the 'None-bit' bug)."""
+    from mlx_quant_fidelity.report import method_bits_text
+
+    assert method_bits_text(_mk_report()) == "4-bit"
+    assert (
+        method_bits_text(
+            _mk_report(
+                kv_bits=None,
+                kv_method="affine",
+                kv_method_params={"k_bits": 8, "v_bits": 4, "group_size": 64},
+            )
+        )
+        == "k8v4-bit"
+    )
+    assert (
+        method_bits_text(
+            _mk_report(
+                kv_bits=None,
+                kv_method="turboquant-vonly",
+                kv_method_params={"v_bits": 3, "seed": 42},
+            )
+        )
+        == "v3-bit"
+    )
+
+
+def test_footing_line_renders_for_adapter_methods():
+    """Reds if adapter reports lose the footing line or render 'None-bit' titles."""
+    r = _mk_report(
+        kv_bits=None,
+        kv_group_size=None,
+        drift_footing="quantizer_only",
+        kv_method="affine",
+        kv_method_params={"k_bits": 8, "v_bits": 4, "group_size": 64},
+    )
+    md = render_markdown(r)
+    assert "k8v4-bit" in md
+    assert "None-bit" not in md
+    assert "quantizer_only" in md
+
+
+def test_rehydrate_legacy_dict_defaults_new_fields():
+    """Reds if legacy dicts stop defaulting cleanly, or a turboquant dict gets 'bundled'."""
+    d = json.loads(render_json(_mk_report()))
+    for key in ("drift_footing", "control_kl", "control_flip_rate", "working_set_bytes_per_token"):
+        d.pop(key)
+    back = fidelity_report_from_dict(d)
+    assert back.drift_footing == "bundled"
+    assert back.control_kl is None
+    d["kv_method"] = "turboquant"
+    assert fidelity_report_from_dict(d).drift_footing == "quantizer_only"
+
+
+def test_control_kl_non_dict_raises_report_schema_error():
+    """Reds if a malformed (non-dict, non-null) persisted control_kl is silently accepted."""
+    d = json.loads(render_json(_mk_report()))
+    d["control_kl"] = "boom"
+    with pytest.raises(ReportSchemaError):
+        fidelity_report_from_dict(d)

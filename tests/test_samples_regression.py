@@ -10,7 +10,16 @@ from mlx_quant_fidelity.report import fidelity_report_from_dict, render_json, re
 
 SAMPLES = Path(__file__).resolve().parents[1] / "_artifacts" / "samples"
 KV_JSON = sorted(p for p in SAMPLES.glob("*.json") if p.name.startswith(("llama-", "qwen")))
-NEW_KEYS = {"kv_method", "kv_method_params", "kv_method_provenance", "measured_kv_bytes_per_token"}
+NEW_KEYS = {
+    "kv_method",
+    "kv_method_params",
+    "kv_method_provenance",
+    "measured_kv_bytes_per_token",
+    "drift_footing",
+    "control_kl",
+    "control_flip_rate",
+    "working_set_bytes_per_token",
+}
 
 
 def test_the_glob_finds_the_committed_kv_samples():
@@ -25,11 +34,13 @@ def test_markdown_rerender_matches_committed(path):
 
 
 @pytest.mark.parametrize("path", KV_JSON, ids=[p.stem for p in KV_JSON])
-def test_json_rerender_adds_exactly_the_four_method_keys(path):
+def test_json_rerender_adds_exactly_the_method_and_footing_keys(path):
     legacy = json.loads(path.read_text())
     now = json.loads(render_json(fidelity_report_from_dict(legacy)))
     assert set(now) - set(legacy) == NEW_KEYS
     assert now["kv_method"] == "stock"
+    assert now["drift_footing"] == "bundled"
+    assert now["control_kl"] is None
     for key in legacy:
         assert now[key] == legacy[key], key
 

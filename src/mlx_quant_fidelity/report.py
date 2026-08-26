@@ -45,6 +45,10 @@ class FidelityReport:
     kv_method_params: dict[str, int] = dataclasses.field(default_factory=dict)
     kv_method_provenance: dict[str, str] = dataclasses.field(default_factory=dict)
     measured_kv_bytes_per_token: int | None = None
+    drift_footing: str = "bundled"
+    control_kl: ScalarSummary | None = None
+    control_flip_rate: float | None = None
+    working_set_bytes_per_token: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -127,7 +131,12 @@ def render_weight_markdown(report: WeightFidelityReport) -> str:
 
 
 def fidelity_report_from_dict(d: dict[str, object]) -> FidelityReport:
-    """Rehydrate a FidelityReport from `dataclasses.asdict` output (KV compare partials)."""
+    """Rehydrate a FidelityReport from `dataclasses.asdict` output (KV compare partials).
+
+    Legacy dicts (pre-0.7.0) lack `drift_footing`; its default is derived from `kv_method`
+    because a legacy TurboQuant/adapter dict is quantizer-only, not bundled, even though it
+    predates the footing field.
+    """
     try:
         kl = d["kl"]
         corpus = d["corpus"]
@@ -140,11 +149,37 @@ def fidelity_report_from_dict(d: dict[str, object]) -> FidelityReport:
             if not isinstance(depth, (list, tuple)) or not all(isinstance(b, dict) for b in depth):
                 raise ReportSchemaError("persisted 'kl_by_depth' must be a list of bucket dicts")
             fields["kl_by_depth"] = tuple(DepthBucketSummary(**b) for b in depth)
+        control_kl = d.get("control_kl")
+        if control_kl is not None:
+            if not isinstance(control_kl, dict):
+                raise ReportSchemaError("persisted 'control_kl' must be a dict or null")
+            fields["control_kl"] = ScalarSummary(**control_kl)
+        if "drift_footing" not in d:
+            fields["drift_footing"] = (
+                "bundled" if d.get("kv_method", "stock") == "stock" else "quantizer_only"
+            )
         return FidelityReport(**fields)  # type: ignore[arg-type]
     except ReportSchemaError:
         raise
     except (KeyError, TypeError) as exc:
         raise ReportSchemaError(f"persisted FidelityReport is malformed: {exc}") from exc
+
+
+def method_bits_text(report: FidelityReport) -> str:
+    """Bits label for a report's title/badge: 'N-bit' for stock, else derived from the method.
+
+    Falls back through: an explicit `kv_bits` -> paired k/v bits in `kv_method_params` -> a
+    v-only bits label (adapter methods that quantize only V) -> the bare method name when no
+    bits info is available at all. Never interpolates `kv_bits` directly when it is `None`.
+    """
+    if report.kv_bits is not None:
+        return f"{report.kv_bits}-bit"
+    params = report.kv_method_params
+    if "k_bits" in params and "v_bits" in params:
+        return f"k{params['k_bits']}v{params['v_bits']}-bit"
+    if "v_bits" in params:
+        return f"v{params['v_bits']}-bit"
+    return report.kv_method
 
 
 def render_markdown(report: FidelityReport) -> str:
@@ -153,7 +188,7 @@ def render_markdown(report: FidelityReport) -> str:
     group = "—" if report.kv_group_size is None else str(report.kv_group_size)
     method_tag = "" if report.kv_method == "stock" else f" via {report.kv_method}"
     lines = [
-        f"# KV-fidelity: `{report.model_id}` @ {report.kv_bits}-bit (group {group}){method_tag}",
+        f"# KV-fidelity: `{report.model_id}` @ {method_bits_text(report)} (group {group}){method_tag}",
         "",
         f"**Verdict:** {report.verdict} · **mode:** {report.quantize_mode} "
         f"(quantize_start={report.quantize_start})",
@@ -200,6 +235,23 @@ def render_markdown(report: FidelityReport) -> str:
             "measurement "
             "(see docs/measurement-principles.md)."
         )
+    if report.drift_footing != "bundled" or report.control_kl is not None:
+        lines.append(f"\n_drift footing: {report.drift_footing}._")
+    if report.control_kl is not None:
+        ctrl = report.control_kl
+        lines += [
+            "",
+            "**Quantizer-only control** (dequantize → standard SDPA; same corpus, third forward):",
+            "",
+            "| lane | KL mean | KL p99 | flip |",
+            "|---|---|---|---|",
+            f"| bundled (deployed path) | {report.kl.mean:.4f} | {report.kl.p99:.4f} | "
+            f"{report.flip_rate:.4f} |",
+            f"| quantizer-only | {ctrl.mean:.4f} | {ctrl.p99:.4f} | {report.control_flip_rate:.4f} |",
+            "",
+            "> The difference between the lanes reflects the attention-path change plus "
+            "compounded layer-wise divergence; it is not a pure kernel-numerics metric.",
+        ]
     return "\n".join(lines)
 
 
