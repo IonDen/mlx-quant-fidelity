@@ -429,6 +429,18 @@ def score_kv_config(
                 f"method {method.name!r} (ranking uses the analytic figure; a scale/bias dtype other "
                 "than fp16/bf16 is the usual cause)."
             )
+    working_set_bytes_per_token: int | None = None
+    if isinstance(window, int) and window > 0 and head_dim is not None and isinstance(n_kv, int):
+        working_set_bytes_per_token = (
+            method.working_set_bytes(
+                window=window,
+                n_layers=n_layers,
+                n_kv_heads=n_kv,
+                head_dim=head_dim,
+                dtype_bytes=2,
+            )
+            // window
+        )
     probe_warnings.extend(method.report_warnings())
 
     return FidelityReport(
@@ -461,6 +473,7 @@ def score_kv_config(
         drift_footing="bundled" if method.name == "stock" else "quantizer_only",
         control_kl=control_summary,
         control_flip_rate=control_flip_rate,
+        working_set_bytes_per_token=working_set_bytes_per_token,
     )
 
 

@@ -35,8 +35,8 @@ class KVCacheMethod(Protocol):
     """One way of quantizing the per-layer KV cache, as the probe consumes it.
 
     Pure members (``name``, ``label``, ``params``, ``check``, ``bytes_per_token``,
-    ``provenance``, ``report_warnings``) run without a model. Impure members build or
-    inspect real cache objects. Implementations must not force evaluation in
+    ``working_set_bytes``, ``provenance``, ``report_warnings``) run without a model. Impure
+    members build or inspect real cache objects. Implementations must not force evaluation in
     ``make_cache``, ``measured_bytes``, ``bytes_per_token`` or ``guard`` (they run inside
     the probe's chunk loop); ``convert_prefix`` must return caches whose ``state`` has
     been evaluated.
@@ -79,6 +79,12 @@ class KVCacheMethod(Protocol):
 
     def bytes_per_token(self, *, n_layers: int, n_kv_heads: int, head_dim: int) -> int:
         """Analytic KV bytes per token — the ranking cost."""
+        ...
+
+    def working_set_bytes(
+        self, *, window: int, n_layers: int, n_kv_heads: int, head_dim: int, dtype_bytes: int
+    ) -> int:
+        """Resident+transient bytes the method's fetch path needs beyond stored cache state and logits."""
         ...
 
     def measured_bytes(self, cache: list[object]) -> int:
@@ -248,6 +254,12 @@ class StockKVMethod:
             group_size=self.group_size,
         )
 
+    def working_set_bytes(
+        self, *, window: int, n_layers: int, n_kv_heads: int, head_dim: int, dtype_bytes: int
+    ) -> int:
+        """Zero: mlx-lm's quantized attention reads the packed cache directly, no extra buffer."""
+        return 0
+
     def measured_bytes(self, cache: list[object]) -> int:
         """Trimmed stored bytes (see :func:`stored_state_bytes`)."""
         return stored_state_bytes(cache)
@@ -338,6 +350,19 @@ _TURBOQUANT_REQUIRED = ("update_and_fetch", "state", "trim", "offset")
 
 def _packed_dim(head_dim: int, bits: int) -> int:
     return -(-head_dim // _VALS_PER_WORD[bits])
+
+
+_TURBOQUANT_STEP = 256
+
+
+def _step_padded_window(window: int) -> int:
+    """Round ``window`` up to the port's step-256 working-buffer granularity.
+
+    The port pre-allocates its retained dequantization buffers (and its prefill transients)
+    to the next multiple of 256 tokens, never the exact window — this is what makes a
+    window=300 run cost the same working set as window=512.
+    """
+    return -(-window // _TURBOQUANT_STEP) * _TURBOQUANT_STEP
 
 
 def _gate_turboquant_head_dim(head_dim: int | None, *, model_type: str | None = None) -> None:
@@ -572,6 +597,19 @@ class TurboQuantKVMethod:
             n_layers=n_layers, n_kv_heads=n_kv_heads, head_dim=head_dim, bits=self.bits
         )
 
+    def working_set_bytes(
+        self, *, window: int, n_layers: int, n_kv_heads: int, head_dim: int, dtype_bytes: int
+    ) -> int:
+        """Prefill's ``all_k``+``all_v`` transients plus the two retained step-padded dequant buffers.
+
+        Four buffers, each shaped ``(n_layers, n_kv_heads, step-256-padded window, head_dim)`` at
+        ``dtype_bytes``: the prefill forward's full-window dequantized K and V (transient, freed
+        after the forward), plus the ``_k_deq_buf``/``_v_deq_buf`` working copies the port retains
+        after ``update_and_fetch`` (see :meth:`probe_capability`'s trim-release contract).
+        """
+        padded_window = _step_padded_window(window)
+        return 4 * n_layers * n_kv_heads * padded_window * head_dim * dtype_bytes
+
     def measured_bytes(self, cache: list[object]) -> int:
         """Trimmed stored bytes (see :func:`stored_state_bytes`)."""
         return stored_state_bytes(cache)
@@ -804,6 +842,17 @@ class TurboQuantVOnlyKVMethod:
         packed = _packed_dim(head_dim, self.v_bits) * 4 + 4
         return n_layers * n_kv_heads * head_dim * 2 * 2 + packed * n_kv_heads * n_layers
 
+    def working_set_bytes(
+        self, *, window: int, n_layers: int, n_kv_heads: int, head_dim: int, dtype_bytes: int
+    ) -> int:
+        """Just the V half of :meth:`TurboQuantKVMethod.working_set_bytes` — K stays plain fp16.
+
+        Only V's prefill transient plus its one retained ``_v_deq_buf`` working copy count;
+        same step-256-padded buffer shape as the full-cache port, halved.
+        """
+        padded_window = _step_padded_window(window)
+        return 2 * n_layers * n_kv_heads * padded_window * head_dim * dtype_bytes
+
     def measured_bytes(self, cache: list[object]) -> int:
         """Trimmed stored bytes (see :func:`stored_state_bytes`)."""
         return stored_state_bytes(cache)
@@ -943,6 +992,12 @@ class AffineKVMethod:
         k_side = el_side * (self.k_bits / 8 + 4 / self.group_size)
         v_side = el_side * (self.v_bits / 8 + 4 / self.group_size)
         return round(k_side + v_side)
+
+    def working_set_bytes(
+        self, *, window: int, n_layers: int, n_kv_heads: int, head_dim: int, dtype_bytes: int
+    ) -> int:
+        """K+V dequantized-on-fetch transients at the exact window — ``mx.dequantize`` pads nothing."""
+        return 2 * n_layers * n_kv_heads * window * head_dim * dtype_bytes
 
     def measured_bytes(self, cache: list[object]) -> int:
         """Trimmed stored bytes (see :func:`stored_state_bytes`)."""

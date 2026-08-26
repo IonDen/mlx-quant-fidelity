@@ -794,3 +794,28 @@ def test_vonly_no_pin_warning_when_installed_commit_matches(monkeypatch):
     assert not any(
         "is not the pinned" in w for w in TurboQuantVOnlyKVMethod(v_bits=4).report_warnings()
     )
+
+
+# --- working_set_bytes --------------------------------------------------------------
+
+
+def test_working_set_bytes_hand_values():
+    """Reds on any drift in a per-method working-set formula or the step-256 padding rule."""
+    geo = dict(window=512, n_layers=1, n_kv_heads=1, head_dim=64, dtype_bytes=2)  # noqa: C408 -- Appendix D verbatim
+    assert StockKVMethod(bits=4, group_size=64).working_set_bytes(**geo) == 0
+    assert TurboQuantKVMethod(bits=4).working_set_bytes(**geo) == 262144  # 4*512*64*2
+    assert TurboQuantVOnlyKVMethod(v_bits=4).working_set_bytes(**geo) == 131072
+    assert AffineKVMethod(k_bits=8, v_bits=4).working_set_bytes(**geo) == 131072
+    # step-256 padding applies to the port's buffers, not to affine's exact-window transients
+    assert (
+        TurboQuantKVMethod(bits=4).working_set_bytes(
+            window=300, n_layers=1, n_kv_heads=1, head_dim=64, dtype_bytes=2
+        )
+        == 262144
+    )
+    assert (
+        AffineKVMethod(k_bits=8, v_bits=4).working_set_bytes(
+            window=300, n_layers=1, n_kv_heads=1, head_dim=64, dtype_bytes=2
+        )
+        == 76800
+    )

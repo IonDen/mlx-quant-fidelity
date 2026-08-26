@@ -895,6 +895,32 @@ def test_seam_warns_when_measured_disagrees_with_analytic(monkeypatch):
     )
 
 
+def test_seam_fills_working_set_bytes_per_token_when_geometry_resolves(monkeypatch):
+    """working_set_bytes_per_token needs window + n_layers/n_kv/head_dim, same guard as the
+    analytic-vs-measured comparison above. FakeMethodModel(kv_heads=2) resolves n_kv (head_dim
+    is always 64), so the seam calls FakeKVMethod.working_set_bytes(...) (which returns 0) and
+    divides by the window -> 0. A default FakeMethodModel() leaves both num_key_value_heads and
+    num_attention_heads None, so n_kv does NOT resolve there — see the sibling test below, which
+    asserts None for exactly that case.
+    """
+    _patch_prompt_cache(monkeypatch)
+    report = score_kv_config(
+        FakeMethodModel(kv_heads=2), _kv_corpus(1, 4), model_id="org/m", method=FakeKVMethod()
+    )
+    assert report.working_set_bytes_per_token == 0
+
+
+def test_seam_leaves_working_set_bytes_per_token_none_without_kv_head_count(monkeypatch):
+    """A default FakeMethodModel() has num_key_value_heads=num_attention_heads=None, so n_kv
+    never resolves — the seam must leave working_set_bytes_per_token None rather than guess.
+    """
+    _patch_prompt_cache(monkeypatch)
+    report = score_kv_config(
+        FakeMethodModel(), _kv_corpus(1, 4), model_id="org/m", method=FakeKVMethod()
+    )
+    assert report.working_set_bytes_per_token is None
+
+
 class _NoOffsetCache:
     """A stored cache with no `.offset` — some third-party caches may not report one.
 

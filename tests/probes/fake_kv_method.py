@@ -109,6 +109,10 @@ class FakeKVMethod:
     def bytes_per_token(self, *, n_layers, n_kv_heads, head_dim):
         return 100 * n_layers
 
+    def working_set_bytes(self, *, window, n_layers, n_kv_heads, head_dim, dtype_bytes):
+        """No working-set model for the fake method; the seam's division must still handle 0."""
+        return 0
+
     def measured_bytes(self, cache):
         # default: 4 tokens * (8 words * 4 B + 4 B norm) = 144 B per layer; grows per call so a
         # "measure every chunk / keep the last" bug changes the recorded number
