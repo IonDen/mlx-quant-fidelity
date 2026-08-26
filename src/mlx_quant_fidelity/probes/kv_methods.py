@@ -261,6 +261,71 @@ class StockKVMethod:
         return []
 
 
+class _AffineCache:
+    """Per-layer affine-quantized K/V storage that dequantizes on fetch.
+
+    The engine behind both the ``affine`` method and stock's quantizer-only control lane:
+    ``mx.quantize`` on append (per side, own bit-width, shared group size), ``mx.dequantize``
+    on fetch, so the model runs standard SDPA on full-width tensors. Deliberately exposes NO
+    ``bits`` attribute — mlx-lm's SDPA routing checks ``hasattr(cache, "bits")`` and must
+    keep taking the standard path.
+    """
+
+    def __init__(self, *, k_bits: int, v_bits: int, group_size: int) -> None:
+        """Store the per-side bit widths and shared group size; start empty."""
+        self.k_bits = k_bits
+        self.v_bits = v_bits
+        self.group_size = group_size
+        self.offset = 0
+        self._k: tuple[mx.array, mx.array, mx.array] | None = None
+        self._v: tuple[mx.array, mx.array, mx.array] | None = None
+
+    def _append(
+        self,
+        stored: tuple[mx.array, mx.array, mx.array] | None,
+        new: mx.array,
+        *,
+        bits: int,
+    ) -> tuple[mx.array, mx.array, mx.array]:
+        """Quantize ``new`` and concatenate it onto ``stored`` along the token axis."""
+        q = mx.quantize(new, group_size=self.group_size, bits=bits)
+        if stored is None:
+            return q
+        return tuple(  # type: ignore[return-value]
+            mx.concatenate([s, n], axis=-2) for s, n in zip(stored, q, strict=True)
+        )
+
+    def update_and_fetch(self, keys: mx.array, values: mx.array) -> tuple[mx.array, mx.array]:
+        """Quantize-append the new segment per side; return the full dequantized history."""
+        self._k = self._append(self._k, keys, bits=self.k_bits)
+        self._v = self._append(self._v, values, bits=self.v_bits)
+        self.offset += int(keys.shape[-2])
+        k_out = mx.dequantize(*self._k, group_size=self.group_size, bits=self.k_bits)
+        v_out = mx.dequantize(*self._v, group_size=self.group_size, bits=self.v_bits)
+        return k_out, v_out
+
+    @property
+    def state(self) -> tuple[mx.array, ...]:
+        """The six stored arrays (k triple + v triple); exact token count, no step padding."""
+        if self._k is None or self._v is None:
+            return ()
+        return (*self._k, *self._v)
+
+    def is_trimmable(self) -> bool:
+        """Always trimmable (mirrors KVCache)."""
+        return True
+
+    def trim(self, n: int) -> int:
+        """Drop the last ``n`` stored tokens; return how many were actually dropped."""
+        n = min(n, self.offset)
+        if n > 0 and self._k is not None and self._v is not None:
+            keep = self.offset - n
+            self._k = tuple(a[..., :keep, :] for a in self._k)  # type: ignore[assignment]
+            self._v = tuple(a[..., :keep, :] for a in self._v)  # type: ignore[assignment]
+            self.offset = keep
+        return n
+
+
 _TURBOQUANT_BITS: tuple[int, ...] = (2, 3, 4)
 _VALS_PER_WORD: dict[int, int] = {1: 32, 2: 16, 3: 10, 4: 8}  # vendored from turboquant_mlx.packing
 _TURBOQUANT_MAX_HEAD_DIM = 256
