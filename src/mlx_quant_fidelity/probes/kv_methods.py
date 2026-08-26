@@ -615,6 +615,127 @@ class TurboQuantKVMethod:
         return notes
 
 
+@dataclass(frozen=True, slots=True)
+class AffineKVMethod:
+    """Per-tensor asymmetric affine quantization, measured quantizer-only.
+
+    K and V each carry their own bit-width (shared group size, default 64 — the layout of
+    the only known runtime, the ``arozanov/mlx-lm`` ``feature/turboquant-kv-cache`` fork's
+    ``MixedQuantKVCache``). No shipped mlx-lm executes this config: the probe dequantizes
+    on fetch and rides standard SDPA, so the number is quantizer fidelity for a
+    hypothetical deployment, and every report says so.
+    """
+
+    k_bits: int
+    v_bits: int
+    group_size: int = 64
+
+    def __post_init__(self) -> None:
+        """Reject bit widths outside mx.quantize's set and a non-positive group size."""
+        for side, bits in (("k_bits", self.k_bits), ("v_bits", self.v_bits)):
+            if bits not in _STOCK_BITS:
+                raise ValueError(f"unsupported {side}={bits}; MLX affine supports 2/3/4/6/8.")
+        if self.group_size <= 0:
+            raise ValueError(f"group_size must be positive, got {self.group_size}")
+
+    @property
+    def name(self) -> str:
+        """``'affine'``."""
+        return "affine"
+
+    @property
+    def label(self) -> str:
+        """``'affine:k:v'``, plus ``':group'`` only when the group size is not the 64 default."""
+        base = f"affine:{self.k_bits}:{self.v_bits}"
+        return base if self.group_size == 64 else f"{base}:{self.group_size}"
+
+    @property
+    def params(self) -> dict[str, int]:
+        """``{"k_bits", "v_bits", "group_size"}``."""
+        return {"k_bits": self.k_bits, "v_bits": self.v_bits, "group_size": self.group_size}
+
+    def check(self, *, head_dim: int | None, model_type: str) -> list[str]:
+        """Pure pre-flight: the head_dim % group_size gate plain mx.quantize actually has."""
+        if head_dim is None:
+            return [
+                f"head_dim/group_size compatibility unverified for '{model_type}'; "
+                "relying on MLX to surface a mismatch at first use."
+            ]
+        if head_dim % self.group_size != 0:
+            raise CacheNotQuantizableError(
+                f"group_size={self.group_size} does not divide the model's KV "
+                f"head_dim={head_dim}; choose a group size that divides {head_dim}."
+            )
+        return []
+
+    def probe_capability(self, empty_cache: list[object]) -> None:
+        """Require plain per-layer KVCache — the same shape every other method replaces."""
+        from mlx_lm.models.cache import KVCache
+
+        for layer in empty_cache:
+            if type(layer) is not KVCache:
+                raise CacheNotQuantizableError(
+                    f"cache layer {type(layer).__name__} is not a plain KVCache; the affine "
+                    "method only replaces plain per-layer caches."
+                )
+
+    def make_cache(self, *, n_layers: int) -> list[object]:
+        """Fresh per-layer affine caches."""
+        return [
+            _AffineCache(k_bits=self.k_bits, v_bits=self.v_bits, group_size=self.group_size)
+            for _ in range(n_layers)
+        ]
+
+    def convert_prefix(self, fp_cache: list[object]) -> list[object]:
+        """Quantize each layer's stored fp prefix into a fresh affine cache; one batched eval."""
+        out: list[object] = []
+        for layer in fp_cache:
+            k, v = layer.state  # type: ignore[attr-defined]
+            new = _AffineCache(k_bits=self.k_bits, v_bits=self.v_bits, group_size=self.group_size)
+            new.update_and_fetch(k, v)
+            out.append(new)
+        mx.eval([c.state for c in out])  # type: ignore[attr-defined]
+        return out
+
+    def guard(self) -> AbstractContextManager[None]:
+        """No known crash to translate."""
+        return nullcontext()
+
+    def bytes_per_token(self, *, n_layers: int, n_kv_heads: int, head_dim: int) -> int:
+        """Per side: elements x (bits/8 + 4/group); sum the sides, round once."""
+        el_side = n_layers * n_kv_heads * head_dim
+        k_side = el_side * (self.k_bits / 8 + 4 / self.group_size)
+        v_side = el_side * (self.v_bits / 8 + 4 / self.group_size)
+        return round(k_side + v_side)
+
+    def measured_bytes(self, cache: list[object]) -> int:
+        """Trimmed stored bytes (see :func:`stored_state_bytes`)."""
+        return stored_state_bytes(cache)
+
+    def provenance(self) -> dict[str, str]:
+        """The quantizer package plus the only known (fork) runtime for this layout."""
+        return {
+            "package": "mlx",
+            "version": importlib.metadata.version("mlx"),
+            "k_bits": str(self.k_bits),
+            "v_bits": str(self.v_bits),
+            "group_size": str(self.group_size),
+            "known_runtime": (
+                "arozanov/mlx-lm@feature/turboquant-kv-cache (MixedQuantKVCache, "
+                "mlx-lm 0.31.3) — not upstream mlx-lm"
+            ),
+        }
+
+    def report_warnings(self) -> list[str]:
+        """The hypothetical-deployment note every affine report must carry."""
+        return [
+            "affine: per-tensor asymmetric bits have no shipped runtime — upstream mlx-lm's "
+            "QuantizedKVCache is symmetric; the only known implementation is an idle mlx-lm "
+            "fork. The probe dequantizes on fetch and rides standard SDPA, so this drift is "
+            "the quantizer round-trip only, for a hypothetical deployment."
+        ]
+
+
 def _positive_ints(parts: list[str], *, spec: str, expected: str, example: str) -> list[int]:
     if not parts or not all(p.isascii() and p.isdigit() and int(p) > 0 for p in parts):
         raise CompareConfigError(f"--configs entry {spec!r} must be {expected} (e.g. {example}).")
@@ -622,7 +743,7 @@ def _positive_ints(parts: list[str], *, spec: str, expected: str, example: str) 
 
 
 def parse_method_spec(spec: str) -> KVCacheMethod:
-    """Parse ``'4:64'`` | ``'stock:4:64'`` | ``'turboquant:bits[:seed]'``.
+    """Parse ``'4:64'`` | ``'stock:4:64'`` | ``'turboquant:bits[:seed]'`` | ``'affine:k:v[:group]'``.
 
     A bare ``bits:group_size`` is stock (backward-compatible). Raises CompareConfigError
     (a ValueError) on anything malformed. The parser enumerates the shipped methods by
@@ -651,6 +772,20 @@ def parse_method_spec(spec: str) -> KVCacheMethod:
         seed = nums[1] if len(nums) == 2 else TURBOQUANT_DEFAULT_SEED
         try:
             return TurboQuantKVMethod(bits=nums[0], seed=seed)
+        except ValueError as exc:
+            raise CompareConfigError(f"--configs entry {spec!r}: {exc}") from exc
+    if name == "affine":
+        if len(args) not in (2, 3):
+            raise CompareConfigError(
+                f"--configs entry {spec!r} must be 'affine:k_bits:v_bits[:group_size]' "
+                "(e.g. affine:8:4)."
+            )
+        nums = _positive_ints(
+            args, spec=spec, expected="'affine:k_bits:v_bits[:group_size]'", example="affine:8:4"
+        )
+        gs = nums[2] if len(nums) == 3 else 64
+        try:
+            return AffineKVMethod(k_bits=nums[0], v_bits=nums[1], group_size=gs)
         except ValueError as exc:
             raise CompareConfigError(f"--configs entry {spec!r}: {exc}") from exc
     raise CompareConfigError(

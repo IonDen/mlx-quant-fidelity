@@ -16,6 +16,7 @@ from mlx_quant_fidelity.errors import (
 from mlx_quant_fidelity.probes.kv_methods import (
     METHODS,
     TURBOQUANT_PINNED_COMMIT,
+    AffineKVMethod,
     StockKVMethod,
     TurboQuantKVMethod,
     parse_method_spec,
@@ -426,3 +427,90 @@ def test_no_pin_warning_when_installed_commit_matches(monkeypatch):
         lambda: json.dumps({"vcs_info": {"commit_id": TURBOQUANT_PINNED_COMMIT}}),
     )
     assert not any("is not the pinned" in w for w in TurboQuantKVMethod(bits=4).report_warnings())
+
+
+# --- AffineKVMethod ----------------------------------------------------------------
+
+
+def test_affine_label_and_params():
+    """Reds if the label elides group at the wrong default or params lose a key."""
+    m = AffineKVMethod(k_bits=8, v_bits=4)
+    assert m.name == "affine"
+    assert m.label == "affine:8:4"
+    assert m.params == {"k_bits": 8, "v_bits": 4, "group_size": 64}
+    assert AffineKVMethod(k_bits=8, v_bits=4, group_size=32).label == "affine:8:4:32"
+
+
+def test_affine_bytes_per_token_hand_values():
+    """Reds on any drift in the per-side cost formula.
+
+    1L/1H/64D g64: k8 side 64*1.0625 = 68; v4 side 64*0.5625 = 36 -> 104.
+    Llama-3.2-1B (16L/8H/64D): 8704 + 4608 = 13312.
+    """
+    m = AffineKVMethod(k_bits=8, v_bits=4)
+    assert m.bytes_per_token(n_layers=1, n_kv_heads=1, head_dim=64) == 104
+    assert m.bytes_per_token(n_layers=16, n_kv_heads=8, head_dim=64) == 13312
+
+
+def test_affine_equal_bits_cost_equals_stock():
+    """Reds if affine:b:b:g and stock b:g ever cost differently (same layout)."""
+    from mlx_quant_fidelity.probes.kv_methods import StockKVMethod
+
+    aff = AffineKVMethod(k_bits=4, v_bits=4)
+    stock = StockKVMethod(bits=4, group_size=64)
+    for geo in (
+        {"n_layers": 1, "n_kv_heads": 1, "head_dim": 64},
+        {"n_layers": 16, "n_kv_heads": 8, "head_dim": 64},
+    ):
+        assert aff.bytes_per_token(**geo) == stock.bytes_per_token(**geo)
+
+
+def test_affine_check_gates_divisibility_and_bits():
+    """Reds if the divisibility gate or per-side bit validation is dropped, or bits 6 banned."""
+    from mlx_quant_fidelity.errors import CacheNotQuantizableError
+
+    with pytest.raises(CacheNotQuantizableError, match="does not divide"):
+        AffineKVMethod(k_bits=8, v_bits=4, group_size=48).check(head_dim=64, model_type="llama")
+    with pytest.raises(ValueError, match="k_bits"):
+        AffineKVMethod(k_bits=5, v_bits=4)
+    with pytest.raises(ValueError, match="v_bits"):
+        AffineKVMethod(k_bits=8, v_bits=7)
+    assert AffineKVMethod(k_bits=6, v_bits=6).check(head_dim=128, model_type="llama") == []
+
+
+def test_affine_warns_no_shipped_runtime():
+    """Reds if the hypothetical-deployment warning is dropped from the report."""
+    notes = AffineKVMethod(k_bits=8, v_bits=4).report_warnings()
+    assert any("no shipped runtime" in n for n in notes)
+
+
+def test_affine_provenance_names_the_fork():
+    """Reds if provenance loses the quantizer package or the known-runtime pointer."""
+    prov = AffineKVMethod(k_bits=8, v_bits=4).provenance()
+    assert prov["package"] == "mlx"
+    assert "arozanov/mlx-lm" in prov["known_runtime"]
+
+
+def test_affine_measured_bytes_matches_analytic():
+    """Reds if stored state and the analytic formula disagree (layout or rounding drift)."""
+    m = AffineKVMethod(k_bits=8, v_bits=4)
+    cache = m.make_cache(n_layers=1)
+    k = mx.zeros((1, 1, 8, 64), dtype=mx.float16)
+    cache[0].update_and_fetch(k, k)
+    mx.eval(cache[0].state)
+    assert m.measured_bytes(cache) == m.bytes_per_token(n_layers=1, n_kv_heads=1, head_dim=64) * 8
+
+
+def test_parse_method_spec_affine():
+    """Reds if the parse arm accepts wrong arity or loses the group default."""
+    from mlx_quant_fidelity.errors import CompareConfigError
+    from mlx_quant_fidelity.probes.kv_methods import parse_method_spec
+
+    m = parse_method_spec("affine:8:4")
+    assert isinstance(m, AffineKVMethod)
+    assert (m.k_bits, m.v_bits, m.group_size) == (8, 4, 64)
+    assert parse_method_spec("affine:8:2:32").group_size == 32
+    with pytest.raises(CompareConfigError):
+        parse_method_spec("affine:8")
+    with pytest.raises(CompareConfigError):
+        parse_method_spec("affine:8:4:64:1")
