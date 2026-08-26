@@ -447,7 +447,7 @@ def test_score_chunk_deployment_boundary():
     n = 2
     ref_cache = [_FakeLayerCachePreQ()]
     quant_cache = [_FakeLayerCachePreQ()]  # full-precision; converted at the boundary
-    kl, flips, ref_nll, quant_nll = _score_chunk_deployment(
+    kl, flips, ref_nll, quant_nll, kl_c, flip_c = _score_chunk_deployment(
         model,
         ids,
         ref_cache,
@@ -460,6 +460,8 @@ def test_score_chunk_deployment_boundary():
     assert float(kl[:n].max()) == 0.0  # prefix exact-0 (offline)
     assert float(kl[n:].min()) > 0.0  # post-boundary drift engaged
     assert int(kl[n:].shape[0]) == len(ids) - 1 - n  # segment-2 length exactly L-1-N == 3
+    assert kl_c is None  # no control_method passed -> no control lane
+    assert flip_c is None
 
 
 # ---------------------------------------------------------------------------
@@ -1112,3 +1114,74 @@ def test_control_rejected_for_methods_without_a_control():
             method=FakeKVMethod(),
             control=True,
         )
+
+
+# ---------------------------------------------------------------------------
+# Task 5 (0.7.0) — control lane composed with deployment mode
+# ---------------------------------------------------------------------------
+
+
+def _corpus_from_chunks(chunks: list[mx.array]) -> Corpus:
+    """Build a Corpus from EXACT chunk arrays -- no `% vocab` transform.
+
+    Unlike ``_kv_corpus`` (which mods every id by 3 to stay under FakeMethodModel's default
+    vocab_size=3), this helper hands the chunks through unchanged. Needed whenever a test's fake
+    model keys its behavior off the literal token id (e.g. the position-keyed control-lane
+    sentinel, which reads ``token_id % 2`` on the real input values).
+    """
+    declared_len = int(chunks[0].size) if chunks else 0
+    total_tokens = sum(int(c.size) for c in chunks)
+    prov = CorpusProvenance(
+        "x", "test", "org/m", declared_len, declared_len, "none", "drop", "raw", total_tokens
+    )
+    return Corpus(chunks=tuple(chunks), provenance=prov)
+
+
+def test_control_deployment_covers_exactly_the_post_boundary_positions(monkeypatch):
+    """Reds if the deployment control lane is mis-sliced or mis-aligned by even one position."""
+    import numpy as np
+
+    _patch_prompt_cache(monkeypatch, n_layers=1)
+    ids = mx.arange(6)  # sequential tokens 0..5 -> 5 scored positions, targets 1..5
+    corpus = _corpus_from_chunks([ids])
+    model = FakeMethodModel(control_gain=None)  # position-keyed control lane (see fake)
+    # ids run 0..5; FakeMethodModel's default vocab_size=3 would otherwise trip the
+    # out-of-vocab guard before scoring, which is irrelevant to what this test exercises
+    # (the control lane's position slicing, not vocabulary validation).
+    model.args.vocab_size = 6
+    report = score_kv_config(
+        model,
+        corpus,
+        model_id="m",
+        method=FakeKVMethod(stock_like=True),
+        quantize_start=2,
+        control=True,
+    )
+    assert report.quantize_mode == "deployment"
+
+    def _kl(gain: float) -> float:
+        """First-principles KL([5,0,0] || [gain,0,0]) over vocab 3."""
+        p = np.exp([5.0, 0, 0])
+        p /= p.sum()
+        q = np.exp([gain, 0, 0])
+        q /= q.sum()
+        return float((p * np.log(p / q)).sum())
+
+    # control seg-2 inputs are tokens 2, 3, 4 -> gains 4.0, 4.5, 4.0
+    expected = (_kl(4.0) + _kl(4.5) + _kl(4.0)) / 3
+    assert math.isclose(report.control_kl.mean, expected, rel_tol=1e-4)
+
+
+def test_control_multi_chunk_stress_aggregation(monkeypatch):
+    """Reds if multi-chunk control aggregation drops or double-counts a chunk's arrays."""
+    _patch_prompt_cache(monkeypatch)
+    model = FakeMethodModel(control_peak=2)
+    report = score_kv_config(
+        model,
+        _kv_corpus(2, 4),
+        model_id="m",
+        method=FakeKVMethod(stock_like=True),
+        control=True,
+    )
+    assert math.isclose(report.control_kl.mean, 4.90, abs_tol=0.02)
+    assert report.control_flip_rate == 1.0

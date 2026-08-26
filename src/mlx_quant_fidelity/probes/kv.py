@@ -191,13 +191,19 @@ def _score_chunk_deployment(
     *,
     quantize_start: int,
     method: KVCacheMethod,
-) -> tuple[mx.array, mx.array, mx.array, mx.array]:
+    control_method: KVCacheMethod | None = None,
+) -> tuple[mx.array, mx.array, mx.array, mx.array, mx.array | None, mx.array | None]:
     """Deployment split: compute the prefix in full precision, then convert the stored cache.
 
-    Returns per-position (kl, flips, ref_nll, quant_nll) over ALL L-1 prediction positions.
-    `quant_cache` starts full-precision (make_prompt_cache) and is converted at the boundary
-    via ``method.convert_prefix`` (mirrors mlx-lm's maybe_quantize_kv_cache). The caller
-    aggregates only [quantize_start:] for the reported metrics.
+    Returns per-position (kl, flips, ref_nll, quant_nll) over ALL L-1 prediction positions,
+    plus (control_kl, control_flips) over ONLY the post-boundary [n:L-1) region when
+    ``control_method`` is given (``(None, None)`` otherwise). `quant_cache` starts
+    full-precision (make_prompt_cache) and is converted at the boundary via
+    ``method.convert_prefix`` (mirrors mlx-lm's maybe_quantize_kv_cache). The caller
+    aggregates the bundled arrays with ``[quantize_start:]``; the control arrays already
+    cover exactly that region and need no further slicing (the control lane has no seg-1 —
+    it never scores the full-precision prefix, since it exists to isolate quantizer error
+    at the boundary, not to double as a stress-mode run over the whole chunk).
     """
     n = quantize_start
     targets = ids[1:]
@@ -209,17 +215,30 @@ def _score_chunk_deployment(
     mx.eval(kl1, flip1, refnll1, qnll1)
     del seg1  # free the prefix logits before the boundary + seg2 forward (one segment live)
     mx.eval([c.state for c in quant_cache])  # type: ignore[attr-defined]  # collapse seg-1 graph before boundary
-    # Boundary: convert each layer cache (quantizes the stored [0:n) prefix).
+    # Boundary: control conversion FIRST, while quant_cache still holds fp state -- the
+    # bundled conversion below mutates quant_cache in place and would leave nothing for the
+    # control lane to replay from if it ran second.
+    control_caches = control_method.convert_prefix(quant_cache) if control_method else None
     quant_cache[:] = method.convert_prefix(quant_cache)  # in place: the caller's list sees it
     # Segment 2: [n:L-1) through the now-quantized cache. NOTE ids[n:-1], not ids[n:].
     seg2 = model(ids[None, n:-1], cache=quant_cache)[0].astype(mx.float32)  # type: ignore[operator]
     kl2, flip2, refnll2, qnll2 = _reduce_pair(ref_logits[n:], seg2, targets[n:])
     mx.eval(kl2, flip2, refnll2, qnll2)
+    del seg2  # free the bundled seg-2 logits before the control forward (two-tensor peak, spec §5)
+    control_kl: mx.array | None = None
+    control_flip: mx.array | None = None
+    if control_caches is not None:
+        control_logits = model(ids[None, n:-1], cache=control_caches)[0].astype(mx.float32)  # type: ignore[operator]
+        control_kl = kl_divergence(ref_logits[n:], control_logits)
+        control_flip = top_token_flips(ref_logits[n:], control_logits)
+        mx.eval(control_kl, control_flip)
     return (
         mx.concatenate([kl1, kl2]),
         mx.concatenate([flip1, flip2]),
         mx.concatenate([refnll1, refnll2]),
         mx.concatenate([qnll1, qnll2]),
+        control_kl,
+        control_flip,
     )
 
 
@@ -305,6 +324,8 @@ def score_kv_config(
         if quantize_start > 0 and int(ids.size) < quantize_start + 2:
             continue  # too short to have a post-boundary position; skip
         ref_cache = make_prompt_cache(model)
+        kl_c: mx.array | None = None
+        flip_c: mx.array | None = None
         with method.guard():
             if quantize_start == 0:
                 quant_cache: list[object] = method.make_cache(n_layers=n_layers)
@@ -328,11 +349,22 @@ def score_kv_config(
                     del control_cache, ref_logits
             else:
                 quant_cache = make_prompt_cache(model)
-                kl, flip, ref_nll, quant_nll = _score_chunk_deployment(
-                    model, ids, ref_cache, quant_cache, quantize_start=quantize_start, method=method
+                kl, flip, ref_nll, quant_nll, kl_c, flip_c = _score_chunk_deployment(
+                    model,
+                    ids,
+                    ref_cache,
+                    quant_cache,
+                    quantize_start=quantize_start,
+                    method=method,
+                    control_method=control_m,
                 )
                 kl, flip = kl[quantize_start:], flip[quantize_start:]
                 ref_nll, quant_nll = ref_nll[quantize_start:], quant_nll[quantize_start:]
+                if kl_c is not None and flip_c is not None:
+                    # No [quantize_start:] slice: kl_c/flip_c already cover exactly the
+                    # post-boundary region (see _score_chunk_deployment's docstring).
+                    control_kls.append(kl_c)
+                    control_flips.append(flip_c)
         mx.eval(kl, flip, ref_nll, quant_nll)
         if measured_bpt is None:
             measured_bpt = _measured_bytes_per_token(method, quant_cache)

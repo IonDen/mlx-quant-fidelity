@@ -20,6 +20,7 @@ from tests.probes.test_kv_oracles import MODEL, _tiny_corpus
 from mlx_quant_fidelity.errors import ExactZeroError, MethodUnavailableError
 from mlx_quant_fidelity.probes.kv import score_kv_config
 from mlx_quant_fidelity.probes.kv_methods import (
+    AffineKVMethod,
     StockKVMethod,
     TurboQuantKVMethod,
     stored_state_bytes,
@@ -196,3 +197,108 @@ def test_deployment_three_chunks_peak_under_cap(loaded_with_port):
     )
     assert rep.n_chunks == 3
     assert rep.peak_memory_bytes < wired_gb * 1024**3
+
+
+# ---------------------------------------------------------------------------
+# Task 5 (0.7.0) — control lane + AffineKVMethod real-model checks
+# ---------------------------------------------------------------------------
+#
+# These four tests need no third-party port (AffineKVMethod and the stock control lane are
+# both built on plain mx.quantize/mx.dequantize), so they use the module-scoped `loaded`
+# fixture rather than `loaded_with_port`. Measured: pending controller run — this file's
+# module docstring already says "DO NOT run in CI or in a subagent"; per that same rule the
+# implementing session did not execute --run-slow itself. Recorded values from the
+# controller's run get folded into these docstrings as a follow-up.
+
+
+def test_stock_control_lane_produces_quantizer_only_drift(loaded):
+    """Stock 4:64 stress mode with control=True: the control lane measures nonzero drift.
+
+    Same-order sanity only (quantizer_only <= bundled is expected, never asserted -- KL is
+    not additive). Measured: pending controller run.
+    """
+    model, tok = loaded
+    corpus = _tiny_corpus(tok, chunk_length=64, n_chunks=2)
+    report = score_kv_config(
+        model, corpus, model_id=MODEL, method=StockKVMethod(bits=4, group_size=64), control=True
+    )
+    mx.clear_cache()
+    assert report.control_kl is not None
+    assert report.control_kl.mean > 0
+    print(f"bundled kl.mean={report.kl.mean:.4f}  control_kl.mean={report.control_kl.mean:.4f}")
+
+
+def test_affine_end_to_end_stress_is_quantizer_only(loaded):
+    """AffineKVMethod(k_bits=8, v_bits=4) stress-mode drift stays in a plausible band.
+
+    Measured: pending controller run.
+    """
+    model, tok = loaded
+    corpus = _tiny_corpus(tok, chunk_length=64, n_chunks=2)
+    report = score_kv_config(
+        model, corpus, model_id=MODEL, method=AffineKVMethod(k_bits=8, v_bits=4)
+    )
+    mx.clear_cache()
+    assert 0 < report.kl.mean < 1.0
+    assert report.drift_footing == "quantizer_only"
+    print(f"affine:8:4 kl.mean={report.kl.mean:.4f}")
+
+
+def test_deployment_replay_completes_for_affine_and_stock_control(loaded):
+    """affine:8:4 and stock 4:64 + control=True both complete a deployment replay at boundary 8.
+
+    Measured: pending controller run.
+    """
+    model, tok = loaded
+    corpus = _tiny_corpus(tok, chunk_length=64, n_chunks=1)
+    affine_report = score_kv_config(
+        model,
+        corpus,
+        model_id=MODEL,
+        method=AffineKVMethod(k_bits=8, v_bits=4),
+        quantize_start=8,
+    )
+    mx.clear_cache()
+    assert affine_report.quantize_mode == "deployment"
+    stock_report = score_kv_config(
+        model,
+        corpus,
+        model_id=MODEL,
+        method=StockKVMethod(bits=4, group_size=64),
+        quantize_start=8,
+        control=True,
+    )
+    mx.clear_cache()
+    assert stock_report.quantize_mode == "deployment"
+    assert stock_report.control_kl is not None
+
+
+def test_affine_consumption_oracle_corruption_raises_kl(loaded, monkeypatch):
+    """Corrupting ``_AffineCache.update_and_fetch``'s returned ``v_out`` must raise KL >= 2x clean.
+
+    The clean run's kl.mean is computed in this same test (not a hardcoded prior recording),
+    so the assertion is self-contained regardless of what any other test measured.
+    Measured: pending controller run.
+    """
+    from mlx_quant_fidelity.probes.kv_methods import _AffineCache
+
+    model, tok = loaded
+    corpus = _tiny_corpus(tok, chunk_length=64, n_chunks=2)
+    clean = score_kv_config(
+        model, corpus, model_id=MODEL, method=AffineKVMethod(k_bits=8, v_bits=4)
+    )
+    mx.clear_cache()
+
+    original = _AffineCache.update_and_fetch
+
+    def _corrupted(self, keys, values):
+        k_out, v_out = original(self, keys, values)
+        return k_out, v_out + 0.05 * mx.random.normal(v_out.shape)
+
+    monkeypatch.setattr(_AffineCache, "update_and_fetch", _corrupted)
+    corrupted = score_kv_config(
+        model, corpus, model_id=MODEL, method=AffineKVMethod(k_bits=8, v_bits=4)
+    )
+    mx.clear_cache()
+    print(f"affine clean kl.mean={clean.kl.mean:.4f}  corrupted kl.mean={corrupted.kl.mean:.4f}")
+    assert corrupted.kl.mean >= 2 * clean.kl.mean
