@@ -51,3 +51,12 @@ class QuantizeStartError(QuantFidelityError, ValueError):
 
 class MethodUnavailableError(QuantFidelityError):
     """A third-party KV-cache method's package is missing, is the wrong package, or is incompatible."""
+
+
+class LogitsBudgetError(CorpusError):
+    """The per-chunk paired fp32 logits (plus method + control working-set bytes) exceed the cap.
+
+    A CorpusError subclass so existing ``except CorpusError`` callers keep catching it; the
+    pre-flight gate raises this specific type so a caller can tell an over-budget refusal
+    apart from other corpus problems.
+    """

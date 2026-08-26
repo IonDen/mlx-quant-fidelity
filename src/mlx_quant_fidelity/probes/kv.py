@@ -17,6 +17,7 @@ from mlx_quant_fidelity._memory_caps import (
 from mlx_quant_fidelity.errors import (
     CompareConfigError,
     CorpusError,
+    LogitsBudgetError,
     QuantizeStartError,
 )
 from mlx_quant_fidelity.metrics import bucket_by_depth, kl_divergence, summarize, top_token_flips
@@ -63,13 +64,25 @@ def _paired_logits_bytes(window: int, vocab: int) -> int:
     return _LOGITS_ARRAYS_PER_WINDOW * (window - 1) * int(vocab) * 4
 
 
-def _preflight_logits_budget(window: int | None, vocab: int | None) -> str | None:
-    """Refuse windows whose paired-logits estimate exceeds the installed wired cap.
+def _preflight_logits_budget(
+    window: int | None,
+    vocab: int | None,
+    *,
+    method_ws_bytes: int = 0,
+    control_bytes: int = 0,
+) -> str | None:
+    """Refuse windows whose paired-logits + method/control working-set estimate exceeds the cap.
 
-    Returns a warning string (or None) for the band below the gate; raises ``CorpusError``
-    above it. The gate runs BEFORE any cache construction or forward pass — a warning
-    emitted in the report arrives after the allocation it was meant to prevent, which is
-    exactly the pageable-allocation paging-storm path the ceiling exists to avoid.
+    ``method_ws_bytes`` (the scored method's own :meth:`KVCacheMethod.working_set_bytes`) and
+    ``control_bytes`` (the control cache's stored + working-set bytes, when ``--control`` is on)
+    both ADD to the paired-logits estimate, for both the gate comparison and the warn band —
+    they are real resident/transient memory the same run holds, not a separate budget.
+
+    Returns a warning string (or None) for the band below the gate; raises
+    ``LogitsBudgetError`` above it. The gate runs BEFORE any cache construction or forward
+    pass — a warning emitted in the report arrives after the allocation it was meant to
+    prevent, which is exactly the pageable-allocation paging-storm path the ceiling exists to
+    avoid.
 
     Skipped (warning path only) when the device reports no working-set size, since there is
     no cap to measure against.
@@ -81,17 +94,19 @@ def _preflight_logits_budget(window: int | None, vocab: int | None) -> str | Non
             "not be gated against the installed wired cap. Prefer a smaller --chunk-length "
             "on an unfamiliar architecture."
         )
-    est = _paired_logits_bytes(window, vocab)
+    est = _paired_logits_bytes(window, vocab) + method_ws_bytes + control_bytes
     wired_gb, _ = compute_safe_caps_gb()
     if wired_gb:
         gate = int(LOGITS_BUDGET_FRACTION * wired_gb * 1024**3)
         if est > gate:
-            raise CorpusError(
+            remedy = "Lower --chunk-length (halving it roughly halves the estimate)"
+            if control_bytes > 0:
+                remedy += " or drop --control"
+            raise LogitsBudgetError(
                 f"chunk_length={window} at vocab_size={int(vocab)}: paired fp32 logits peak ≈ "
                 f"{est / 1024**3:.1f} GiB per chunk, above the {gate / 1024**3:.1f} GiB "
                 f"pre-flight budget ({LOGITS_BUDGET_FRACTION:.0%} of the {wired_gb} GiB "
-                "installed wired cap). Lower --chunk-length (halving it roughly halves the "
-                "estimate); see docs/measurement-principles.md."
+                f"installed wired cap). {remedy}; see docs/measurement-principles.md."
             )
     if est > _LOGITS_WARN_BYTES:
         return (
@@ -277,18 +292,54 @@ def score_kv_config(
             )
         control_m = maker()
     probe_warnings: list[str] = []
-    model_type = str(getattr(getattr(model, "args", None), "model_type", "unknown"))
+    args = getattr(model, "args", None)
+    model_type = str(getattr(args, "model_type", "unknown"))
     head_dim = _kv_head_dim(model)
     # Pure pre-flight first (keeps the 0.5.x warnings order: head_dim, then budget). It allocates
     # nothing, so the kernel-panic budget gate below still precedes any cache construction.
     probe_warnings.extend(method.check(head_dim=head_dim, model_type=model_type))
+    window = getattr(corpus.provenance, "chunk_length", None)
+    # Gate geometry is model.args-derived and computed BEFORE any cache construction (the gate's
+    # whole point is running before cache/model allocations — see make_prompt_cache below, which
+    # this precedes). Each of method_ws_bytes/control_bytes degrades to 0 (the 0.6.0 estimate)
+    # when any one piece of geometry is unknown, rather than guessing.
+    gate_n_layers = getattr(args, "num_hidden_layers", None)
+    gate_n_kv = getattr(args, "num_key_value_heads", None) or getattr(
+        args, "num_attention_heads", None
+    )
+    method_ws_bytes = 0
+    control_bytes = 0
+    if (
+        isinstance(window, int)
+        and isinstance(gate_n_layers, int)
+        and isinstance(gate_n_kv, int)
+        and head_dim is not None
+    ):
+        method_ws_bytes = method.working_set_bytes(
+            window=window,
+            n_layers=gate_n_layers,
+            n_kv_heads=gate_n_kv,
+            head_dim=head_dim,
+            dtype_bytes=2,
+        )
+        if control_m is not None:
+            control_bytes = control_m.bytes_per_token(
+                n_layers=gate_n_layers, n_kv_heads=gate_n_kv, head_dim=head_dim
+            ) * window + control_m.working_set_bytes(
+                window=window,
+                n_layers=gate_n_layers,
+                n_kv_heads=gate_n_kv,
+                head_dim=head_dim,
+                dtype_bytes=2,
+            )
     budget_warning = _preflight_logits_budget(
-        getattr(corpus.provenance, "chunk_length", None),
-        getattr(getattr(model, "args", None), "vocab_size", None),
+        window,
+        getattr(args, "vocab_size", None),
+        method_ws_bytes=method_ws_bytes,
+        control_bytes=control_bytes,
     )
     if budget_warning is not None:
         probe_warnings.append(budget_warning)
-    window = getattr(corpus.provenance, "chunk_length", None)
     if method.name != "stock" and isinstance(window, int) and window > 512:
         probe_warnings.append(
             f"chunk_length={window}: the memory ceiling was validated on the stock method; "
@@ -419,7 +470,6 @@ def score_kv_config(
                 "(drift-by-depth requires a fixed-window corpus)."
             )
 
-    args = getattr(model, "args", None)
     n_kv = getattr(args, "num_key_value_heads", None) or getattr(args, "num_attention_heads", None)
     if measured_bpt is not None and head_dim is not None and isinstance(n_kv, int):
         analytic = method.bytes_per_token(n_layers=n_layers, n_kv_heads=n_kv, head_dim=head_dim)
@@ -523,8 +573,10 @@ def measure_kv_fidelity(
         ExactZeroError: If KLD and flip rate are exactly 0 (quantization did not engage).
         CorpusError: If chunk_length is out of range, or is set together with a caller-provided
             corpus, or a caller-provided corpus's own chunk_length exceeds MAX_CHUNK_LENGTH, or
-            the corpus/max_chunks combination yields no chunks, or the window x vocabulary
-            paired-logits estimate exceeds the installed wired-memory budget.
+            the corpus/max_chunks combination yields no chunks.
+        LogitsBudgetError: If the window x vocabulary paired-logits estimate (plus the scored
+            method's and, when ``--control`` is on, the control cache's working-set bytes)
+            exceeds the installed wired-memory budget. A CorpusError subclass.
     """
     from mlx_lm import load
 

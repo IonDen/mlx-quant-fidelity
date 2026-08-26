@@ -833,6 +833,119 @@ def test_underivable_vocab_reports_unchecked_budget(monkeypatch):
     assert any("unchecked" in w.lower() for w in report.warnings)
 
 
+def test_preflight_below_warn_band_returns_none(monkeypatch):
+    """Reds if the zero-term path starts warning where 0.6.0 stayed silent."""
+    monkeypatch.setattr(kvmod, "compute_safe_caps_gb", lambda: (20, 22))
+    # est(512, 128k) = 7 * 511 * 128000 * 4 ~= 1.83 GiB < the 4 GiB warn band -> None
+    assert kvmod._preflight_logits_budget(512, 128_000) is None
+
+
+def test_preflight_warn_band_text_unchanged(monkeypatch):
+    """Reds if the zero-term path changes the legacy warning wording or threshold."""
+    monkeypatch.setattr(kvmod, "compute_safe_caps_gb", lambda: (20, 22))
+    # est(2048, 128k) = 7 * 2047 * 128000 * 4 ~= 6.8 GiB: above 4 GiB warn, under the 14 GiB gate
+    warning = kvmod._preflight_logits_budget(2048, 128_000)
+    assert warning is not None and "GiB per chunk" in warning  # noqa: PT018
+
+
+def test_control_bytes_tips_the_gate_with_drop_control_remedy(monkeypatch):
+    """Reds unless control_bytes adds to the gate estimate and the remedy names --control.
+
+    window=4096/vocab=128_000 squeaks under the 14.0 GiB gate (0.7 x the pinned 20 GiB wired
+    cap) with both extra terms at 0 (asserted below via margin > 0); tipping it by exactly
+    margin + 1 bytes of control_bytes proves the term is additive to the byte, not merely
+    "large enough to usually matter".
+    """
+    monkeypatch.setattr(kvmod, "compute_safe_caps_gb", lambda: (20, 22))
+    window, vocab = 4096, 128_000
+    gate = int(kvmod.LOGITS_BUDGET_FRACTION * 20 * 1024**3)
+    est = kvmod._paired_logits_bytes(window, vocab)
+    margin = gate - est
+    assert margin > 0  # sanity: confirms the zero-term estimate really is under the gate
+    with pytest.raises(kvmod.LogitsBudgetError) as excinfo:
+        kvmod._preflight_logits_budget(window, vocab, control_bytes=margin + 1)
+    assert "drop --control" in str(excinfo.value)
+
+
+def test_method_ws_bytes_tips_the_gate_without_drop_control_remedy(monkeypatch):
+    """Reds unless method_ws_bytes adds to the gate estimate without naming --control.
+
+    Same margin+1 tip as the control_bytes test above, but via method_ws_bytes -- the remedy
+    must NOT suggest dropping --control when control was never the cause.
+    """
+    monkeypatch.setattr(kvmod, "compute_safe_caps_gb", lambda: (20, 22))
+    window, vocab = 4096, 128_000
+    gate = int(kvmod.LOGITS_BUDGET_FRACTION * 20 * 1024**3)
+    est = kvmod._paired_logits_bytes(window, vocab)
+    margin = gate - est
+    assert margin > 0
+    with pytest.raises(kvmod.LogitsBudgetError) as excinfo:
+        kvmod._preflight_logits_budget(window, vocab, method_ws_bytes=margin + 1)
+    assert "drop --control" not in str(excinfo.value)
+
+
+class _FakeFullGeometryModel(_FakeDivergentModel):
+    """_FakeDivergentModel plus num_hidden_layers/num_key_value_heads on args.
+
+    The pre-cache gate's geometry is args-derived (num_hidden_layers, num_key_value_heads,
+    head_dim) and must be known BEFORE score_kv_config builds any cache; _FakeDivergentModel
+    alone never resolves num_hidden_layers, so its gate terms always default to 0. This
+    subclass lets a call-site test exercise the true (geometry-known) branch instead of only
+    the always-0 branch every other fake model in this file exercises.
+    """
+
+    def __init__(self, *, head_dim=64, num_hidden_layers=2, num_key_value_heads=2):
+        super().__init__(head_dim=head_dim)
+        self.args.num_hidden_layers = num_hidden_layers
+        self.args.num_key_value_heads = num_key_value_heads
+
+
+class _FakeControlWithCost:
+    """A control-method stand-in exposing only the cost members the pre-cache gate reads.
+
+    Never reached beyond the gate call in the tests that use it -- LogitsBudgetError fires
+    before score_kv_config builds any cache, so make_cache/convert_prefix are never needed.
+    """
+
+    def bytes_per_token(self, *, n_layers, n_kv_heads, head_dim):
+        """Zero: the tip in these tests comes entirely from working_set_bytes."""
+        return 0
+
+    def working_set_bytes(self, *, window, n_layers, n_kv_heads, head_dim, dtype_bytes):
+        """A cost that dwarfs any pinned cap used in these tests."""
+        return 10**9
+
+
+def test_method_ws_bytes_from_call_site_tips_the_gate(monkeypatch):
+    """Reds unless score_kv_config computes method_ws_bytes from model.args geometry.
+
+    make_prompt_cache is deliberately NOT patched: a clean LogitsBudgetError is itself
+    evidence the gate (and the geometry read that feeds it) precedes any cache construction.
+    """
+    monkeypatch.setattr(kvmod, "compute_safe_caps_gb", lambda: (0.001, 0.001))
+    model = _FakeFullGeometryModel()
+    method = FakeKVMethod()
+    method.working_set_bytes = lambda **kwargs: 10**9  # dwarfs the tiny pinned cap
+    with pytest.raises(kvmod.LogitsBudgetError) as excinfo:
+        score_kv_config(model, _kv_corpus(1, 4), model_id="org/m", method=method)
+    assert "drop --control" not in str(excinfo.value)
+
+
+def test_control_bytes_from_call_site_tips_the_gate_with_remedy(monkeypatch):
+    """Reds unless score_kv_config folds the control cache's cost (args geometry) into the
+    pre-cache gate estimate when --control is on, and the remedy names --control.
+
+    make_prompt_cache is deliberately NOT patched, for the same reason as the sibling test
+    above.
+    """
+    monkeypatch.setattr(kvmod, "compute_safe_caps_gb", lambda: (0.001, 0.001))
+    model = _FakeFullGeometryModel()
+    method = FakeKVMethod()
+    method.control_method = lambda: _FakeControlWithCost()
+    with pytest.raises(kvmod.LogitsBudgetError, match="drop --control"):
+        score_kv_config(model, _kv_corpus(1, 4), model_id="org/m", method=method, control=True)
+
+
 def test_score_kv_config_reports_device_from_device_string(monkeypatch):
     """The report's device provenance comes from device_string() -- not hardcoded/None.
 
@@ -1005,7 +1118,9 @@ def test_method_with_non_default_sugar_raises():
 def test_warnings_order_head_dim_then_budget(monkeypatch):
     """Stock byte-identity depends on the 0.5.x warnings order: head_dim warning, then budget."""
     _patch_kv_caches_divergent(monkeypatch)
-    monkeypatch.setattr(kvmod, "_preflight_logits_budget", lambda window, vocab: "budget note")
+    monkeypatch.setattr(
+        kvmod, "_preflight_logits_budget", lambda window, vocab, **kwargs: "budget note"
+    )
     report = score_kv_config(_FakeDivergentModel(head_dim=None), _kv_corpus(1, 4), model_id="org/m")
     assert len(report.warnings) == 2
     assert "unverified for 'llama'" in report.warnings[0]
