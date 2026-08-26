@@ -1160,6 +1160,32 @@ def test_nonstock_large_window_warns_stock_stays_silent(monkeypatch):
     assert not any("memory ceiling was validated" in w for w in stock_report.warnings)
 
 
+class _ReceiptedNameMethod(FakeKVMethod):
+    """FakeKVMethod reporting a receipted third-party name (see ``kvmod.RECEIPTED_METHODS``)."""
+
+    @property
+    def name(self):
+        return "turboquant"
+
+
+def test_receipted_method_name_large_window_stays_silent(monkeypatch):
+    """A receipted method name, not only 'stock', must stay silent past the 512 warning band.
+
+    Reds under the old ``method.name != "stock"`` condition, which warned for ANY non-stock
+    name -- including one with a measured long-window receipt in
+    docs/measurement-principles.md. ``RECEIPTED_METHODS`` narrows the warning to names with
+    no receipt yet.
+    """
+    _patch_prompt_cache(monkeypatch)
+    report = score_kv_config(
+        FakeMethodModel(),
+        _kv_corpus(1, 4, prov_chunk_len=1024),
+        model_id="org/m",
+        method=_ReceiptedNameMethod(),
+    )
+    assert not any("memory ceiling was validated" in w for w in report.warnings)
+
+
 # ---------------------------------------------------------------------------
 # review follow-up — out-of-vocab corpus tokens raise before any scoring
 # ---------------------------------------------------------------------------

@@ -58,6 +58,12 @@ _LOGITS_ARRAYS_PER_WINDOW = 7
 # Estimate above which the report carries a memory warning (the band below the hard gate).
 _LOGITS_WARN_BYTES = 4 * 1024**3
 
+# Method names carrying a MEASURED long-window receipt in docs/measurement-principles.md (the
+# long-window memory spike, scripts/spike_long_window_memory.py, run per method lane). A method
+# name outside this set has no measured evidence that windows above 512 stay within the memory
+# ceiling, so it still gets the interim >512 warning below.
+RECEIPTED_METHODS = frozenset({"stock", "turboquant", "turboquant-vonly", "affine"})
+
 
 def _paired_logits_bytes(window: int, vocab: int) -> int:
     """Estimated transient bytes held by the paired fp32 logits for one chunk."""
@@ -340,7 +346,7 @@ def score_kv_config(
     )
     if budget_warning is not None:
         probe_warnings.append(budget_warning)
-    if method.name != "stock" and isinstance(window, int) and window > 512:
+    if method.name not in RECEIPTED_METHODS and isinstance(window, int) and window > 512:
         probe_warnings.append(
             f"chunk_length={window}: the memory ceiling was validated on the stock method; "
             f"method {method.name!r} retains additional full-precision working buffers, so "
