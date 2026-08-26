@@ -320,10 +320,27 @@ def test_affine_consumption_oracle_corruption_raises_kl(loaded, monkeypatch):
 
 
 def _vonly_port_or_skip():
+    """Skip ONLY when the port is absent or not at the pinned commit.
+
+    A MethodUnavailableError while the installed commit equals the pin is a real contract
+    failure (task-6 F2 -- this is what happened with the un-fixed F1 bug: the guard misreported
+    the genuine, correctly-pinned port as unavailable) and must fail the lane loudly, not be
+    swallowed as a routine skip. ``_installed_commit()`` already returns ``"unknown"`` (never
+    raises) when ``turboquant-mlx`` isn't installed or its metadata is unreadable, so comparing
+    it to the pin covers "absent" and "wrong commit" in one check.
+    """
+    from mlx_quant_fidelity.probes.kv_methods import TURBOQUANT_PINNED_COMMIT, _installed_commit
+
     try:
         TurboQuantVOnlyKVMethod(v_bits=4).probe_capability([])
-    except MethodUnavailableError as exc:
-        pytest.skip(str(exc))
+    except MethodUnavailableError:
+        installed = _installed_commit()
+        if installed != TURBOQUANT_PINNED_COMMIT:
+            pytest.skip(
+                f"installed turboquant_mlx commit {installed!r} is not the pinned "
+                f"{TURBOQUANT_PINNED_COMMIT}"
+            )
+        raise  # installed commit IS the pin: a real contract failure, not a routine skip
 
 
 @pytest.fixture(scope="module")

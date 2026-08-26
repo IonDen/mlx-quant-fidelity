@@ -687,13 +687,21 @@ class TurboQuantVOnlyKVMethod:
             raise MethodUnavailableError(
                 f"turboquant_mlx has no __version__; expected the port at {TURBOQUANT_PINNED_COMMIT}."
             )
-        inst = VOnlyTurboQuantCache()
-        missing = [a for a in _TURBOQUANT_REQUIRED if not hasattr(inst, a)]
+        # Class-level (descriptor) presence, not instance-level: on the real port,
+        # VOnlyTurboQuantCache.state is a property that RAISES on a fresh/empty instance (it
+        # dereferences an inner plain KVCache's `.keys.shape` while `keys` is still None before
+        # the first update_and_fetch). hasattr(instance, attr) swallows that AttributeError as
+        # "attribute absent" and misreports the genuine port as missing `state` (task-6 F1).
+        # hasattr(cls, attr) reads the property descriptor off the class without invoking its
+        # getter, so it survives a raising property. Behavioral verification of the FILLED
+        # cache still happens below, via the 8-token probe (which fills before reading state).
+        missing = [a for a in _TURBOQUANT_REQUIRED if not hasattr(VOnlyTurboQuantCache, a)]
         if missing:
             raise MethodUnavailableError(
                 f"VOnlyTurboQuantCache is missing {missing}; expected the port at "
                 f"{TURBOQUANT_PINNED_COMMIT} ({TURBOQUANT_INSTALL_HINT})."
             )
+        inst = VOnlyTurboQuantCache()
         if hasattr(inst, "bits"):
             raise MethodUnavailableError(
                 "VOnlyTurboQuantCache exposes `bits`, which would route it through mlx-lm's "
@@ -724,7 +732,13 @@ class TurboQuantVOnlyKVMethod:
         cls = self._cache_cls()
         probe = self._new(cls)
         try:
-            probe.update_and_fetch(mx.zeros((1, 1, 8, 64)), mx.zeros((1, 1, 8, 64)))  # type: ignore[attr-defined]
+            # fp16, not the fp32 mx.zeros default: the real port's inner plain KVCache stores
+            # K (and the unused duplicate V) in whatever dtype it's fed, and bytes_per_token's
+            # fp16 assumption (a real forward's activation dtype) only holds if the contract
+            # probe itself feeds fp16 -- an fp32 probe silently doubles that portion of the
+            # stored bytes and desyncs from the analytic formula below.
+            fp16_zeros = mx.zeros((1, 1, 8, 64), dtype=mx.float16)
+            probe.update_and_fetch(fp16_zeros, fp16_zeros)  # type: ignore[attr-defined]
             mx.eval(probe.state)  # type: ignore[attr-defined]
         except Exception as exc:
             raise MethodUnavailableError(

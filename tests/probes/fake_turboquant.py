@@ -107,25 +107,44 @@ class FakeVOnlyTurboQuantCache:
         self.v_bits = bits
         self.seed = seed
         self.no_v_buffer = no_v_buffer
-        self.offset = 0
+        self._offset_value = 0
         self._shape = None
+        self._dtype = None  # the real port's inner KVCache stores whatever dtype it's fed
         self.trim_calls = []
         self._v_tq = _FakeVTq(bits)
+
+    @property
+    def offset(self):
+        # The real port exposes `offset` as a class-level property too (`return
+        # self._k_cache.offset`) -- a required-attrs guard that checks `hasattr(cls, "offset")`
+        # needs the fake's shape to match, not just its instance-level behavior (task-6 F1).
+        return self._offset_value
 
     def update_and_fetch(self, keys, values):
         b, h, s, d = keys.shape
         self._shape = (b, h, d)
-        self.offset += s
+        self._dtype = keys.dtype
+        self._offset_value += s
         self._v_tq._v_deq_buf = values  # the real port retains a dequant buffer until trim()
         return mx.round(keys, 1), mx.round(values, 1)
 
     @property
     def state(self):
         if self._shape is None:
-            return []
+            # Mirrors the REAL port's bug: VOnlyTurboQuantCache.state does
+            # `list(self._k_cache.state) if self._k_cache.state else []`, and mlx-lm's
+            # KVCache.state dereferences `self.keys.shape` unconditionally -- on a fresh
+            # (empty) cache `keys` is None, so this raises before the `else []` can ever
+            # apply. A guard that probes `hasattr(instance, "state")` swallows this raise
+            # and misreports the genuine port as missing the attribute (task-6 F1).
+            raise AttributeError("'NoneType' object has no attribute 'shape'")
         b, h, d = self._shape
-        k = mx.zeros((b, h, self.offset, d), dtype=mx.float16)
-        v_dup = mx.zeros((b, h, self.offset, d), dtype=mx.float16)
+        # K and the unused duplicate V are stored in whatever dtype update_and_fetch received
+        # (the real port's inner plain KVCache does the same) -- NOT hardcoded fp16, so a
+        # probe that feeds fp32 zeros desyncs from bytes_per_token's fp16 assumption and this
+        # fake catches it, matching what direct verification against the real port found.
+        k = mx.zeros((b, h, self.offset, d), dtype=self._dtype)
+        v_dup = mx.zeros((b, h, self.offset, d), dtype=self._dtype)
         packed = mx.zeros(
             (b, h, self.offset, _packed_dim(d, self._v_tq.quant_bits)), dtype=mx.uint32
         )
@@ -140,8 +159,12 @@ class FakeVOnlyTurboQuantCache:
 
 class _VOnlyWrongOffsetCache(FakeVOnlyTurboQuantCache):
     def update_and_fetch(self, keys, values):
-        out = super().update_and_fetch(keys, values)
-        self.offset -= 1  # under-counts: the behavioural contract must catch this
+        # Explicit unbound-method call, not zero-arg super(): install_fake_port lifts this
+        # function into a flattened, unrelated class namespace (see _flatten_class_dict) whose
+        # MRO does not include _VOnlyWrongOffsetCache, so the `__class__`-cell zero-arg super()
+        # form would raise (self is not an instance of the closed-over class).
+        out = FakeVOnlyTurboQuantCache.update_and_fetch(self, keys, values)
+        self._offset_value -= 1  # under-counts: the behavioural contract must catch this
         return out
 
 
@@ -157,9 +180,26 @@ class _VOnlyNoDeqBufferCache(FakeVOnlyTurboQuantCache):
     """A port whose update_and_fetch never populates the V dequant working buffer."""
 
     def update_and_fetch(self, keys, values):
-        out = super().update_and_fetch(keys, values)
+        out = FakeVOnlyTurboQuantCache.update_and_fetch(self, keys, values)  # see note above
         self._v_tq._v_deq_buf = None
         return out
+
+
+def _flatten_class_dict(cls):
+    """Every class-level attribute ``cls`` exposes (own + inherited via its MRO).
+
+    Most-derived definition wins. Used to build a "genuinely missing an attribute" fake for
+    ``TurboQuantVOnlyKVMethod``: its ``_cache_cls`` checks required attrs at the CLASS level
+    (``hasattr(cls, attr)``, task-6 F1), so a raising ``property`` (the trick used for the
+    uniform method below, which still checks at the instance level) would NOT simulate
+    "missing" there -- the property descriptor is still present on the class either way.
+    """
+    merged: dict[str, object] = {}
+    for klass in reversed(cls.__mro__):
+        if klass is object:
+            continue
+        merged.update(vars(klass))
+    return merged
 
 
 def install_fake_port(
@@ -198,10 +238,14 @@ def install_fake_port(
         base = FakeTurboQuantKVCache
         vonly_base = FakeVOnlyTurboQuantCache
     cls = type("TurboQuantKVCache", (base,), {})
-    vonly_cls = type("VOnlyTurboQuantCache", (vonly_base,), {})
+    # vonly_cls is built from a flattened, `missing`-filtered namespace (see
+    # _flatten_class_dict) rather than a subclass + raising-property, so `missing` attributes
+    # are genuinely absent from the class -- required for TurboQuantVOnlyKVMethod's
+    # class-level required-attrs check to see them as missing.
+    vonly_namespace = {k: v for k, v in _flatten_class_dict(vonly_base).items() if k not in missing}
+    vonly_cls = type("VOnlyTurboQuantCache", (object,), vonly_namespace)
     for name in missing:
         setattr(cls, name, _raising_property(name))
-        setattr(vonly_cls, name, _raising_property(name))
     if with_bits_attr:
         cls.bits = 4
         vonly_cls.bits = 4

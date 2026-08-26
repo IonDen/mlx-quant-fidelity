@@ -702,6 +702,24 @@ def test_vonly_probe_capability_passes_on_plain_kvcache(monkeypatch):
     TurboQuantVOnlyKVMethod(v_bits=4).probe_capability([KVCache(), KVCache()])
 
 
+def test_vonly_cache_cls_survives_a_state_property_that_raises_when_empty(monkeypatch):
+    """Reds if the required-attrs guard checks hasattr(instance, attr) instead of the class.
+
+    The real port's VOnlyTurboQuantCache.state is a property that raises AttributeError on a
+    fresh/empty instance (it dereferences an inner KVCache's .keys.shape while keys is still
+    None). hasattr(instance, "state") silently swallows that AttributeError and misreports the
+    genuine port as missing the attribute (task-6 F1: this is exactly what happened against the
+    real pinned port). The fake VOnly cache mimics this raising-when-empty shape by default.
+    """
+    install_fake_port(monkeypatch)
+    import turboquant_mlx.v_only_cache as vonly_mod
+
+    fresh = vonly_mod.VOnlyTurboQuantCache()
+    with pytest.raises(AttributeError):
+        _ = fresh.state  # sanity: the fake really mimics the real port's bug
+    TurboQuantVOnlyKVMethod(v_bits=4).probe_capability([KVCache()])  # must not misreport "missing"
+
+
 def test_vonly_make_cache_passes_pinned_knobs(monkeypatch):
     install_fake_port(monkeypatch)
     caches = TurboQuantVOnlyKVMethod(v_bits=3, seed=7).make_cache(n_layers=2)
@@ -727,7 +745,8 @@ def test_vonly_measured_bytes_uses_state_not_nbytes(monkeypatch):
     import turboquant_mlx.v_only_cache as vonly_mod
 
     c = vonly_mod.VOnlyTurboQuantCache(bits=4)
-    c.update_and_fetch(mx.zeros((1, 8, 511, 64)), mx.zeros((1, 8, 511, 64)))
+    fp16 = mx.zeros((1, 8, 511, 64), dtype=mx.float16)  # a real forward's activation dtype
+    c.update_and_fetch(fp16, fp16)
     # one layer, 8 heads, 511 tokens: fp16 K + fp16 V + (8*4+4) B packed V+norms, per head/token
     expected = (64 * 2 * 2 + (8 * 4 + 4)) * 8 * 511
     assert TurboQuantVOnlyKVMethod(v_bits=4).measured_bytes([c]) == expected
