@@ -205,17 +205,20 @@ def test_deployment_three_chunks_peak_under_cap(loaded_with_port):
 #
 # These four tests need no third-party port (AffineKVMethod and the stock control lane are
 # both built on plain mx.quantize/mx.dequantize), so they use the module-scoped `loaded`
-# fixture rather than `loaded_with_port`. Measured: pending controller run — this file's
-# module docstring already says "DO NOT run in CI or in a subagent"; per that same rule the
-# implementing session did not execute --run-slow itself. Recorded values from the
-# controller's run get folded into these docstrings as a follow-up.
+# fixture rather than `loaded_with_port`. Measured values recorded in each docstring below
+# (main-thread run 2026-08-26, M1 Max 32 GB, Llama-3.2-1B-Instruct-4bit, tiny corpus
+# chunk_length=64) -- this file's module docstring already says "DO NOT run in CI or in a
+# subagent", so the implementing session did not execute --run-slow itself.
 
 
 def test_stock_control_lane_produces_quantizer_only_drift(loaded):
     """Stock 4:64 stress mode with control=True: the control lane measures nonzero drift.
 
     Same-order sanity only (quantizer_only <= bundled is expected, never asserted -- KL is
-    not additive). Measured: pending controller run.
+    not additive). Measured 2026-08-26 (2 chunks): bundled kl.mean=0.0845, quantizer-only
+    control_kl.mean=0.0848 -- the two lanes are statistically indistinguishable at this
+    config/corpus; recorded, not asserted (KL is not additive, and quantizer_only <= bundled
+    is expectation, not law -- here it inverted by 0.0003).
     """
     model, tok = loaded
     corpus = _tiny_corpus(tok, chunk_length=64, n_chunks=2)
@@ -231,7 +234,7 @@ def test_stock_control_lane_produces_quantizer_only_drift(loaded):
 def test_affine_end_to_end_stress_is_quantizer_only(loaded):
     """AffineKVMethod(k_bits=8, v_bits=4) stress-mode drift stays in a plausible band.
 
-    Measured: pending controller run.
+    Measured 2026-08-26 (2 chunks): kl.mean=0.0080.
     """
     model, tok = loaded
     corpus = _tiny_corpus(tok, chunk_length=64, n_chunks=2)
@@ -247,7 +250,7 @@ def test_affine_end_to_end_stress_is_quantizer_only(loaded):
 def test_deployment_replay_completes_for_affine_and_stock_control(loaded):
     """affine:8:4 and stock 4:64 + control=True both complete a deployment replay at boundary 8.
 
-    Measured: pending controller run.
+    Measured 2026-08-26: both replays completed at boundary 8 (1 chunk).
     """
     model, tok = loaded
     corpus = _tiny_corpus(tok, chunk_length=64, n_chunks=1)
@@ -278,7 +281,7 @@ def test_affine_consumption_oracle_corruption_raises_kl(loaded, monkeypatch):
 
     The clean run's kl.mean is computed in this same test (not a hardcoded prior recording),
     so the assertion is self-contained regardless of what any other test measured.
-    Measured: pending controller run.
+    Measured 2026-08-26: clean kl.mean=0.0080 -> corrupted 0.3952 (~49x, far past the 2x bar).
     """
     from mlx_quant_fidelity.probes.kv_methods import _AffineCache
 
