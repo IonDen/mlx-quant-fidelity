@@ -191,12 +191,16 @@ With uv, `uv sync --group turboquant` installs the same pin.
 ```
 # Quant comparison (kv) vs `mlx-community/Llama-3.2-1B-Instruct-4bit`
 
-| target | cost | KL mean | KL p99 | flip | verdict | frontier |
-|---|---|---|---|---|---|---|
-| `turboquant:3` | 8.2 KB | 0.4229 | 2.3559 | 0.3259 | bad | ✓ |
-| `4:64` | 9.2 KB | 0.1477 | 0.9225 | 0.2048 | bad | ✗ dominated by `turboquant:4` |
-| `turboquant:4` | 9.2 KB | 0.0825 | 0.5663 | 0.1582 | bad | ✓ |
-| `8:64` | 17.4 KB | 0.0004 | 0.0029 | 0.0126 | marginal | ✓ |
+| target | cost | KL mean | KL p99 | flip | bundled KL | resident +/token | verdict | frontier |
+|---|---|---|---|---|---|---|---|---|
+| `turboquant:3` | 8.2 KB | 0.4229 | 2.3559 | 0.3259 | — | 65.5 KB | bad | ✓ |
+| `4:64` | 9.2 KB | 0.1485 | 0.9571 | 0.2056 | 0.1477 | 0 B | bad | ✗ dominated by `turboquant:4` |
+| `turboquant:4` | 9.2 KB | 0.0825 | 0.5663 | 0.1582 | — | 65.5 KB | bad | ✓ |
+| `affine:8:2` | 11.3 KB | 0.2180 | 1.3105 | 0.2391 | — | 32.8 KB | bad | ✗ dominated by `turboquant:4` |
+| `affine:8:4` | 13.3 KB | 0.0120 | 0.0818 | 0.0628 | — | 32.8 KB | bad | ✓ |
+| `8:64` | 17.4 KB | 0.0004 | 0.0028 | 0.0121 | 0.0004 | 0 B | marginal | ✓ |
+| `turboquant-vonly:3` | 36.9 KB | 0.0297 | 0.2025 | 0.0974 | — | 32.8 KB | bad | ✗ dominated by `affine:8:4` |
+| `turboquant-vonly:4` | 37.4 KB | 0.0078 | 0.0520 | 0.0508 | — | 32.8 KB | bad | ✗ dominated by `8:64` |
 ```
 
 Read this table with two caveats. In a teacher-forced pass the TurboQuant cache dequantizes on
@@ -204,10 +208,10 @@ fetch and runs standard attention, so its number is the quantizer alone, while t
 also includes mlx-lm's quantized attention path. And the cost column is stored bytes: in this path
 the TurboQuant cache also keeps full-precision working copies, roughly 2.3× the size of an fp16
 cache (derived from its retained dequantization buffers), so peak memory does not show the
-compression that a fused decode deployment would. Only the
-uniform-bit cache at the port's default seed is measured; its asymmetric and layer-adaptive
-configurations are not. Sample captured on Apple M1 Max, 32 GB, revision `08231374…`, 100 chunks
-of 512 tokens, stress mode.
+compression that a fused decode deployment would. The
+uniform-bit cache and its V-only variant (`turboquant-vonly`) are measured at the port's default
+seed; its asymmetric and layer-adaptive configurations are not. Sample captured on Apple M1 Max,
+32 GB, revision `08231374…`, 100 chunks of 512 tokens, stress mode.
 
 ## How it works
 
