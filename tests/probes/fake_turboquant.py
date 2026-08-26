@@ -86,6 +86,82 @@ def _raising_property(name):
     return property(_get)
 
 
+class _FakeVTq:
+    """Stand-in for ``VOnlyTurboQuantCache._v_tq`` (an inner ``TurboQuantKVCache``, v_only=True)."""
+
+    def __init__(self, bits):
+        self.quant_bits = bits
+        self._v_deq_buf = None
+
+
+class FakeVOnlyTurboQuantCache:
+    """Fakes ``turboquant_mlx.v_only_cache.VOnlyTurboQuantCache`` at the pinned commit's shape.
+
+    ``state`` returns 4 arrays: fp16 K, fp16 V (the port's unused duplicate, stored only because
+    K reuses a plain ``KVCache`` that always stores both sides), packed V, fp32 norms — the same
+    4-array shape :func:`turboquant_bytes_per_token`'s v-only sibling formula counts.
+    """
+
+    # signature matches the pinned port: (bits=3, seed=42, no_v_buffer=False)
+    def __init__(self, bits=3, seed=42, no_v_buffer=False):
+        self.v_bits = bits
+        self.seed = seed
+        self.no_v_buffer = no_v_buffer
+        self.offset = 0
+        self._shape = None
+        self.trim_calls = []
+        self._v_tq = _FakeVTq(bits)
+
+    def update_and_fetch(self, keys, values):
+        b, h, s, d = keys.shape
+        self._shape = (b, h, d)
+        self.offset += s
+        self._v_tq._v_deq_buf = values  # the real port retains a dequant buffer until trim()
+        return mx.round(keys, 1), mx.round(values, 1)
+
+    @property
+    def state(self):
+        if self._shape is None:
+            return []
+        b, h, d = self._shape
+        k = mx.zeros((b, h, self.offset, d), dtype=mx.float16)
+        v_dup = mx.zeros((b, h, self.offset, d), dtype=mx.float16)
+        packed = mx.zeros(
+            (b, h, self.offset, _packed_dim(d, self._v_tq.quant_bits)), dtype=mx.uint32
+        )
+        norms = mx.zeros((b, h, self.offset), dtype=mx.float32)
+        return [k, v_dup, packed, norms]
+
+    def trim(self, n):
+        self.trim_calls.append(n)
+        self._v_tq._v_deq_buf = None
+        return 0
+
+
+class _VOnlyWrongOffsetCache(FakeVOnlyTurboQuantCache):
+    def update_and_fetch(self, keys, values):
+        out = super().update_and_fetch(keys, values)
+        self.offset -= 1  # under-counts: the behavioural contract must catch this
+        return out
+
+
+class _VOnlyStickyTrimCache(FakeVOnlyTurboQuantCache):
+    """A port whose trim() records the call but leaves the V dequant buffer resident."""
+
+    def trim(self, n):
+        self.trim_calls.append(n)
+        return 0
+
+
+class _VOnlyNoDeqBufferCache(FakeVOnlyTurboQuantCache):
+    """A port whose update_and_fetch never populates the V dequant working buffer."""
+
+    def update_and_fetch(self, keys, values):
+        out = super().update_and_fetch(keys, values)
+        self._v_tq._v_deq_buf = None
+        return out
+
+
 def install_fake_port(
     monkeypatch,
     *,
@@ -93,34 +169,55 @@ def install_fake_port(
     no_version=False,
     missing=(),
     no_cache_module=False,
+    no_vonly_module=False,
     with_bits_attr=False,
     wrong_behaviour=False,
     bad_trim=False,
     no_deq_buffers=False,
 ):
-    """Install a fake ``turboquant_mlx`` into sys.modules; returns the fake cache class."""
+    """Install a fake ``turboquant_mlx`` into sys.modules; returns the fake uniform cache class.
+
+    Also installs a fake ``turboquant_mlx.v_only_cache`` module (mirroring the ``cache`` module
+    below), built from the same failure-mode flags, so ``TurboQuantVOnlyKVMethod._cache_cls``'s
+    failure paths test offline too. Fetch the fake V-only class via
+    ``sys.modules["turboquant_mlx.v_only_cache"].VOnlyTurboQuantCache``.
+    """
     pkg = types.ModuleType("turboquant_mlx")
     if not no_version:
         pkg.__version__ = version
     if bad_trim:
         base = _StickyTrimCache
+        vonly_base = _VOnlyStickyTrimCache
     elif wrong_behaviour:
         base = _WrongOffsetCache
+        vonly_base = _VOnlyWrongOffsetCache
     elif no_deq_buffers:
         base = _NoDeqBuffersCache
+        vonly_base = _VOnlyNoDeqBufferCache
     else:
         base = FakeTurboQuantKVCache
+        vonly_base = FakeVOnlyTurboQuantCache
     cls = type("TurboQuantKVCache", (base,), {})
+    vonly_cls = type("VOnlyTurboQuantCache", (vonly_base,), {})
     for name in missing:
         setattr(cls, name, _raising_property(name))
+        setattr(vonly_cls, name, _raising_property(name))
     if with_bits_attr:
         cls.bits = 4
+        vonly_cls.bits = 4
     cache_mod = types.ModuleType("turboquant_mlx.cache")
     cache_mod.TurboQuantKVCache = cls
+    vonly_mod = types.ModuleType("turboquant_mlx.v_only_cache")
+    vonly_mod.VOnlyTurboQuantCache = vonly_cls
     monkeypatch.setitem(sys.modules, "turboquant_mlx", pkg)
     if no_cache_module:
         monkeypatch.delitem(sys.modules, "turboquant_mlx.cache", raising=False)
     else:
         pkg.cache = cache_mod
         monkeypatch.setitem(sys.modules, "turboquant_mlx.cache", cache_mod)
+    if no_vonly_module:
+        monkeypatch.delitem(sys.modules, "turboquant_mlx.v_only_cache", raising=False)
+    else:
+        pkg.v_only_cache = vonly_mod
+        monkeypatch.setitem(sys.modules, "turboquant_mlx.v_only_cache", vonly_mod)
     return cls

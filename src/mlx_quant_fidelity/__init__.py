@@ -9,6 +9,7 @@ from mlx_quant_fidelity.probes.kv_methods import (
     KVCacheMethod,
     StockKVMethod,
     TurboQuantKVMethod,
+    TurboQuantVOnlyKVMethod,
     parse_method_spec,
 )
 from mlx_quant_fidelity.probes.weights import measure_weight_fidelity
@@ -23,6 +24,7 @@ __all__ = [
     "MethodUnavailableError",
     "StockKVMethod",
     "TurboQuantKVMethod",
+    "TurboQuantVOnlyKVMethod",
     "WeightFidelityReport",
     "__version__",
     "badge_color",

@@ -604,17 +604,235 @@ class TurboQuantKVMethod:
             "turboquant: the quantized run dequantizes on fetch and rides standard SDPA in prefill "
             "(the port's fused kernel is decode-only and not exercised), so drift measures the "
             "quantizer round-trip only, while stock bundles quantizer + quantized-attention "
-            "numerics; uniform-bit cache at the port's default seed — its asymmetric and "
-            "layer-adaptive configurations are not measured; resident memory in this path is the "
-            "stored bytes plus two full-precision working copies — roughly 2.3x an fp16 cache on "
-            "Llama-3.2-1B geometry, derived from the port's retained dequantization buffers — so "
-            "peak memory does not show the compression."
+            "numerics; uniform-bit cache at the port's default seed — its V-only configuration is "
+            "measured separately (`turboquant-vonly`); its layer-adaptive configuration is not — "
+            "and its `make_adaptive_cache` silently ignores the documented `k_bits`/`v_bits` "
+            "parameters at the pinned commit; resident memory in this path is the stored bytes "
+            "plus two full-precision working copies — roughly 2.3x an fp16 cache on Llama-3.2-1B "
+            "geometry, derived from the port's retained dequantization buffers — so peak memory "
+            "does not show the compression."
         ]
         commit = _installed_commit()
         if commit != TURBOQUANT_PINNED_COMMIT:
             notes.append(
                 f"turboquant: installed commit {commit} is not the pinned {TURBOQUANT_PINNED_COMMIT}; "
                 "numbers may not reproduce the committed sample."
+            )
+        return notes
+
+
+@dataclass(frozen=True, slots=True)
+class TurboQuantVOnlyKVMethod:
+    """arozanov/turboquant-mlx's ``VOnlyTurboQuantCache`` — fp16 K, TurboQuant-compressed V only.
+
+    K stays in a plain fp16 KVCache (standard SDPA); only V is quantized-and-dequantized on
+    fetch. The port's own inner cache still stores a full fp16 copy of V as a side effect of
+    reusing ``KVCache`` for K (see :meth:`report_warnings`) — so this method's stored bytes can
+    exceed a plain fp16 cache's, even though V itself compresses. Install: see
+    ``TURBOQUANT_INSTALL_HINT``.
+    """
+
+    v_bits: int
+    seed: int = TURBOQUANT_DEFAULT_SEED
+
+    def __post_init__(self) -> None:
+        """Reject V bit widths the port does not implement, and a non-positive rotation seed."""
+        if self.v_bits not in _TURBOQUANT_BITS:
+            raise ValueError(f"turboquant-vonly supports v_bits 2/3/4, got v_bits={self.v_bits}")
+        if self.seed < 1:
+            raise ValueError(f"turboquant-vonly seed must be >= 1, got seed={self.seed}")
+
+    @property
+    def name(self) -> str:
+        """``'turboquant-vonly'``."""
+        return "turboquant-vonly"
+
+    @property
+    def label(self) -> str:
+        """``'turboquant-vonly:v_bits'``, plus ``':seed'`` when the seed is not the default."""
+        base = f"turboquant-vonly:{self.v_bits}"
+        return base if self.seed == TURBOQUANT_DEFAULT_SEED else f"{base}:{self.seed}"
+
+    @property
+    def params(self) -> dict[str, int]:
+        """``{"v_bits", "seed"}``."""
+        return {"v_bits": self.v_bits, "seed": self.seed}
+
+    def check(self, *, head_dim: int | None, model_type: str) -> list[str]:
+        """The head_dim gate (see :func:`_gate_turboquant_head_dim`); no warnings.
+
+        The V path still runs the port's fused Metal kernels, so the same power-of-two/<=256
+        constraint applies even though K stays in plain fp16.
+        """
+        _gate_turboquant_head_dim(head_dim, model_type=model_type)
+        return []
+
+    def _cache_cls(self) -> type:
+        """Import the port and verify its V-only API shape; raise MethodUnavailableError with the pin."""
+        try:
+            import turboquant_mlx
+        except ImportError as exc:
+            raise MethodUnavailableError(
+                f"turboquant_mlx is not installed. Install the pinned port: {TURBOQUANT_INSTALL_HINT}"
+            ) from exc
+        try:
+            from turboquant_mlx.v_only_cache import VOnlyTurboQuantCache
+        except ImportError as exc:
+            raise MethodUnavailableError(
+                "the installed `turboquant_mlx` has no `v_only_cache` module — this is the PyPI "
+                "`turboquant-mlx` squatter, not the arozanov port, or a pinned commit predating "
+                f"V-only support. Uninstall it and run: {TURBOQUANT_INSTALL_HINT}"
+            ) from exc
+        if not hasattr(turboquant_mlx, "__version__"):
+            raise MethodUnavailableError(
+                f"turboquant_mlx has no __version__; expected the port at {TURBOQUANT_PINNED_COMMIT}."
+            )
+        inst = VOnlyTurboQuantCache()
+        missing = [a for a in _TURBOQUANT_REQUIRED if not hasattr(inst, a)]
+        if missing:
+            raise MethodUnavailableError(
+                f"VOnlyTurboQuantCache is missing {missing}; expected the port at "
+                f"{TURBOQUANT_PINNED_COMMIT} ({TURBOQUANT_INSTALL_HINT})."
+            )
+        if hasattr(inst, "bits"):
+            raise MethodUnavailableError(
+                "VOnlyTurboQuantCache exposes `bits`, which would route it through mlx-lm's "
+                "quantized attention instead of standard SDPA; the measured path would no longer "
+                f"be the quantizer alone. Expected the port at {TURBOQUANT_PINNED_COMMIT}."
+            )
+        return VOnlyTurboQuantCache  # type: ignore[no-any-return]
+
+    def _new(self, cls: type) -> object:
+        return cls(bits=self.v_bits, seed=self.seed)
+
+    def probe_capability(self, empty_cache: list[object]) -> None:
+        """Every layer must be a plain mlx-lm ``KVCache``; then run and EVALUATE the V contract.
+
+        Mirrors :meth:`TurboQuantKVMethod.probe_capability`'s 8-token contract, but the port's V
+        dequant working buffer lives one level down at ``probe._v_tq._v_deq_buf`` (the inner
+        ``TurboQuantKVCache`` instance the V-only wrapper delegates V storage to).
+        """
+        from mlx_lm.models.cache import KVCache
+
+        for layer in empty_cache:
+            if type(layer) is not KVCache:
+                raise CacheNotQuantizableError(
+                    f"cache layer {type(layer).__name__} is not a plain KVCache; TurboQuant-MLX "
+                    "V-only only replaces plain per-layer caches (sliding-window / MLA / mixed "
+                    "models are not supported)."
+                )
+        cls = self._cache_cls()
+        probe = self._new(cls)
+        try:
+            probe.update_and_fetch(mx.zeros((1, 1, 8, 64)), mx.zeros((1, 1, 8, 64)))  # type: ignore[attr-defined]
+            mx.eval(probe.state)  # type: ignore[attr-defined]
+        except Exception as exc:
+            raise MethodUnavailableError(
+                f"VOnlyTurboQuantCache failed to execute its kernels: {exc}; expected the port at "
+                f"{TURBOQUANT_PINNED_COMMIT}."
+            ) from exc
+        expected = self.bytes_per_token(n_layers=1, n_kv_heads=1, head_dim=64) * 8
+        got_offset = getattr(probe, "offset", None)
+        got_bytes = stored_state_bytes([probe])
+        if got_offset != 8 or got_bytes != expected:
+            raise MethodUnavailableError(
+                f"VOnlyTurboQuantCache behaviour differs from the pinned port (offset {got_offset} "
+                f"!= 8 or stored bytes {got_bytes} != {expected}); expected {TURBOQUANT_PINNED_COMMIT}."
+            )
+        v_tq = getattr(probe, "_v_tq", None)
+        if v_tq is None or getattr(v_tq, "_v_deq_buf", None) is None:
+            raise MethodUnavailableError(
+                "VOnlyTurboQuantCache has no populated _v_tq._v_deq_buf after update_and_fetch; "
+                f"expected the port at {TURBOQUANT_PINNED_COMMIT}."
+            )
+        probe.trim(0)  # type: ignore[attr-defined]
+        if getattr(v_tq, "_v_deq_buf", None) is not None:
+            raise MethodUnavailableError(
+                "VOnlyTurboQuantCache.trim(0) did not release the V dequantized working buffer; "
+                f"expected the port at {TURBOQUANT_PINNED_COMMIT}."
+            )
+
+    def make_cache(self, *, n_layers: int) -> list[object]:
+        """Fresh V-only caches; buffered mode always (``no_v_buffer`` is never passed)."""
+        cls = self._cache_cls()
+        return [self._new(cls) for _ in range(n_layers)]
+
+    def convert_prefix(self, fp_cache: list[object]) -> list[object]:
+        """Replay each layer's stored full-precision prefix through a fresh V-only cache, then trim.
+
+        ``KVCache.state`` is sliced to ``offset`` (never the step-padded buffer). ``trim(0)`` drops
+        the V dequantized working buffer the port retains after ``update_and_fetch``. One batched
+        eval for all layers, as :meth:`TurboQuantKVMethod.convert_prefix` does.
+        """
+        cls = self._cache_cls()
+        out: list[object] = []
+        for layer in fp_cache:
+            k, v = layer.state  # type: ignore[attr-defined]
+            new = self._new(cls)
+            new.update_and_fetch(k, v)  # type: ignore[attr-defined]
+            new.trim(0)  # type: ignore[attr-defined]
+            out.append(new)
+        mx.eval([c.state for c in out])  # type: ignore[attr-defined]
+        return out
+
+    def guard(self) -> AbstractContextManager[None]:
+        """No known crash to translate."""
+        return nullcontext()
+
+    def bytes_per_token(self, *, n_layers: int, n_kv_heads: int, head_dim: int) -> int:
+        """fp16 K + fp16 V (the port's unused duplicate) + packed V + fp32 norms, every layer.
+
+        Source-verified against the pinned port (``v_only_cache.py``): ``update_and_fetch`` feeds
+        BOTH tensors to the inner plain ``KVCache`` used for K storage, so ``state`` is four
+        arrays, not two — this is what makes the method's stored bytes exceed a plain fp16 cache
+        at low V bit-widths (see :meth:`report_warnings`).
+        """
+        packed = _packed_dim(head_dim, self.v_bits) * 4 + 4
+        return n_layers * n_kv_heads * head_dim * 2 * 2 + packed * n_kv_heads * n_layers
+
+    def measured_bytes(self, cache: list[object]) -> int:
+        """Trimmed stored bytes (see :func:`stored_state_bytes`)."""
+        return stored_state_bytes(cache)
+
+    def provenance(self) -> dict[str, str]:
+        """Package / module versions, installed vs pinned commit, and the port's V seed.
+
+        No ``k_seed``: K stays fp16 and is never quantized. ``v_seed`` is ``seed + 1`` — the
+        port's inner ``TurboQuantKVCache`` seeds its V quantizer at ``seed + 1`` unconditionally,
+        the same offset :attr:`TurboQuantKVMethod.provenance` records.
+        """
+        try:
+            import turboquant_mlx
+        except ImportError as exc:
+            raise MethodUnavailableError(
+                f"turboquant_mlx is not installed. Install the pinned port: {TURBOQUANT_INSTALL_HINT}"
+            ) from exc
+
+        return {
+            "package": "turboquant-mlx",
+            "dist_version": _turboquant_dist_version(),
+            "module_version": str(getattr(turboquant_mlx, "__version__", "unknown")),
+            "commit": _installed_commit(),
+            "pinned_commit": TURBOQUANT_PINNED_COMMIT,
+            "v_seed": str(self.seed + 1),
+            "no_v_buffer": "false",
+        }
+
+    def report_warnings(self) -> list[str]:
+        """The numerics-path note, the duplicate-storage note, plus a pin-mismatch warning."""
+        notes = [
+            "turboquant-vonly: K stays fp16 and rides standard SDPA; only V is "
+            "quantized-and-dequantized on fetch, so drift measures the V quantizer round-trip "
+            "only, at the port's default seed.",
+            "turboquant-vonly: the pinned port stores an unused fp16 copy of V in its inner "
+            "KVCache, so stored bytes EXCEED a plain fp16 cache — the V-only value at this "
+            "commit is V-compression quality, not memory.",
+        ]
+        commit = _installed_commit()
+        if commit != TURBOQUANT_PINNED_COMMIT:
+            notes.append(
+                f"turboquant-vonly: installed commit {commit} is not the pinned "
+                f"{TURBOQUANT_PINNED_COMMIT}; numbers may not reproduce the committed sample."
             )
         return notes
 
@@ -776,6 +994,23 @@ def parse_method_spec(spec: str) -> KVCacheMethod:
         seed = nums[1] if len(nums) == 2 else TURBOQUANT_DEFAULT_SEED
         try:
             return TurboQuantKVMethod(bits=nums[0], seed=seed)
+        except ValueError as exc:
+            raise CompareConfigError(f"--configs entry {spec!r}: {exc}") from exc
+    if name == "turboquant-vonly":
+        if len(args) not in (1, 2):
+            raise CompareConfigError(
+                f"--configs entry {spec!r} must be 'turboquant-vonly:v_bits' or "
+                "'turboquant-vonly:v_bits:seed'."
+            )
+        nums = _positive_ints(
+            args,
+            spec=spec,
+            expected="'turboquant-vonly:v_bits[:seed]'",
+            example="turboquant-vonly:3",
+        )
+        seed = nums[1] if len(nums) == 2 else TURBOQUANT_DEFAULT_SEED
+        try:
+            return TurboQuantVOnlyKVMethod(v_bits=nums[0], seed=seed)
         except ValueError as exc:
             raise CompareConfigError(f"--configs entry {spec!r}: {exc}") from exc
     if name == "affine":
