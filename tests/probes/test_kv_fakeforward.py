@@ -1033,3 +1033,82 @@ def test_out_of_vocab_corpus_raises_before_scoring(monkeypatch):
             model_id="org/m",
             method=FakeKVMethod(),
         )
+
+
+# ---------------------------------------------------------------------------
+# Task 4 (0.7.0) — quantizer-only control lane in stress mode
+# ---------------------------------------------------------------------------
+
+
+def test_control_identical_to_reference_fires_exact_zero_guard(monkeypatch):
+    """Reds if a bypassed control lane reports 0 drift instead of raising."""
+    _patch_prompt_cache(monkeypatch)
+    with pytest.raises(ExactZeroError, match="control"):
+        score_kv_config(
+            FakeMethodModel(control_peak=0, control_gain=5.0),
+            _kv_corpus(1, 4),
+            model_id="m",
+            method=FakeKVMethod(stock_like=True),
+            control=True,
+        )
+
+
+def test_control_lane_measured_and_bundled_unchanged(monkeypatch):
+    """Reds if the control lane leaks into the bundled metrics or measures the wrong pair."""
+    _patch_prompt_cache(monkeypatch)
+    model = FakeMethodModel(control_peak=2)
+    report = score_kv_config(
+        model,
+        _kv_corpus(1, 4),
+        model_id="m",
+        method=FakeKVMethod(stock_like=True),
+        control=True,
+    )
+    baseline = score_kv_config(
+        model,
+        _kv_corpus(1, 4),
+        model_id="m",
+        method=FakeKVMethod(stock_like=True),
+        control=False,
+    )
+    assert report.kl == baseline.kl
+    assert report.flip_rate == baseline.flip_rate
+    # peak [5,0,0] vs [0,0,5]: KL = 5 * (p0 - p2) ≈ 4.90 nats (p = softmax([5,0,0]))
+    assert math.isclose(report.control_kl.mean, 4.90, abs_tol=0.02)
+    assert report.control_flip_rate == 1.0
+    assert report.drift_footing == "bundled"
+
+
+def test_converse_oracle_bundled_drifts_control_small_nonzero(monkeypatch):
+    """Reds if control metrics mirror the bundled lane instead of their own forward."""
+    _patch_prompt_cache(monkeypatch)
+    model = FakeMethodModel(control_peak=0, control_gain=4.0)  # same argmax, small KL
+    report = score_kv_config(
+        model,
+        _kv_corpus(1, 4),
+        model_id="m",
+        method=FakeKVMethod(stock_like=True),
+        control=True,
+    )
+    assert math.isclose(report.kl.mean, 4.90, abs_tol=0.02)
+    import numpy as np
+
+    p = np.exp([5.0, 0, 0])
+    p /= p.sum()
+    q = np.exp([4.0, 0, 0])
+    q /= q.sum()
+    expected = float((p * np.log(p / q)).sum())  # ≈ 0.00929
+    assert math.isclose(report.control_kl.mean, expected, rel_tol=1e-4)
+    assert report.control_flip_rate == 0.0  # argmax unchanged -> flips 0, KL > 0 -> no guard
+
+
+def test_control_rejected_for_methods_without_a_control():
+    """Reds if --control silently no-ops on an adapter method."""
+    with pytest.raises(CompareConfigError, match="already quantizer-only"):
+        score_kv_config(
+            FakeMethodModel(),
+            _kv_corpus(1, 4),
+            model_id="m",
+            method=FakeKVMethod(),
+            control=True,
+        )

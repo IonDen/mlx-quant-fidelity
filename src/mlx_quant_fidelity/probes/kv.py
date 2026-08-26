@@ -19,7 +19,7 @@ from mlx_quant_fidelity.errors import (
     CorpusError,
     QuantizeStartError,
 )
-from mlx_quant_fidelity.metrics import bucket_by_depth
+from mlx_quant_fidelity.metrics import bucket_by_depth, kl_divergence, summarize, top_token_flips
 from mlx_quant_fidelity.policy import verdict_for
 from mlx_quant_fidelity.probes._paired import _aggregate_chunks, _check_exact_zero, _reduce_pair
 from mlx_quant_fidelity.probes.kv_methods import StockKVMethod
@@ -150,6 +150,17 @@ def _score_chunk(
     return _reduce_pair(ref_logits, quant_logits, targets)
 
 
+def _score_chunk_control(
+    model: object,
+    ids: mx.array,
+    ref_logits: mx.array,
+    control_cache: list[object],
+) -> tuple[mx.array, mx.array]:
+    """Third forward against already-computed reference logits; KL + flips only."""
+    control_logits = model(ids[None, :-1], cache=control_cache)[0].astype(mx.float32)  # type: ignore[operator]
+    return kl_divergence(ref_logits, control_logits), top_token_flips(ref_logits, control_logits)
+
+
 def _resolve_method(
     method: KVCacheMethod | None, kv_bits: int, kv_group_size: int
 ) -> KVCacheMethod:
@@ -223,14 +234,29 @@ def score_kv_config(
     method: KVCacheMethod | None = None,
     quantize_start: int = 0,
     max_chunks: int | None = None,
+    control: bool = False,
 ) -> FidelityReport:
     """Score one KV config on an ALREADY-LOADED model (no load, no caps install).
 
     Shared by ``measure_kv_fidelity`` (load -> delegate) and the KV ``compare`` adapter
     (load once -> loop configs). Applies ``max_chunks`` to the provided corpus,
     so a caller-supplied corpus is capped identically to the weight probe.
+
+    ``control=True`` (stress mode only) runs a third, quantizer-only forward per chunk
+    (via ``method.control_method()``) so the report can separate quantizer error from
+    quantized-attention-kernel numerics; raises CompareConfigError if ``method`` has no
+    ``control_method``.
     """
     method = _resolve_method(method, kv_bits, kv_group_size)
+    control_m: KVCacheMethod | None = None
+    if control:
+        maker = getattr(method, "control_method", None)
+        if maker is None:
+            raise CompareConfigError(
+                f"--control only applies to the stock method; method {method.name!r} is "
+                "already quantizer-only (dequantize-on-fetch, standard SDPA)."
+            )
+        control_m = maker()
     probe_warnings: list[str] = []
     model_type = str(getattr(getattr(model, "args", None), "model_type", "unknown"))
     head_dim = _kv_head_dim(model)
@@ -271,6 +297,8 @@ def score_kv_config(
     flips: list[mx.array] = []
     ref_nlls: list[mx.array] = []
     quant_nlls: list[mx.array] = []
+    control_kls: list[mx.array] = []
+    control_flips: list[mx.array] = []
     n_scored = 0
     measured_bpt: int | None = None
     for ids in chunks:
@@ -280,7 +308,24 @@ def score_kv_config(
         with method.guard():
             if quantize_start == 0:
                 quant_cache: list[object] = method.make_cache(n_layers=n_layers)
-                kl, flip, ref_nll, quant_nll = _score_chunk(model, ids, ref_cache, quant_cache)
+                if control_m is None:
+                    kl, flip, ref_nll, quant_nll = _score_chunk(model, ids, ref_cache, quant_cache)
+                else:
+                    # Peak two vocab-wide tensors at once (spec §5): ref forward -> bundled
+                    # forward -> reduce+eval bundled -> release bundled logits -> control
+                    # forward -> reduce+eval control -> release ref logits.
+                    inp, targets = ids[None, :-1], ids[1:]
+                    ref_logits = model(inp, cache=ref_cache)[0].astype(mx.float32)  # type: ignore[operator]
+                    quant_logits = model(inp, cache=quant_cache)[0].astype(mx.float32)  # type: ignore[operator]
+                    kl, flip, ref_nll, quant_nll = _reduce_pair(ref_logits, quant_logits, targets)
+                    mx.eval(kl, flip, ref_nll, quant_nll)
+                    del quant_logits  # bundled logits out of scope before the third forward
+                    control_cache = control_m.make_cache(n_layers=n_layers)
+                    kl_c, flip_c = _score_chunk_control(model, ids, ref_logits, control_cache)
+                    mx.eval(kl_c, flip_c)
+                    control_kls.append(kl_c)
+                    control_flips.append(flip_c)
+                    del control_cache, ref_logits
             else:
                 quant_cache = make_prompt_cache(model)
                 kl, flip, ref_nll, quant_nll = _score_chunk_deployment(
@@ -314,6 +359,22 @@ def score_kv_config(
             "shorter than the keep-first-N boundary, or the quantized cache was bypassed)"
         ),
     )
+
+    control_summary = None
+    control_flip_rate = None
+    if control_m is not None:
+        kl_all = np.concatenate([np.asarray(k, dtype=np.float64) for k in control_kls])
+        flip_all = np.concatenate(
+            [np.asarray(f.astype(mx.float32), dtype=np.float64) for f in control_flips]
+        )
+        control_summary = summarize(kl_all)
+        control_flip_rate = float(flip_all.mean())
+        _check_exact_zero(
+            kl_mean=control_summary.mean,
+            flip_rate=control_flip_rate,
+            context="the control lane saw reference logits — its cache was bypassed "
+            "(control did not engage)",
+        )
 
     kl_by_depth = None
     if mode == "stress" and kls:
@@ -365,6 +426,9 @@ def score_kv_config(
         kv_method_params=dict(method.params),
         kv_method_provenance=method.provenance(),
         measured_kv_bytes_per_token=measured_bpt,
+        drift_footing="bundled" if method.name == "stock" else "quantizer_only",
+        control_kl=control_summary,
+        control_flip_rate=control_flip_rate,
     )
 
 

@@ -260,6 +260,10 @@ class StockKVMethod:
         """Stock carries no method note (its attention-path note is already in the docs)."""
         return []
 
+    def control_method(self) -> "AffineKVMethod":
+        """The quantizer-only control: same bits both sides, dequantize-on-fetch, standard SDPA."""
+        return AffineKVMethod(k_bits=self.bits, v_bits=self.bits, group_size=self.group_size)
+
 
 class _AffineCache:
     """Per-layer affine-quantized K/V storage that dequantizes on fetch.

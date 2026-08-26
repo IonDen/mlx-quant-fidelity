@@ -138,6 +138,15 @@ def test_stock_report_warnings_is_empty():
     assert StockKVMethod(bits=4, group_size=64).report_warnings() == []
 
 
+def test_stock_control_method_returns_affine_at_same_bits_both_sides():
+    """Reds if control_method returns the wrong class, the wrong bits, or a mismatched group_size."""
+    control = StockKVMethod(bits=4, group_size=32).control_method()
+    assert isinstance(control, AffineKVMethod)
+    assert control.k_bits == 4
+    assert control.v_bits == 4
+    assert control.group_size == 32
+
+
 # --- StockKVMethod: probe_capability (ported from the removed _cache_is_quantizable tests) ---
 
 
