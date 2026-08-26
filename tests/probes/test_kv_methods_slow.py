@@ -316,7 +316,8 @@ def test_affine_consumption_oracle_corruption_raises_kl(loaded, monkeypatch):
 # a dedicated ``loaded_with_vonly_port`` fixture rather than ``loaded_with_port``. This file's
 # module docstring already says "DO NOT run in CI or in a subagent" and "run with --run-slow on
 # the main thread" -- the implementing session did not execute --run-slow itself; the controller
-# runs this lane and the values below get recorded from that run.
+# ran this lane 2026-08-26 (M1 Max 32 GB, Llama-3.2-1B-Instruct-4bit, tiny corpus) -- 3/3 passed
+# in 2.15s, and the measured values are recorded in each test's docstring below.
 
 
 def _vonly_port_or_skip():
@@ -352,7 +353,9 @@ def loaded_with_vonly_port(loaded):
 def test_vonly_end_to_end_stress_is_quantizer_only(loaded_with_vonly_port):
     """turboquant-vonly:3 stress-mode drift stays in a plausible band, on the V quantizer alone.
 
-    Measured: pending controller run.
+    Measured 2026-08-26 (2 chunks, chunk_length=64): kl.mean=0.0242 -- notably below stock
+    4:64's 0.0845 on the same corpus, while stored bytes exceed fp16 (the port's
+    quality-not-memory trade).
     """
     model, tok = loaded_with_vonly_port
     corpus = _tiny_corpus(tok, chunk_length=64, n_chunks=2)
@@ -370,7 +373,7 @@ def test_vonly_consumption_oracle_corruption_raises_kl(loaded_with_vonly_port, m
 
     The clean run's kl.mean is computed in this same test (not a hardcoded prior recording), so
     the assertion is self-contained regardless of what any other test measured.
-    Measured: pending controller run.
+    Measured 2026-08-26: clean kl.mean=0.0242 -> corrupted 0.3293 (~13.6x, far past the 2x bar).
     """
     import turboquant_mlx.v_only_cache as vonly_mod
 
@@ -400,7 +403,8 @@ def test_vonly_measured_equals_analytic_at_offset_511(loaded_with_vonly_port):
     37376 is the hardcoded analytic value for TurboQuantVOnlyKVMethod(v_bits=4) on this model's
     geometry (16 layers x 8 heads x 64 head_dim) -- correct to hardcode here, same as the offline
     ``test_vonly_bytes_per_token_counts_the_duplicate_fp16_v`` fixture it must agree with.
-    Measured: pending controller run.
+    Measured 2026-08-26: measured_kv_bytes_per_token == 37376 verified against the real pinned
+    port.
     """
     model, tok = loaded_with_vonly_port
     corpus = _tiny_corpus(tok, chunk_length=512, n_chunks=1, repeats=200)
