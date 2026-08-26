@@ -98,7 +98,9 @@ The KV probe scores any cache implementation that satisfies its method protocol,
 | stock | two `mx.quantized_matmul` calls against the packed K/V, then a precise softmax | quantizer error plus the quantized-attention kernel's own numerics (see "What the numbers don't say" above) |
 | turboquant | dequantizes the cache on fetch and runs standard SDPA, the same kernel the reference run uses | quantizer error alone |
 
-Dequantizing on fetch has a memory cost the stored-bytes column doesn't show: TurboQuant keeps full-precision working copies of the cache resident alongside its packed store. Derived from the port's retained dequantization buffers on Llama-3.2-1B geometry, that puts its resident memory at roughly 2.3× an fp16 cache. The chunk-length memory ceiling was validated on the stock cache; a method that retains full-precision working buffers narrows that margin, and the report warns when a third-party method runs above the 512-token default.
+Dequantizing on fetch has a memory cost the stored-bytes column doesn't show. TurboQuant's working set is four step-256-padded buffers shaped `(n_layers, n_kv_heads, window, head_dim)`, not two: the prefill forward's transient full `all_k` and `all_v` dequantizations (freed once that forward returns) plus the two working copies (`_k_deq_buf`, `_v_deq_buf`) the port keeps resident after every `update_and_fetch`. Derived from those four buffers on Llama-3.2-1B geometry, that puts TurboQuant's resident memory at roughly 2.3× an fp16 cache. `turboquant-vonly` carries only the V-side half of that working set — K stays a plain fp16 cache riding standard SDPA untouched, so only V's prefill transient and its single retained `_v_deq_buf` count. `affine` carries none of it: its per-fetch dequantization covers the exact window rather than a step-256-padded buffer, and the transient is freed immediately after each fetch, so its working set scales with chunk length alone.
+
+The chunk-length memory ceiling was originally validated on the stock cache alone. A method name outside `RECEIPTED_METHODS` in `probes/kv.py` still narrows that margin, and the report warns when it runs above the 512-token default; the next section records which method names now carry a measured long-window receipt of their own.
 
 Deployment mode for a third-party cache can't reuse mlx-lm's in-place `to_quantized` conversion, since that method doesn't exist on a third-party cache. Instead, each layer's full-precision state is sliced to `offset` (the stored tokens, never the step-padded buffer mlx-lm allocates ahead of use), replayed through a fresh quantized cache with a single `update_and_fetch`, and then trimmed with `trim(0)` to drop the dequantized working buffers the port retains after that call.
 
@@ -121,6 +123,17 @@ Depth buckets get more informative as the window grows, so `kv` and `compare kv`
 
 The two confirmed rows are the `peak_memory_bytes` recorded in `_artifacts/samples/llama-3.2-1b-4bit-kv4.json` and `llama-3.2-1b-4bit-kv4-cl4096.json`. The 1024 and 2048 rows were measured by the reproducer above but its output directory is not committed, so they cannot be checked against the repository.
 
+That table covered the stock cache only. The same spike script takes a `--method` flag (`stock`, `turboquant`, `turboquant-vonly`, `affine`, `stock-control` — stock run with the quantizer-only control forward), and each lane writes its own resumable artifacts under `_artifacts/spike_long_window/<lane>/`, keeping the `stock` lane's flat legacy path so the baseline record above stays valid. None of the following numbers is a committed sample; all four lanes are reproducer-only runs, on the same model, revision, and hardware as the table above (2026-08-26):
+
+| lane (config) | 512 | 1024 | 2048 | 4096 |
+|---|---|---|---|---|
+| turboquant (`turboquant:4`) | 2.27 GiB | 3.90 GiB | 7.15 GiB | 13.65 GiB |
+| turboquant-vonly (`turboquant-vonly:4`) | 2.40 GiB | 3.91 GiB | 7.17 GiB | 13.70 GiB |
+| affine (`affine:8:4`) | 2.27 GiB | 3.87 GiB | 7.09 GiB | 13.54 GiB |
+| stock + `--control` (`4:64`) | 2.38 GiB | 3.86 GiB | 7.09 GiB | 13.53 GiB |
+
+Every cell above finished at `rc=0` — no watchdog abort, no wall-clock timeout, and no pre-flight gate refusal, at any length on any lane. Each lane's 4096 peak also lands under the gate's own per-lane estimate: turboquant's gate estimate at 4096, for example, is about 13.67 GiB of paired logits plus roughly 0.25 GiB of method working set, against a measured 13.65 GiB. `MAX_CHUNK_LENGTH = 4096` therefore re-validates, at this vocabulary, for every method name in `RECEIPTED_METHODS` — `stock`, `turboquant`, `turboquant-vonly`, and `affine` — and for `stock` run with `--control`. The same caveat as the table above still applies: these peaks scale with vocabulary, so a larger-vocabulary model needs its own measurement before the ceiling can be trusted at 4096.
+
 4096 is a hard ceiling — `chunk_length` above it raises before a model loads. Below the ceiling, the CLI adds a warning once the estimated logits footprint for the chosen window passes 4 GiB, using a slope calibrated against the measurements above.
 
 Those measurements come from a model with a vocabulary of about 128,000 tokens, and because the footprint scales with vocabulary as well as window length, a model with twice that vocabulary needs roughly twice the memory at the same window. The 4096 ceiling on its own is therefore not a sufficient guard. Before scoring a window, the probe also compares its estimated logits footprint against the memory cap it installs on the current device, and refuses any window that would claim more than a conservative fraction of that cap instead of warning once the memory is already committed. On a large-vocabulary model that refusal can land on a window the table above shows as comfortable; lower `--chunk-length` until it fits. The fraction is deliberately cautious, because the estimate covers the paired logits alone while a real run also holds the model weights and the cache beside them.
@@ -138,7 +151,7 @@ Neither external result is directly comparable to the table above. Both study ge
 - `probes/_paired.py`: `_check_exact_zero` — `ExactZeroError` on exact-zero KLD and flip.
 - `metrics/depth.py`: `bucket_by_depth` — equal-width depth buckets pooled across scored chunks.
 - `probes/kv_methods.py`: `StockKVMethod`, `TurboQuantKVMethod` — the cache-method protocol, provenance, and prefix-replay logic behind "Measuring a third-party cache."
-- `scripts/spike_long_window_memory.py` — the chunk-length memory measurement above.
+- `scripts/spike_long_window_memory.py` — the chunk-length memory measurement above, run per `--method` lane.
 - llama.cpp `llama-perplexity --kl-divergence-base` — the KLD direction convention this tool follows.
 - *Accuracy Is Not All You Need* — arXiv:2407.09141.
 - KV-quantization drift at longer context — arXiv:2607.05399.
