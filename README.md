@@ -183,7 +183,7 @@ configurations memory-normalized. Install the pinned port first — the PyPI pac
 
 ```bash
 pip install "turboquant-mlx @ git+https://github.com/arozanov/turboquant-mlx@6e928d715595dee9f6b6cc3968baa44e1f408d28"
-mlx-quant-fidelity compare kv mlx-community/Llama-3.2-1B-Instruct-4bit --configs 8:64,4:64,turboquant:4,turboquant:3
+mlx-quant-fidelity compare kv mlx-community/Llama-3.2-1B-Instruct-4bit --configs 8:64,4:64,turboquant:4,turboquant:3,turboquant-vonly:4,turboquant-vonly:3,affine:8:4,affine:8:2
 ```
 
 With uv, `uv sync --group turboquant` installs the same pin.
