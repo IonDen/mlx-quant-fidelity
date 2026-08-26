@@ -1430,3 +1430,42 @@ def test_kv_run_identity_carries_ranked_footing(monkeypatch, tmp_path):
     cmp.compare_kv_fidelity("m", [(4, 64), (8, 64)], artifacts_dir=tmp_path)
     ident = json.loads((tmp_path / "4_64.json").read_text())["run_identity"]
     assert ident["ranked_footing"] == "quantizer_only"
+
+
+def test_compare_kv_isolates_partial_with_invalid_ranked_verdict(monkeypatch, tmp_path):
+    """A partial carrying a garbage `ranked_verdict` (not in VALID_VERDICTS) is isolated as a
+    'failed' CorruptPartial row, not left to crash the whole compare run.
+
+    Reds if a garbage ranked_verdict crashes the whole compare instead of isolating the row:
+    with no validation, this row keeps its RankPoint and enters `assemble_comparison_report`'s
+    qualifying-set computation under `--min-tier`, which calls `tier_rank("excellent")` and
+    raises an uncaught ValueError — the entire run aborts instead of the other config still
+    ranking normally.
+    """
+    rep = _fid((4, 64), 0.09)
+    env = json.loads(_kv_partial_with_identity(rep, 1000, bits=4, group_size=64))
+    env["ranked_kl"] = 0.09
+    env["ranked_verdict"] = "excellent"  # not in VALID_VERDICTS
+    env["ranked_footing"] = "quantizer_only"
+    (tmp_path / "4_64.json").write_text(json.dumps(env))
+
+    reports = {(8, 64): _fid((8, 64), 0.01)}
+    calls = _patch_kv_compare(monkeypatch, reports)
+
+    # Must NOT raise, even with a --min-tier budget that forces tier_rank(ranked_verdict).
+    report = cmp.compare_kv_fidelity(
+        "m", [(4, 64), (8, 64)], min_tier="good", artifacts_dir=tmp_path
+    )
+
+    assert (4, 64) not in calls, "the corrupt partial resumes (identity matches); not re-scored"
+
+    bad = next(r for r in report.results if r.label == "4:64")
+    assert bad.status == "failed"
+    assert bad.error_type == "CorruptPartial"
+    assert "excellent" in (bad.message or "")
+    assert bad.point is None
+    assert "4:64" not in report.frontier
+
+    good = next(r for r in report.results if r.label == "8:64")
+    assert good.status == "ok"
+    assert "8:64" in report.frontier

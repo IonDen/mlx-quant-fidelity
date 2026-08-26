@@ -630,6 +630,20 @@ def _kv_envelope_to_result(label: str, env: dict[str, object]) -> ComparisonTarg
     ranked_kl = float(ranked_kl_raw) if isinstance(ranked_kl_raw, (int, float)) else None
     ranked_verdict_raw = env.get("ranked_verdict")
     ranked_verdict = ranked_verdict_raw if isinstance(ranked_verdict_raw, str) else None
+    # Validated exactly like `report.verdict` above: a garbage ranked_verdict must isolate
+    # this row, not flow into assemble_comparison_report's qualifies()/tier_rank() and crash
+    # the whole run under --min-tier. No silent fallback to the native verdict either — that
+    # would mask the corruption instead of surfacing it.
+    if ranked_verdict is not None and ranked_verdict not in VALID_VERDICTS:
+        return ComparisonTargetResult(
+            label,
+            "failed",
+            None,
+            None,
+            None,
+            "CorruptPartial",
+            f"partial for {label!r} has an invalid ranked_verdict {ranked_verdict!r}",
+        )
     ranked_footing_raw = env.get("ranked_footing")
     ranked_footing = ranked_footing_raw if isinstance(ranked_footing_raw, str) else None
     quality = ranked_kl if ranked_kl is not None else report.kl.mean
