@@ -563,8 +563,9 @@ def test_vonly_bytes_per_token_counts_the_duplicate_fp16_v():
     )
 
 
-def test_vonly_provenance_seed_plus_one():
+def test_vonly_provenance_seed_plus_one(monkeypatch):
     """Reds if provenance records the constructor seed instead of the port's seed+1."""
+    install_fake_port(monkeypatch)
     prov = TurboQuantVOnlyKVMethod(v_bits=3, seed=41).provenance()
     assert prov["v_seed"] == "42"
     assert "k_seed" not in prov
