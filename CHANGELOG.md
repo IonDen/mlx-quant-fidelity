@@ -3,6 +3,33 @@
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] - 2026-08-27
+
+`compare kv` now ranks every method on the same footing — quantizer error alone — instead of whichever number a method happened to report natively. Two more KV methods join the comparison.
+
+### Added
+
+- `--kv-method affine:k_bits:v_bits[:group_size]`: an independent per-side K/V bit width, measured quantizer-only. No shipped cache runs this layout; the only known implementation is an idle mlx-lm fork.
+- `--kv-method turboquant-vonly:v_bits[:seed]`: TurboQuant-MLX's V-only cache. K stays fp16; only V quantizes.
+- `kv --control` (stock only): runs a third, quantizer-only forward — dequantize on fetch, standard SDPA, the method's own bits and group size — alongside the deployed path, so a stock report carries both numbers.
+- `--model-revision` on `kv` and `compare kv`, pinning the HuggingFace revision the way `weights`/`compare weights` already did; part of `compare kv`'s resume identity.
+- Four `FidelityReport` fields: `drift_footing`, `control_kl`, `control_flip_rate`, `working_set_bytes_per_token`. `compare kv`'s Markdown table gains a `bundled KL` column (stock's native deployed-path number, shown only where the control lane ran) and a `resident +/token` column (a method's fetch-path working-set overhead beyond its stored bytes).
+- `AffineKVMethod` and `TurboQuantVOnlyKVMethod`, exported from the package root alongside `StockKVMethod` and `TurboQuantKVMethod`.
+- Per-lane long-window memory receipts for `turboquant`, `turboquant-vonly`, `affine`, and stock run with `--control`, re-validating `MAX_CHUNK_LENGTH = 4096` for each at this vocabulary (`docs/measurement-principles.md`).
+
+### Changed
+
+- **`compare kv` ranks on quantizer-only drift for every target.** 0.6.0 ranked stock's bundled number against TurboQuant's already-quantizer-only one — different quantities compared on one Pareto axis. `compare kv` now runs stock's control lane automatically and ranks on it; the table still shows stock's bundled number in the `bundled KL` column rather than hiding it. On the committed Llama-3.2-1B sample, re-footing moved stock `4:64`'s ranked number by about half a percent (0.1477 bundled to 0.1485 quantizer-only) and left the ranking outcome unchanged — `4:64` is still dominated by `turboquant:4`. That gap is not a kernel-purity score: `docs/measurement-principles.md` explains why.
+- The KV comparison partial schema is bumped to 4 (the ranking footing is now part of a partial's identity); partials from 0.6.x recompute. The weight comparison partial schema is bumped to 2 (the identity is now revision-aware); partials from 0.5.x recompute once.
+- `badge_for_report`'s KV bit-width label now goes through `method_bits_text` instead of interpolating `kv_bits` directly, fixing a `None`-bit badge title for an adapter method (`k8v4-bit` for `affine`, `v3-bit` for `turboquant-vonly`).
+- A new committed sample (`_artifacts/samples/compare/kv-llama-3.2-1b-methods.{json,md}`) replaces 0.6.0's: regenerated on the quantizer-only footing, with `affine:8:4`, `affine:8:2`, `turboquant-vonly:3`, and `turboquant-vonly:4` added to the ranked set.
+- The chunk-length pre-flight gate now factors a running `--control` lane's own working-set bytes into its estimate, and raises the more specific `LogitsBudgetError` (a `CorpusError` subclass) rather than a generic one.
+
+### Notes
+
+- The pinned TurboQuant-MLX port's V-only cache stores an unused fp16 copy of V in its inner cache alongside K, so its stored bytes exceed a plain fp16 cache's even though V itself compresses — the method's value at this commit is V-compression quality, not memory (`docs/ranking-principles.md` covers the stored-vs-resident distinction this surfaces).
+- The gap between a stock report's bundled and quantizer-only numbers is not a kernel-purity score: both are read off the model's final logits after many layers of compounding, not one attributable difference (`docs/measurement-principles.md`).
+
 ## [0.6.0] - 2026-08-24
 
 The KV probe measures any per-layer cache implementation, and the first third-party cache — TurboQuant-MLX — is ranked against mlx-lm's stock cache on one memory-normalized yardstick.

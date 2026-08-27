@@ -20,6 +20,14 @@ The KLD is fp32, full-vocabulary (not truncated to top-k), computed over fixed-l
 
 The tool also reports KL p99 and KL max for every target, so you can see whether a quantization has occasional bad positions even when its mean looks fine. Ranking and domination are decided on mean KLD only, so a target with a favorable mean and an ugly tail will not be penalized in its Pareto placement. If the tail matters for your use case, read the p99 column directly.
 
+## Ranking footing: quantizer-only, every method, always
+
+The mean KLD that decides the quality axis is always the quantizer-only number, not whatever a method reports natively. `turboquant`, `turboquant-vonly`, and `affine` dequantize their cache on fetch and run standard SDPA, so their own reported number is already the quantizer's cost alone — there's nothing bundled to separate. Stock is different: its deployed path bundles quantizer error with the numerics of mlx-lm's two-`mx.quantized_matmul` attention. `compare kv` runs stock's quantizer-only control lane alongside its bundled path (`kv --control`, see [docs/measurement-principles.md](measurement-principles.md#decomposing-bundled-and-quantizer-only-drift)) and ranks stock on the control number, not the bundled one.
+
+Stock's bundled number still appears, in the comparison table's `bundled KL` column, so the deployed-path cost isn't hidden from the report — it's just not what the frontier or a `--max-kld`/`--min-tier` pick is computed from. Every ranked row also records the footing it ranked on (`quantizer_only`, always, for a `compare kv` row), so a number from one report is never silently read against a differently-footed number from another.
+
+This is a change from the 0.6.0 ranking, which used whichever number a method happened to report natively — stock's bundled number stood next to TurboQuant's already-quantizer-only one on the same Pareto axis. Those are different quantities (quantizer error alone vs. quantizer error plus the attention-kernel path), so putting them on one axis compared unlike things. On the committed Llama-3.2-1B sample, re-footing stock moved its number by about half a percent (0.1477 bundled to 0.1485 quantizer-only) and left the ranking outcome unchanged: stock `4:64` is still dominated by `turboquant:4`. That gap is not itself a signal about the quantized-attention kernel's purity — see the measurement-principles link above for why.
+
 ## The cost axis
 
 For weight quantization, cost is total on-disk model bytes as reported by the model repository.
@@ -35,6 +43,14 @@ The `4/group_size` term is the per-group overhead: a fp16 scale (2 bytes) and a 
 The formula is exact for the supported path. Each KV-cache method supplies its own formula for the bytes it stores per token; every report also records the bytes actually stored in the cache after the first scored window, and the two are tested to agree for every method this package ships. Group overhead matters for ranking: a smaller group size improves accuracy but increases bytes per token, so two configurations at the same bit width can land at different positions on the cost axis. Ignoring group size would misrank them.
 
 Memory normalization is what makes the comparison meaningful. Without it, comparing q4 and q8 on quality alone is tautological — q8 wins by definition because the cost difference is not part of the comparison. The question is whether q8's quality gain is worth the extra bytes.
+
+## Stored bytes vs resident memory
+
+The cost axis is stored bytes per token: what a method actually keeps in the cache after a token is written, measured from the cache's own trimmed state and cross-checked against each method's analytic formula. It is not the memory the method's fetch path needs while it runs.
+
+Some methods need more than they store. `turboquant` and `turboquant-vonly` dequantize on fetch, so their working set includes step-256-padded working buffers on top of the stored bytes (quantified in [docs/measurement-principles.md](measurement-principles.md)). `turboquant-vonly` is the sharpest case of stored bytes and actual footprint pulling apart: the pinned port's V-only cache reuses a plain `KVCache` for K storage, and that class stores whatever tensors it's handed — both K and V. The cache ends up holding an unused fp16 copy of V that nothing ever reads back, on top of the compressed copy it actually serves. At `v4` that puts stored bytes per token at 37.4 KB on Llama-3.2-1B geometry, above a plain fp16 cache's 32.8 KB, even though V itself compressed to a fraction of its fp16 size.
+
+Ranking still uses stored bytes, not working-set bytes, as the cost axis: it's stable across implementations, comparable to a plain fp16 or stock quantized cache's own stored footprint, and it's what a real deployment keeps once dequantization buffers are freed after each forward. The comparison table's `resident +/token` column reports each method's working-set overhead alongside the ranked cost, so peak-memory-during-a-run is visible without distorting where a method lands on the frontier. `turboquant-vonly`'s duplicate V is why the two need separate columns: ranking on working-set bytes would report the port's unused fp16 copy as a memory cost paid for compression it never bought.
 
 ## Pareto efficiency
 

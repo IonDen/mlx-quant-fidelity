@@ -46,7 +46,9 @@ That model at 8-bit KV clears the good tier on this corpus. Apple Silicon, Pytho
 
 ### Common options
 
-- `--kv-bits` / `--kv-group-size` — the KV configuration to score, default `4` / `64`. The `4:32,4:64` shorthand in `compare kv --configs` is `bits:group_size`. `--kv-method turboquant` swaps `kv` to the TurboQuant-MLX cache instead, and `compare kv --configs` mixes it in with entries like `turboquant:4`. `--kv-seed` sets the TurboQuant rotation seed (default 42, must be ≥ 1).
+- `--kv-bits` / `--kv-group-size` — the KV configuration to score, default `4` / `64`. The `4:32,4:64` shorthand in `compare kv --configs` is `bits:group_size`.
+- `--kv-method` — `stock` (default) reads `--kv-bits`/`--kv-group-size` directly. `turboquant`, `turboquant-vonly`, and `affine` also take a colon-delimited spec string in place of a bare name: `turboquant:bits[:seed]`, `turboquant-vonly:v_bits[:seed]` (K stays fp16; only V quantizes), and `affine:k_bits:v_bits[:group_size]` (an independent per-side K/V bit width no shipped cache runs — see [docs/measurement-principles.md](docs/measurement-principles.md#measuring-a-third-party-cache)). `compare kv --configs` mixes any of these into one list, e.g. `8:64,turboquant:4,affine:8:4`. `--kv-seed` sets the TurboQuant rotation seed (default 42, must be ≥ 1) for the flag-based `--kv-method turboquant` form.
+- `--control` — stock only. Runs a third, quantizer-only forward (dequantize on fetch, standard SDPA, the same bits and group size) alongside the deployed path, so a stock report carries both numbers. `compare kv` always ranks every method on the quantizer-only number and runs this control lane for stock automatically — see [docs/ranking-principles.md](docs/ranking-principles.md#ranking-footing-quantizer-only-every-method-always).
 - `--max-chunks N` — score only the first N corpus chunks. Every number in this README uses `--max-chunks 100`; leave it off and the run covers the whole WikiText-2 test split.
 - `--chunk-length N` — the scoring window, default 512, hard ceiling 4096.
 - `--quantize-start N` — `0` for stress mode, the default; any N above 0 for deployment mode.
@@ -203,15 +205,24 @@ With uv, `uv sync --group turboquant` installs the same pin.
 | `turboquant-vonly:4` | 37.4 KB | 0.0078 | 0.0520 | 0.0508 | — | 32.8 KB | bad | ✗ dominated by `8:64` |
 ```
 
-Read this table with two caveats. In a teacher-forced pass the TurboQuant cache dequantizes on
-fetch and runs standard attention, so its number is the quantizer alone, while the stock number
-also includes mlx-lm's quantized attention path. And the cost column is stored bytes: in this path
-the TurboQuant cache also keeps full-precision working copies, roughly 2.3× the size of an fp16
-cache (derived from its retained dequantization buffers), so peak memory does not show the
-compression that a fused decode deployment would. The
-uniform-bit cache and its V-only variant (`turboquant-vonly`) are measured at the port's default
-seed; its asymmetric and layer-adaptive configurations are not. Sample captured on Apple M1 Max,
-32 GB, revision `08231374…`, 100 chunks of 512 tokens, stress mode.
+Read this table with two things in mind. The `KL mean` column is quantizer-only for every row:
+`turboquant`, `turboquant-vonly`, and `affine` dequantize on fetch and ride standard SDPA by
+construction, and `4:64`/`8:64` ran a `--control` forward alongside their deployed path so stock
+ranks on the same footing. Stock's own deployed-path number — mlx-lm's two-quantized-matmul
+attention — is the `bundled KL` column instead; on this sample it barely differs from the
+quantizer-only column (0.1477 vs 0.1485 for `4:64`), which says the quantized-attention kernel's
+own contribution is small at this configuration and scale, not that it is zero in general (see
+[docs/measurement-principles.md](docs/measurement-principles.md#decomposing-bundled-and-quantizer-only-drift)).
+And the `cost` column is stored bytes, not the memory a method's fetch path needs while it runs:
+`turboquant` and its V-only variant keep full-precision dequantization buffers beyond what they
+store, shown in `resident +/token` — `turboquant-vonly`'s pinned port even stores an unused fp16
+copy of V, so its stored bytes exceed a plain fp16 cache's even though V itself compresses (see
+[docs/ranking-principles.md](docs/ranking-principles.md#stored-bytes-vs-resident-memory)). The
+uniform-bit cache and its V-only variant are measured at the port's default seed; its asymmetric
+and layer-adaptive configurations are not, and its `make_adaptive_cache` silently ignores the
+documented `k_bits`/`v_bits` parameters at the pinned commit. `affine:k:v` measures an independent
+per-side bit width that no shipped cache runs. Sample captured on Apple M1 Max, 32 GB, revision
+`08231374…`, 100 chunks of 512 tokens, stress mode.
 
 ## How it works
 
@@ -235,7 +246,7 @@ See [docs/measurement-principles.md](docs/measurement-principles.md) for the zer
 
 - A fidelity number is **corpus- and context-length-specific**. WikiText-2 at temperature 0 measures short-prose distributional drift; the paper this builds on, *Accuracy Is Not All You Need*, shows that under-predicts task-specific and long-context degradation. Every report records the corpus and the token count so the number is never read as a bare score.
 - Perplexity delta is reported for continuity with llama.cpp. It is related to but distinct from mean KLD — it scores the realized next token and can diverge from full-vocabulary drift — so it is not independent corroboration.
-- The measured drift bundles the quantizer's error with the quantized-attention kernel's numerics. That is the real end-to-end cost; a quantizer-only control is on the roadmap.
+- The KV probe's deployed-path drift bundles the quantizer's error with the quantized-attention kernel's numerics. That is the real end-to-end cost. `kv --control` (stock only) measures the quantizer alone alongside it, and `compare kv` always ranks on that quantizer-only number — see [docs/measurement-principles.md](docs/measurement-principles.md#decomposing-bundled-and-quantizer-only-drift).
 
 ## Python API
 
@@ -269,7 +280,7 @@ print(report.kl.mean, report.flip_rate, report.verdict)
 
 ## Status
 
-0.6.0, released on PyPI as `mlx-quant-fidelity`. The KV probe now measures any per-layer cache implementation: `--kv-method turboquant` adds the TurboQuant-MLX uniform-bit cache alongside mlx-lm's stock cache, and `compare kv` ranks both on the same memory-normalized yardstick. Threshold validation and more cache methods are on the [roadmap](ROADMAP.md).
+0.7.0, released on PyPI as `mlx-quant-fidelity`. `compare kv` now ranks every method — stock, TurboQuant-MLX, its V-only variant, and an independent-per-side-bits `affine` method — on the same quantizer-only footing, with stock's own deployed-path number shown alongside. Threshold validation and wider attention coverage are on the [roadmap](ROADMAP.md).
 
 ## License
 
