@@ -1132,7 +1132,7 @@ def test_compare_kv_accepts_mixed_tuple_and_method_list(monkeypatch, tmp_path):
     assert (tmp_path / "turboquant_4.json").exists()
 
 
-def test_compare_kv_partial_identity_carries_method_and_schema_3(monkeypatch, tmp_path):
+def test_compare_kv_partial_identity_carries_method_and_schema_4(monkeypatch, tmp_path):
     reports = {(4, 64): _fid((4, 64), 0.09), (8, 64): _fid((8, 64), 0.01)}
     _patch_kv_compare(monkeypatch, reports)
     cmp.compare_kv_fidelity("m", [(4, 64), (8, 64)], artifacts_dir=tmp_path)

@@ -23,7 +23,7 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - The KV comparison partial schema is bumped to 4 (the ranking footing is now part of a partial's identity); partials from 0.6.x recompute. The weight comparison partial schema is bumped to 2 (the identity is now revision-aware); partials from 0.5.x recompute once.
 - `badge_for_report`'s KV bit-width label now goes through `method_bits_text` instead of interpolating `kv_bits` directly, fixing a `None`-bit badge title for an adapter method (`k8v4-bit` for `affine`, `v3-bit` for `turboquant-vonly`).
 - A new committed sample (`_artifacts/samples/compare/kv-llama-3.2-1b-methods.{json,md}`) replaces 0.6.0's: regenerated on the quantizer-only footing, with `affine:8:4`, `affine:8:2`, `turboquant-vonly:3`, and `turboquant-vonly:4` added to the ranked set.
-- The chunk-length pre-flight gate now factors a running `--control` lane's own working-set bytes into its estimate, and raises the more specific `LogitsBudgetError` (a `CorpusError` subclass) rather than a generic one.
+- The chunk-length pre-flight gate now factors both the scored method's own working-set bytes and a running `--control` lane's working-set bytes into its estimate, and raises the more specific `LogitsBudgetError` (a `CorpusError` subclass) rather than a generic one.
 
 ### Notes
 

@@ -68,8 +68,9 @@ def _resolve_kv_method(args: argparse.Namespace) -> KVCacheMethod:
     group_size 64; turboquant: bits 4, seed ``TURBOQUANT_DEFAULT_SEED``). ``affine`` has
     no flag-based form (it needs both k_bits and v_bits) and always errors, pointing at
     the spec grammar. ``turboquant-vonly`` reuses ``--kv-bits`` as its ``v_bits`` and
-    requires it explicitly (there is no sensible default to guess). An unrecognized name
-    raises, listing the known ``METHODS``.
+    requires it explicitly (there is no sensible default to guess); it has no group_size
+    parameter, so a simultaneous ``--kv-group-size`` errors the same way it does for
+    ``turboquant``. An unrecognized name raises, listing the known ``METHODS``.
     """
     value = args.kv_method
     if ":" in value:
@@ -96,6 +97,8 @@ def _resolve_kv_method(args: argparse.Namespace) -> KVCacheMethod:
             "use a spec string, e.g. --kv-method affine:8:4"
         )
     if value == "turboquant-vonly":
+        if args.kv_group_size is not None:
+            raise ValueError("--kv-group-size is only valid with --kv-method stock")
         if args.kv_bits is None:
             raise ValueError("--kv-method turboquant-vonly requires --kv-bits (used as v_bits)")
         seed = TURBOQUANT_DEFAULT_SEED if args.kv_seed is None else args.kv_seed
@@ -164,8 +167,9 @@ def main(argv: list[str] | None = None) -> int:
     ck.add_argument(
         "--configs",
         default=None,
-        help="e.g. '4:32,4:64,8:64,turboquant:4' (methods: bits:group_size = stock; "
-        "turboquant:bits[:seed], seed >= 1)",
+        help="e.g. '4:32,4:64,8:64,turboquant:4,turboquant-vonly:3,affine:8:4' (methods: "
+        "bits:group_size = stock; turboquant:bits[:seed], seed >= 1; "
+        "turboquant-vonly:v_bits[:seed]; affine:k_bits:v_bits[:group_size])",
     )
     ck.add_argument(
         "--sweep",

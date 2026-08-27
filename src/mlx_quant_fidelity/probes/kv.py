@@ -282,10 +282,12 @@ def score_kv_config(
     (load once -> loop configs). Applies ``max_chunks`` to the provided corpus,
     so a caller-supplied corpus is capped identically to the weight probe.
 
-    ``control=True`` (stress mode only) runs a third, quantizer-only forward per chunk
-    (via ``method.control_method()``) so the report can separate quantizer error from
+    ``control=True`` runs a third, quantizer-only forward per chunk (via
+    ``method.control_method()``) so the report can separate quantizer error from
     quantized-attention-kernel numerics; raises CompareConfigError if ``method`` has no
-    ``control_method``.
+    ``control_method``. In stress mode (``quantize_start=0``) the control forward covers
+    the whole chunk; with ``quantize_start > 0`` the control cache converts from the same
+    full-precision prefix as the bundled path and scores only the post-boundary region.
     """
     method = _resolve_method(method, kv_bits, kv_group_size)
     control_m: KVCacheMethod | None = None
@@ -580,9 +582,11 @@ def measure_kv_fidelity(
             recommendation. ``MAX_CHUNK_LENGTH`` alone is vocabulary-blind, so a second,
             vocabulary-aware pre-flight also refuses any window whose paired fp32 logits
             would exceed a fraction of the installed wired cap.
-        control: stress mode only. Run a third, quantizer-only forward per chunk so the
-            report can separate quantizer error from quantized-attention-kernel numerics.
-            See :func:`~mlx_quant_fidelity.probes.kv.score_kv_config`'s ``control`` docs.
+        control: Run a third, quantizer-only forward per chunk so the report can separate
+            quantizer error from quantized-attention-kernel numerics. With
+            ``quantize_start > 0`` the control lane converts from the same full-precision
+            prefix and scores only the post-boundary region. See
+            :func:`~mlx_quant_fidelity.probes.kv.score_kv_config`'s ``control`` docs.
 
     Returns:
         A :class:`~mlx_quant_fidelity.report.FidelityReport` with all metrics and provenance.

@@ -47,7 +47,7 @@ That model at 8-bit KV clears the good tier on this corpus. Apple Silicon, Pytho
 ### Common options
 
 - `--kv-bits` / `--kv-group-size` — the KV configuration to score, default `4` / `64`. The `4:32,4:64` shorthand in `compare kv --configs` is `bits:group_size`.
-- `--kv-method` — `stock` (default) reads `--kv-bits`/`--kv-group-size` directly. `turboquant`, `turboquant-vonly`, and `affine` also take a colon-delimited spec string in place of a bare name: `turboquant:bits[:seed]`, `turboquant-vonly:v_bits[:seed]` (K stays fp16; only V quantizes), and `affine:k_bits:v_bits[:group_size]` (an independent per-side K/V bit width no shipped cache runs — see [docs/measurement-principles.md](docs/measurement-principles.md#measuring-a-third-party-cache)). `compare kv --configs` mixes any of these into one list, e.g. `8:64,turboquant:4,affine:8:4`. `--kv-seed` sets the TurboQuant rotation seed (default 42, must be ≥ 1) for the flag-based `--kv-method turboquant` form.
+- `--kv-method` — `stock` (default) reads `--kv-bits`/`--kv-group-size` directly. `turboquant`, `turboquant-vonly`, and `affine` also take a colon-delimited spec string in place of a bare name: `turboquant:bits[:seed]`, `turboquant-vonly:v_bits[:seed]` (K stays fp16; only V quantizes), and `affine:k_bits:v_bits[:group_size]` (an independent per-side K/V bit width no shipped cache runs — see [docs/measurement-principles.md](docs/measurement-principles.md#measuring-a-third-party-cache)). `compare kv --configs` mixes any of these into one list, e.g. `8:64,turboquant:4,affine:8:4`. `--kv-seed` sets the TurboQuant rotation seed (default 42, must be ≥ 1) for the flag-based `--kv-method turboquant` and `--kv-method turboquant-vonly` forms.
 - `--control` — stock only. Runs a third, quantizer-only forward (dequantize on fetch, standard SDPA, the same bits and group size) alongside the deployed path, so a stock report carries both numbers. `compare kv` always ranks every method on the quantizer-only number and runs this control lane for stock automatically — see [docs/ranking-principles.md](docs/ranking-principles.md#ranking-footing-quantizer-only-every-method-always).
 - `--max-chunks N` — score only the first N corpus chunks. Every number in this README uses `--max-chunks 100`; leave it off and the run covers the whole WikiText-2 test split.
 - `--chunk-length N` — the scoring window, default 512, hard ceiling 4096.
@@ -210,8 +210,9 @@ Read this table with two things in mind. The `KL mean` column is quantizer-only 
 construction, and `4:64`/`8:64` ran a `--control` forward alongside their deployed path so stock
 ranks on the same footing. Stock's own deployed-path number — mlx-lm's two-quantized-matmul
 attention — is the `bundled KL` column instead; on this sample it barely differs from the
-quantizer-only column (0.1477 vs 0.1485 for `4:64`), which says the quantized-attention kernel's
-own contribution is small at this configuration and scale, not that it is zero in general (see
+quantizer-only column (0.1477 vs 0.1485 for `4:64`) — the two numbers land within about half a
+percent of each other at this configuration and scale, not evidence that the kernel's own
+contribution is small or zero in general (see
 [docs/measurement-principles.md](docs/measurement-principles.md#decomposing-bundled-and-quantizer-only-drift)).
 And the `cost` column is stored bytes, not the memory a method's fetch path needs while it runs:
 `turboquant` and its V-only variant keep full-precision dequantization buffers beyond what they

@@ -390,6 +390,30 @@ def test_kv_cli_turboquant_vonly_by_name_requires_kv_bits(
     assert "--kv-bits" in capsys.readouterr().err
 
 
+def test_kv_cli_turboquant_vonly_by_name_rejects_kv_group_size(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """RED if the turboquant-vonly name path silently accepts --kv-group-size instead of
+    erroring -- turboquant-vonly has no group_size parameter (it takes v_bits + seed), so
+    a --kv-group-size passed alongside it must be rejected the same way --kv-group-size is
+    rejected for the plain turboquant name form.
+    """
+    rc = cli.main(
+        [
+            "kv",
+            "org/m",
+            "--kv-method",
+            "turboquant-vonly",
+            "--kv-bits",
+            "3",
+            "--kv-group-size",
+            "32",
+        ]
+    )
+    assert rc == 2
+    assert "--kv-group-size" in capsys.readouterr().err
+
+
 def test_kv_cli_unknown_method_name_lists_known_methods(
     capsys: pytest.CaptureFixture[str],
 ) -> None:

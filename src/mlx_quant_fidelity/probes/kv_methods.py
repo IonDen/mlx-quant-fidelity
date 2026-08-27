@@ -44,7 +44,7 @@ class KVCacheMethod(Protocol):
 
     @property
     def name(self) -> str:
-        """Method id: ``'stock'`` | ``'turboquant'``."""
+        """Method id: ``'stock'`` | ``'turboquant'`` | ``'turboquant-vonly'`` | ``'affine'``."""
         ...
 
     @property
