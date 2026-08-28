@@ -22,6 +22,8 @@ def run_weight_worker(argv: list[str] | None = None) -> int:
     parser.add_argument("--reference", required=True)
     parser.add_argument("--out", required=True)
     parser.add_argument("--max-chunks", type=int, default=None)
+    parser.add_argument("--quant-revision", default=None)
+    parser.add_argument("--reference-revision", default=None)
     args = parser.parse_args(argv)
     install_memory_caps()  # after arg validation, before any model load
     run_identity: dict[str, object] = {
@@ -30,9 +32,17 @@ def run_weight_worker(argv: list[str] | None = None) -> int:
         "reference": args.reference,
         "max_chunks": args.max_chunks,
         "schema_version": _WEIGHT_PARTIAL_SCHEMA_VERSION,
+        "quant_revision": args.quant_revision,
+        "reference_revision": args.reference_revision,
     }
     try:
-        report = measure_weight_fidelity(args.quant, args.reference, max_chunks=args.max_chunks)
+        report = measure_weight_fidelity(
+            args.quant,
+            args.reference,
+            max_chunks=args.max_chunks,
+            quant_revision=args.quant_revision,
+            reference_revision=args.reference_revision,
+        )
         envelope: dict[str, object] = {
             "status": "ok",
             "report": dataclasses.asdict(report),

@@ -16,11 +16,12 @@ from mlx_quant_fidelity.costs import kv_bytes_per_token
 from mlx_quant_fidelity.errors import (
     CacheNotQuantizableError,
     CompareConfigError,
+    LogitsBudgetError,
     QuantFidelityError,
     QuantizeStartError,
     ReportSchemaError,
 )
-from mlx_quant_fidelity.policy import VALID_VERDICTS, qualifies
+from mlx_quant_fidelity.policy import VALID_VERDICTS, qualifies, verdict_for
 from mlx_quant_fidelity.probes.kv import (
     MAX_CHUNK_LENGTH,
     _kv_head_dim,
@@ -32,6 +33,7 @@ from mlx_quant_fidelity.ranking import RankPoint, budget_pick, dominated_by, par
 from mlx_quant_fidelity.report import (
     ComparisonReport,
     ComparisonTargetResult,
+    FidelityReport,
     fidelity_report_from_dict,
     weight_report_from_dict,
 )
@@ -44,8 +46,13 @@ _asdict = _dc.asdict
 # Bump the relevant constant when that mode's partial format or cost formula changes, so only
 # that mode's old partials are rejected. The two modes' partials are independent — a KV-only
 # change (e.g. adding chunk_length to the identity) must not force weight partials to recompute.
-_KV_PARTIAL_SCHEMA_VERSION = 3
-_WEIGHT_PARTIAL_SCHEMA_VERSION = 1
+_KV_PARTIAL_SCHEMA_VERSION = 4
+_WEIGHT_PARTIAL_SCHEMA_VERSION = 2
+
+# The footing every `compare kv` row is ranked on, regardless of a method's native footing
+# (see `_ranked_kl_and_verdict`). Recorded in the run identity too, so a future change to what
+# ranking footing means invalidates old partials without another schema-version bump.
+_RANKED_FOOTING = "quantizer_only"
 
 
 def _identity_provenance(method: KVCacheMethod) -> dict[str, str]:
@@ -54,6 +61,23 @@ def _identity_provenance(method: KVCacheMethod) -> dict[str, str]:
         return dict(method.provenance())
     except QuantFidelityError:
         return {"unavailable": "true"}
+
+
+def _ranked_kl_and_verdict(report: FidelityReport) -> tuple[float, str]:
+    """The quantizer-only (ranked) KL mean + verdict `compare kv` ranks a report on.
+
+    A report carrying a control lane (currently only stock, which ran the dequantize-on-fetch
+    control alongside its bundled quantized-attention path) ranks on the CONTROL numbers — the
+    quantizer-only measurement — not its own bundled `kl`/`verdict`. A report with no control
+    lane is already quantizer-only by construction (nothing to bundle in the first place), so
+    its own `kl`/`verdict` are the ranked values.
+    """
+    if report.control_kl is not None:
+        flip = report.control_flip_rate if report.control_flip_rate is not None else 0.0
+        return report.control_kl.mean, verdict_for(
+            report.control_kl.mean, report.control_kl.p99, flip
+        )
+    return report.kl.mean, report.verdict
 
 
 def _budget_label(max_kld: float | None, min_tier: str | None) -> str | None:
@@ -93,7 +117,10 @@ def assemble_comparison_report(
         if r.report is not None
         and r.point is not None
         and qualifies(
-            kl_mean=r.report.kl.mean, verdict=r.report.verdict, max_kld=max_kld, min_tier=min_tier
+            kl_mean=r.ranked_kl if r.ranked_kl is not None else r.report.kl.mean,
+            verdict=r.ranked_verdict if r.ranked_verdict is not None else r.report.verdict,
+            max_kld=max_kld,
+            min_tier=min_tier,
         )
     }
     budget = _budget_label(max_kld, min_tier)
@@ -162,12 +189,20 @@ def _validate_compare_weights_args(quant_model_ids: list[str]) -> None:
 
 
 def _run_weight_target(
-    quant: str, reference: str, partial_path: Path, max_chunks: int | None
+    quant: str,
+    reference: str,
+    partial_path: Path,
+    max_chunks: int | None,
+    *,
+    quant_revision: str | None = None,
+    reference_revision: str | None = None,
 ) -> dict[str, object]:  # pragma: no cover - spawns a subprocess; covered by --run-slow
     """Spawn the weight worker for one target and return its parsed JSON envelope.
 
     If the worker exits non-zero or writes no parseable envelope, returns a failed envelope
     so the orchestrator can isolate the failure rather than aborting the whole compare run.
+    ``quant_revision``/``reference_revision`` are appended to the worker cmd only when set,
+    mirroring ``max_chunks``.
     """
     cmd = [
         sys.executable,
@@ -182,6 +217,10 @@ def _run_weight_target(
     ]
     if max_chunks is not None:
         cmd += ["--max-chunks", str(max_chunks)]
+    if quant_revision is not None:
+        cmd += ["--quant-revision", quant_revision]
+    if reference_revision is not None:
+        cmd += ["--reference-revision", reference_revision]
     try:
         result = subprocess.run(cmd, check=True, capture_output=True, text=True)
         stderr_hint = result.stderr.strip()
@@ -274,11 +313,23 @@ def compare_weight_fidelity(
     max_kld: float | None = None,
     min_tier: str | None = None,
     artifacts_dir: Path | None = None,
+    quant_revision: str | None = None,
+    reference_revision: str | None = None,
 ) -> ComparisonReport:
     """Rank N weight-quant repos vs one reference on quality-per-byte.
 
     Subprocess-per-target (each loads reference + quant); resumes by skipping targets whose
     partial JSON already exists. Mismatched/unrankable targets are isolated, not aborted.
+
+    Args:
+        quant_model_ids: HuggingFace repo ids (or local paths) of the quantized targets.
+        reference_model_id: Repo id (or local path) of the shared full-precision reference.
+        max_chunks: Score at most this many corpus chunks per target.
+        max_kld: Optional KLD budget for the recommended pick.
+        min_tier: Optional minimum tier for the recommended pick.
+        artifacts_dir: Directory for partial JSON files (default: _artifacts/compare/weight).
+        quant_revision: Optional git revision applied to every quant target's fetch.
+        reference_revision: Optional git revision for the one shared reference repo.
 
     Raises:
         CompareConfigError: If fewer than 2 targets, duplicate ids, malformed repo ids, or
@@ -310,12 +361,19 @@ def compare_weight_fidelity(
                 "reference": reference_model_id,
                 "max_chunks": max_chunks,
                 "schema_version": _WEIGHT_PARTIAL_SCHEMA_VERSION,
+                "quant_revision": quant_revision,
+                "reference_revision": reference_revision,
             }
             if env.get("run_identity") != expected_identity:
                 env = None
         if env is None:
             env = _run_weight_target(
-                repo, reference=reference_model_id, partial_path=partial, max_chunks=max_chunks
+                repo,
+                reference=reference_model_id,
+                partial_path=partial,
+                max_chunks=max_chunks,
+                quant_revision=quant_revision,
+                reference_revision=reference_revision,
             )
         result = _envelope_to_result(label, env)
         # fix 4: corpus from the FIRST successful result (don't overwrite once set)
@@ -599,19 +657,55 @@ def _kv_envelope_to_result(label: str, env: dict[str, object]) -> ComparisonTarg
             "CorruptPartial",
             f"partial for {label!r} has an invalid verdict {report.verdict!r}",
         )
+    ranked_kl_raw = env.get("ranked_kl")
+    ranked_kl = float(ranked_kl_raw) if isinstance(ranked_kl_raw, (int, float)) else None
+    ranked_verdict_raw = env.get("ranked_verdict")
+    ranked_verdict = ranked_verdict_raw if isinstance(ranked_verdict_raw, str) else None
+    # Validated exactly like `report.verdict` above: a garbage ranked_verdict must isolate
+    # this row, not flow into assemble_comparison_report's qualifies()/tier_rank() and crash
+    # the whole run under --min-tier. No silent fallback to the native verdict either — that
+    # would mask the corruption instead of surfacing it.
+    if ranked_verdict is not None and ranked_verdict not in VALID_VERDICTS:
+        return ComparisonTargetResult(
+            label,
+            "failed",
+            None,
+            None,
+            None,
+            "CorruptPartial",
+            f"partial for {label!r} has an invalid ranked_verdict {ranked_verdict!r}",
+        )
+    ranked_footing_raw = env.get("ranked_footing")
+    ranked_footing = ranked_footing_raw if isinstance(ranked_footing_raw, str) else None
+    quality = ranked_kl if ranked_kl is not None else report.kl.mean
+
     cost = env.get("cost")
     if cost is None:
-        return ComparisonTargetResult(label, "ok", report, None, "cost unavailable", None, None)
+        return ComparisonTargetResult(
+            label,
+            "ok",
+            report,
+            None,
+            "cost unavailable",
+            None,
+            None,
+            ranked_kl,
+            ranked_verdict,
+            ranked_footing,
+        )
     if not isinstance(cost, (int, float)):
         raise ValueError(f"unexpected cost type in partial: {type(cost)!r}")
     return ComparisonTargetResult(
         label,
         "ok",
         report,
-        RankPoint(label, report.kl.mean, int(cost)),
+        RankPoint(label, quality, int(cost)),
         None,
         None,
         None,
+        ranked_kl,
+        ranked_verdict,
+        ranked_footing,
     )
 
 
@@ -637,7 +731,15 @@ def compare_kv_fidelity(
     package/commit) match.
 
     Unsupported configs (CacheNotQuantizableError or any QuantFidelityError) are isolated
-    as 'failed' results and excluded from the frontier; the run continues.
+    as 'failed' results and excluded from the frontier; the run continues. A config the
+    pre-flight memory gate refuses mid-loop (LogitsBudgetError) is isolated as a 'skipped'
+    result instead — it gets no partial file, since nothing was measured.
+
+    Ranking is always on quantizer-only drift: a method with a control lane (currently only
+    stock, which also runs the dequantize-then-standard-SDPA control alongside its bundled
+    quantized-attention path) ranks on the control lane's KL, not its own bundled `kl`; a
+    method with no control lane is already quantizer-only, so it ranks on its own `kl`. Each
+    report's `kl`/`verdict` field always stays the method's *native* (possibly bundled) number.
 
     Args:
         model_id: HuggingFace model ID.
@@ -709,6 +811,7 @@ def compare_kv_fidelity(
             "max_chunks": max_chunks,
             "chunk_length": chunk_length,
             "schema_version": _KV_PARTIAL_SCHEMA_VERSION,
+            "ranked_footing": _RANKED_FOOTING,
         }
         if raw.get("run_identity") != expected_identity:
             return None
@@ -719,6 +822,10 @@ def compare_kv_fidelity(
     n_layers: int | None = None
     n_kv_heads: int | None = None
     head_dim: int | None = None
+    # (label, reason) pairs for configs the pre-flight memory gate refused mid-loop — no
+    # partial is written for these (unlike a generic failure), so the collect loop below must
+    # skip their labels entirely rather than trying to read a partial that was never written.
+    gate_skipped: list[tuple[str, str]] = []
 
     if pending:
         install_memory_caps()
@@ -728,6 +835,11 @@ def compare_kv_fidelity(
         for method in pending:
             mx.reset_peak_memory()
             partial = out_dir / _kv_partial_filename(method)
+            # Only a method exposing `control_method` (currently stock) has a bundled path to
+            # separate from a quantizer-only one; a method that's already quantizer-only has no
+            # `control_method` attribute at all, so `getattr` (not a bare attribute access)
+            # is load-bearing here.
+            run_control = getattr(method, "control_method", None) is not None
             try:
                 fid_report = score_kv_config(
                     model,
@@ -737,6 +849,7 @@ def compare_kv_fidelity(
                     method=method,
                     quantize_start=quantize_start,
                     max_chunks=max_chunks,
+                    control=run_control,
                 )
                 cost: int | None
                 if n_layers is not None and n_kv_heads is not None and head_dim is not None:
@@ -748,6 +861,7 @@ def compare_kv_fidelity(
                         cost = None  # a method that cannot cost this geometry is "cost unavailable"
                 else:
                     cost = None
+                ranked_kl, ranked_verdict = _ranked_kl_and_verdict(fid_report)
                 run_identity: dict[str, object] = {
                     "mode": "kv",
                     "model_id": model_id,
@@ -761,14 +875,25 @@ def compare_kv_fidelity(
                     "max_chunks": max_chunks,
                     "chunk_length": chunk_length,
                     "schema_version": _KV_PARTIAL_SCHEMA_VERSION,
+                    "ranked_footing": _RANKED_FOOTING,
                 }
                 envelope: dict[str, object] = {
                     "status": "ok",
                     "report": _asdict(fid_report),
                     "cost": cost,
+                    "ranked_kl": ranked_kl,
+                    "ranked_verdict": ranked_verdict,
+                    "ranked_footing": _RANKED_FOOTING,
                     "run_identity": run_identity,
                 }
-            except Exception as exc:  # any config failure is data, not abort
+            except LogitsBudgetError as exc:
+                # Refused before any cache/forward allocation (see probes/kv.py's pre-flight
+                # gate) — there is no result to persist, so this config is "skipped", not
+                # "failed", and gets no partial file at all.
+                gate_skipped.append((method.label, str(exc)))
+                mx.clear_cache()
+                continue
+            except Exception as exc:  # any other config failure is data, not abort
                 envelope = {
                     "status": "failed",
                     "error_type": type(exc).__name__,
@@ -777,11 +902,17 @@ def compare_kv_fidelity(
             partial.write_text(json.dumps(envelope))
             mx.clear_cache()
 
+    gate_skipped_labels = {label for label, _ in gate_skipped}
+
     # ── Collect results (resumed or just-written) ──────────────────────────────
     results: list[ComparisonTargetResult] = []
     corpus_prov: CorpusProvenance | None = None
     for method in methods:
         label = method.label
+        if label in gate_skipped_labels:
+            # No partial was written for a gate-skipped config; it's added as a "skipped"
+            # result below, alongside caller-supplied skipped_configs.
+            continue
         try:
             env: dict[str, object] = json.loads(
                 (out_dir / _kv_partial_filename(method)).read_text()
@@ -801,7 +932,7 @@ def compare_kv_fidelity(
             corpus_prov = result.report.corpus
         results.append(result)
 
-    for skip_label, skip_reason in skipped_configs or []:
+    for skip_label, skip_reason in [*gate_skipped, *(skipped_configs or [])]:
         results.append(
             ComparisonTargetResult(skip_label, "skipped", None, None, skip_reason, None, None)
         )

@@ -36,6 +36,14 @@ return "bad"
 
 Exceed any single threshold and the tier drops. A measurement with KL mean 0.008 and flip rate 0.02 is `marginal`, not `good`, because flip rate exceeds the `good` ceiling of 0.01.
 
+## Which footing a verdict measures
+
+`verdict_for` takes three numbers — mean KLD, p99 KLD, flip rate — and returns a tier. It has no opinion about which measurement produced those numbers, and the tier bands below don't change depending on the answer. What changes is which lane fed them in.
+
+A report's own `verdict` always grades its native footing, recorded in `drift_footing`: `"bundled"` for a stock report (mlx-lm's quantized-attention path), `"quantizer_only"` for `turboquant`, `turboquant-vonly`, and `affine`, which dequantize on fetch by construction. Running `kv --control` adds a second, quantizer-only KL/flip pair to a stock report (`control_kl`/`control_flip_rate`) without changing what the top-level `verdict` describes — it still grades the bundled path. `compare kv` computes its own ranked verdict per target, always on quantizer-only footing (a target with a control lane is graded on `control_kl`; a target with none is already quantizer-only, so its native verdict carries over unchanged) — see [docs/ranking-principles.md](ranking-principles.md).
+
+A report's own `verdict` and a `compare kv` row's ranked verdict can legitimately disagree for the same measurement, because they describe different footings. Check `drift_footing` before comparing two verdicts, and remember that a `compare kv` table's verdict column is always the quantizer-only one, never the bundled path stock actually deploys.
+
 ## KV-cache tiers
 
 These thresholds apply to `mlx-quant-fidelity kv`. Calibrated for KV-cache quantization on attention-based models and unchanged since 0.1.0.

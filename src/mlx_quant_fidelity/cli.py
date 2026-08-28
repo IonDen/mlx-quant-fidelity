@@ -16,6 +16,7 @@ from mlx_quant_fidelity.probes.kv_methods import (
     TURBOQUANT_DEFAULT_SEED,
     StockKVMethod,
     TurboQuantKVMethod,
+    TurboQuantVOnlyKVMethod,
     parse_method_spec,
 )
 from mlx_quant_fidelity.probes.weights import measure_weight_fidelity
@@ -58,16 +59,51 @@ def _parse_kv_configs(raw: str) -> list[KVCacheMethod]:
 
 
 def _resolve_kv_method(args: argparse.Namespace) -> KVCacheMethod:
-    """Build the method from the kv flags; reject flags that do not belong to the method."""
-    if args.kv_method == "stock":
+    """Build the method from ``--kv-method`` (a name or a spec string) and the kv flags.
+
+    A value containing ``:`` is a spec string (``'turboquant:4:7'``, ``'affine:8:4'``,
+    a bare ``'4:64'``) parsed via :func:`parse_method_spec`; it may not be combined with
+    any of ``--kv-bits``/``--kv-group-size``/``--kv-seed``. A bare name uses those flags
+    directly, applying the 0.5.x legacy defaults when a flag is omitted (stock: bits 4,
+    group_size 64; turboquant: bits 4, seed ``TURBOQUANT_DEFAULT_SEED``). ``affine`` has
+    no flag-based form (it needs both k_bits and v_bits) and always errors, pointing at
+    the spec grammar. ``turboquant-vonly`` reuses ``--kv-bits`` as its ``v_bits`` and
+    requires it explicitly (there is no sensible default to guess); it has no group_size
+    parameter, so a simultaneous ``--kv-group-size`` errors the same way it does for
+    ``turboquant``. An unrecognized name raises, listing the known ``METHODS``.
+    """
+    value = args.kv_method
+    if ":" in value:
+        if args.kv_bits is not None or args.kv_group_size is not None or args.kv_seed is not None:
+            raise ValueError(
+                "--kv-method with a spec string replaces --kv-bits/--kv-group-size/--kv-seed"
+            )
+        return parse_method_spec(value)
+    if value == "stock":
         if args.kv_seed is not None:
             raise ValueError("--kv-seed is only valid with --kv-method turboquant")
+        bits = 4 if args.kv_bits is None else args.kv_bits
         gs = 64 if args.kv_group_size is None else args.kv_group_size
-        return StockKVMethod(bits=args.kv_bits, group_size=gs)
-    if args.kv_group_size is not None:
-        raise ValueError("--kv-group-size is only valid with --kv-method stock")
-    seed = TURBOQUANT_DEFAULT_SEED if args.kv_seed is None else args.kv_seed
-    return TurboQuantKVMethod(bits=args.kv_bits, seed=seed)
+        return StockKVMethod(bits=bits, group_size=gs)
+    if value == "turboquant":
+        if args.kv_group_size is not None:
+            raise ValueError("--kv-group-size is only valid with --kv-method stock")
+        bits = 4 if args.kv_bits is None else args.kv_bits
+        seed = TURBOQUANT_DEFAULT_SEED if args.kv_seed is None else args.kv_seed
+        return TurboQuantKVMethod(bits=bits, seed=seed)
+    if value == "affine":
+        raise ValueError(
+            "--kv-method affine has no flag-based form (it needs both k_bits and v_bits); "
+            "use a spec string, e.g. --kv-method affine:8:4"
+        )
+    if value == "turboquant-vonly":
+        if args.kv_group_size is not None:
+            raise ValueError("--kv-group-size is only valid with --kv-method stock")
+        if args.kv_bits is None:
+            raise ValueError("--kv-method turboquant-vonly requires --kv-bits (used as v_bits)")
+        seed = TURBOQUANT_DEFAULT_SEED if args.kv_seed is None else args.kv_seed
+        return TurboQuantVOnlyKVMethod(v_bits=args.kv_bits, seed=seed)
+    raise ValueError(f"unknown --kv-method {value!r}; known: {sorted(METHODS)}")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -82,18 +118,29 @@ def main(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="command", required=True)
     kv = sub.add_parser("kv", help="measure KV-cache quantization fidelity")
     kv.add_argument("model")
-    kv.add_argument("--kv-bits", type=int, default=4)
+    kv.add_argument("--kv-bits", type=int, default=None)
     kv.add_argument(
         "--kv-method",
-        choices=sorted(METHODS),
         default="stock",
-        help="cache method to measure (default stock)",
+        metavar="METHOD",
+        help=(
+            "cache method: a name (stock, turboquant, affine, turboquant-vonly) combined "
+            "with --kv-bits/--kv-group-size/--kv-seed, or a self-contained spec string "
+            "(e.g. 'turboquant:4:7', 'affine:8:4', 'turboquant-vonly:3') that replaces "
+            "those flags (default stock)"
+        ),
     )
     kv.add_argument("--kv-group-size", type=int, default=None)
     kv.add_argument("--kv-seed", type=int, default=None)
     kv.add_argument("--quantize-start", type=int, default=0)
     kv.add_argument("--max-chunks", type=int, default=None)
     kv.add_argument("--chunk-length", type=int, default=512)
+    kv.add_argument("--model-revision", default=None)
+    kv.add_argument(
+        "--control",
+        action="store_true",
+        help="also run the stock method's quantizer-only control lane (see --kv-method stock)",
+    )
     kv.add_argument("--format", choices=["json", "md", "badge"], default="md")
 
     weights = sub.add_parser("weights", help="measure weight-quantization fidelity")
@@ -111,6 +158,8 @@ def main(argv: list[str] | None = None) -> int:
     cw.add_argument("--max-chunks", type=int, default=None)
     cw.add_argument("--max-kld", type=float, default=None)
     cw.add_argument("--min-tier", choices=["good", "marginal", "bad"], default=None)
+    cw.add_argument("--quant-revision", default=None)
+    cw.add_argument("--reference-revision", default=None)
     cw.add_argument("--format", choices=["json", "md"], default="md")
 
     ck = csub.add_parser("kv", help="rank N (bits:group_size) KV configs on one model")
@@ -118,8 +167,9 @@ def main(argv: list[str] | None = None) -> int:
     ck.add_argument(
         "--configs",
         default=None,
-        help="e.g. '4:32,4:64,8:64,turboquant:4' (methods: bits:group_size = stock; "
-        "turboquant:bits[:seed], seed >= 1)",
+        help="e.g. '4:32,4:64,8:64,turboquant:4,turboquant-vonly:3,affine:8:4' (methods: "
+        "bits:group_size = stock; turboquant:bits[:seed], seed >= 1; "
+        "turboquant-vonly:v_bits[:seed]; affine:k_bits:v_bits[:group_size])",
     )
     ck.add_argument(
         "--sweep",
@@ -136,6 +186,7 @@ def main(argv: list[str] | None = None) -> int:
     ck.add_argument("--quantize-start", type=int, default=0)
     ck.add_argument("--max-chunks", type=int, default=None)
     ck.add_argument("--chunk-length", type=int, default=512)
+    ck.add_argument("--model-revision", default=None)
     ck.add_argument("--max-kld", type=float, default=None)
     ck.add_argument("--min-tier", choices=["good", "marginal", "bad"], default=None)
     ck.add_argument("--format", choices=["json", "md"], default="md")
@@ -154,6 +205,8 @@ def main(argv: list[str] | None = None) -> int:
                 quantize_start=args.quantize_start,
                 max_chunks=args.max_chunks,
                 chunk_length=args.chunk_length,
+                model_revision=args.model_revision,
+                control=args.control,
             )
             if args.format == "json":
                 out = render_json(report)
@@ -180,6 +233,8 @@ def main(argv: list[str] | None = None) -> int:
                 max_chunks=args.max_chunks,
                 max_kld=args.max_kld,
                 min_tier=args.min_tier,
+                quant_revision=args.quant_revision,
+                reference_revision=args.reference_revision,
             )
             out = (
                 render_comparison_json(creport)
@@ -246,6 +301,7 @@ def main(argv: list[str] | None = None) -> int:
                 quantize_start=args.quantize_start,
                 max_chunks=args.max_chunks,
                 chunk_length=args.chunk_length,
+                model_revision=args.model_revision,
                 max_kld=args.max_kld,
                 min_tier=args.min_tier,
                 skipped_configs=skipped_configs,

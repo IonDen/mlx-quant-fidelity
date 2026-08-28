@@ -4,6 +4,7 @@
 
 ## Released
 
+- **0.7.0** — `compare kv` ranks every method on the same footing: quantizer error alone, with stock's own deployed-path number shown alongside rather than used for ranking. Adds `affine` (an independent per-side K/V bit width) and `turboquant-vonly` (TurboQuant-MLX's V-only cache) to the ranked set, a `kv --control` quantizer-only lane for stock, and `--model-revision` pinning on `kv`/`compare kv`.
 - **0.6.0** — The KV probe measures any per-layer cache implementation, and the first third-party cache — TurboQuant-MLX — is ranked against mlx-lm's stock cache on one memory-normalized yardstick.
 - **0.5.1** — Documentation release. Rewritten README built around the three questions the tool answers, diagrams for the coverage map, the two measurement modes, and Pareto domination, and a fidelity chart rendered from the committed sample reports. No change to measurement behavior.
 - **0.5.0** — Depth-resolved KV drift: stress-mode reports over a fixed-window corpus break KLD down by position depth, with a configurable `--chunk-length` (up to 4096) to widen the window. Adds `compare kv --sweep` to auto-generate a config grid from the model's `config.json`, a `--max-kv-bytes-per-token` budget filter, a rejection gate for `(head_dim, bits)` combinations that crash the upstream KV cache, device provenance in every report, and hardening for a malformed cached comparison partial.
@@ -16,6 +17,5 @@
 ## Next
 
 - **Threshold validation** — a one-off check of the badge thresholds against downstream task accuracy.
-- **More cache methods** — TurboQuant's asymmetric and layer-adaptive configurations, and a second port.
-- **Quantizer-only control** — an optional dequantize-then-standard-attention path that separates quantizer error from quantized-kernel numerics.
+- **More cache methods** — TurboQuant's layer-adaptive configuration once its silently-ignored `k_bits`/`v_bits` bug is resolved upstream, and a second port.
 - **Wider attention coverage** — MLA and sliding-window caches beyond flag-don't-crash.

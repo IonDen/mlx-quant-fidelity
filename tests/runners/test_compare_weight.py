@@ -22,7 +22,9 @@ def test_compare_weight_builds_frontier(monkeypatch, tmp_path):
     monkeypatch.setattr(
         cmp,
         "_run_weight_target",
-        lambda quant, reference, partial_path, max_chunks: envelopes[quant],
+        lambda quant, reference, partial_path, max_chunks, quant_revision=None, reference_revision=None: (
+            envelopes[quant]
+        ),
     )
     report = cmp.compare_weight_fidelity(["q8", "q6", "q4"], "ref", artifacts_dir=tmp_path)
     assert set(report.frontier) == {"q4", "q6", "q8"}
@@ -38,7 +40,9 @@ def test_compare_weight_unrankable_when_cost_none(monkeypatch, tmp_path):
     monkeypatch.setattr(
         cmp,
         "_run_weight_target",
-        lambda quant, reference, partial_path, max_chunks: envelopes[quant],
+        lambda quant, reference, partial_path, max_chunks, quant_revision=None, reference_revision=None: (
+            envelopes[quant]
+        ),
     )
     report = cmp.compare_weight_fidelity(["q4", "q8"], "ref", artifacts_dir=tmp_path)
     res = next(r for r in report.results if r.label == "q4")
@@ -54,7 +58,7 @@ def test_compare_weight_failed_target_isolated(monkeypatch, tmp_path):
     monkeypatch.setattr(
         cmp,
         "_run_weight_target",
-        lambda quant, reference, partial_path, max_chunks: (
+        lambda quant, reference, partial_path, max_chunks, quant_revision=None, reference_revision=None: (
             {"status": "failed", "error_type": "ModelMismatchError", "message": "bad"}
             if quant == "q2"
             else _ok_envelope(quant, 0.01, 8000)
@@ -86,7 +90,9 @@ def test_compare_weight_resume_skips_existing_partial(monkeypatch, tmp_path):
     )
     calls = []
 
-    def _fake_run(quant, reference, partial_path, max_chunks):
+    def _fake_run(
+        quant, reference, partial_path, max_chunks, quant_revision=None, reference_revision=None
+    ):
         calls.append(quant)
         env = _weight_ok_envelope_with_identity(quant, 0.04, 6200)
         partial_path.write_text(json.dumps(env))  # mirror real worker: write partial
@@ -106,7 +112,9 @@ def test_compare_weight_corrupt_partial_reruns(monkeypatch, tmp_path):
     (tmp_path / "q8.json").write_text("{bad json")  # corrupt partial
     calls = []
 
-    def _fake_run(quant, reference, partial_path, max_chunks):
+    def _fake_run(
+        quant, reference, partial_path, max_chunks, quant_revision=None, reference_revision=None
+    ):
         calls.append(quant)
         env = _ok_envelope(quant, 0.01, 8000)
         partial_path.write_text(json.dumps(env))
@@ -148,7 +156,9 @@ def test_compare_weight_failed_missing_envelope_keys_are_none(monkeypatch, tmp_p
     monkeypatch.setattr(
         cmp,
         "_run_weight_target",
-        lambda quant, reference, partial_path, max_chunks: {"status": "failed"},
+        lambda quant, reference, partial_path, max_chunks, quant_revision=None, reference_revision=None: {
+            "status": "failed"
+        },
     )
     report = cmp.compare_weight_fidelity(["q8", "q9"], "ref", artifacts_dir=tmp_path)
     failed_q8 = next(r for r in report.results if r.label == "q8")
@@ -174,7 +184,9 @@ def test_compare_weight_failed_partial_is_recomputed(monkeypatch, tmp_path):
 
     calls = []
 
-    def _fake_run(quant, reference, partial_path, max_chunks):
+    def _fake_run(
+        quant, reference, partial_path, max_chunks, quant_revision=None, reference_revision=None
+    ):
         calls.append(quant)
         env = {"status": "ok", "report": dataclasses.asdict(_wreport(quant, 0.01, 8000))}
         partial_path.write_text(json.dumps(env))
@@ -203,6 +215,8 @@ def _weight_ok_envelope_with_identity(
     reference: str = "ref",
     max_chunks: int | None = None,
     schema_version: int | None = None,
+    quant_revision: str | None = None,
+    reference_revision: str | None = None,
 ) -> dict[str, object]:
     """Build a weight partial envelope with a run_identity block.
 
@@ -220,6 +234,8 @@ def _weight_ok_envelope_with_identity(
         "reference": reference,
         "max_chunks": max_chunks,
         "schema_version": sv,
+        "quant_revision": quant_revision,
+        "reference_revision": reference_revision,
     }
     env = _ok_envelope(label, kl_mean, cost)
     env["run_identity"] = identity
@@ -238,7 +254,9 @@ def test_compare_weight_stale_max_chunks_partial_is_recomputed(monkeypatch, tmp_
 
     calls = []
 
-    def _fake_run(quant, reference, partial_path, max_chunks):
+    def _fake_run(
+        quant, reference, partial_path, max_chunks, quant_revision=None, reference_revision=None
+    ):
         calls.append(quant)
         env = _weight_ok_envelope_with_identity(quant, 0.01, 8000, max_chunks=max_chunks)
         partial_path.write_text(json.dumps(env))
@@ -264,7 +282,9 @@ def test_compare_weight_sanitized_filename_collision_causes_recompute(monkeypatc
 
     calls = []
 
-    def _fake_run(quant, reference, partial_path, max_chunks):
+    def _fake_run(
+        quant, reference, partial_path, max_chunks, quant_revision=None, reference_revision=None
+    ):
         calls.append(quant)
         env = _weight_ok_envelope_with_identity(quant, 0.01, 8000, quant=quant)
         partial_path.write_text(json.dumps(env))
@@ -288,7 +308,9 @@ def test_compare_weight_matching_identity_resumes(monkeypatch, tmp_path):
 
     calls = []
 
-    def _fake_run(quant, reference, partial_path, max_chunks):
+    def _fake_run(
+        quant, reference, partial_path, max_chunks, quant_revision=None, reference_revision=None
+    ):
         calls.append(quant)
         env = _weight_ok_envelope_with_identity(quant, 0.04, 6200, max_chunks=max_chunks)
         partial_path.write_text(json.dumps(env))
@@ -315,7 +337,9 @@ def test_compare_weight_stale_reference_partial_is_recomputed(monkeypatch, tmp_p
 
     calls = []
 
-    def _fake_run(quant, reference, partial_path, max_chunks):
+    def _fake_run(
+        quant, reference, partial_path, max_chunks, quant_revision=None, reference_revision=None
+    ):
         calls.append((quant, reference))
         env = _weight_ok_envelope_with_identity(quant, 0.01, 8000, reference=reference)
         partial_path.write_text(json.dumps(env))
@@ -393,7 +417,7 @@ def test_weight_envelope_with_invalid_verdict_is_corrupt_partial():
     assert result.error_type == "CorruptPartial"
 
 
-# ── Task 1 (0030): non-dict top-level partial isolation ───────────────────────
+# ── regression: non-dict top-level partial isolation ───────────────────────────
 
 
 def test_weight_envelope_non_dict_is_corrupt_partial():
@@ -414,7 +438,9 @@ def test_compare_weight_null_partial_is_recomputed(monkeypatch, tmp_path):
 
     calls = []
 
-    def _fake_run(quant, reference, partial_path, max_chunks):
+    def _fake_run(
+        quant, reference, partial_path, max_chunks, quant_revision=None, reference_revision=None
+    ):
         calls.append(quant)
         env = _ok_envelope(quant, 0.01, 8000)
         partial_path.write_text(json.dumps(env))
@@ -426,22 +452,24 @@ def test_compare_weight_null_partial_is_recomputed(monkeypatch, tmp_path):
     assert len(report.results) == 2
 
 
-# ── Task 6 (0033 part 3): the schema-version constant split ───────────────────
+# ── regression: the schema-version constant split ─────────────────────────────
 
 
-def test_weight_partials_survive_the_kv_schema_bump(monkeypatch, tmp_path):
-    """The KV partial schema bumps (Task 6 adds chunk_length to KV identities); the weight
-    schema constant is untouched (still 1) so a pre-existing weight partial keeps resuming
-    without a forced recompute.
+def test_weight_partials_survive_unrelated_schema_bumps(monkeypatch, tmp_path):
+    """A weight partial whose stored schema_version matches the current
+    _WEIGHT_PARTIAL_SCHEMA_VERSION constant resumes without a forced recompute — the KV
+    partial schema (a separate constant) bumps on its own, independent cadence.
     """
-    assert cmp._WEIGHT_PARTIAL_SCHEMA_VERSION == 1
+    assert cmp._WEIGHT_PARTIAL_SCHEMA_VERSION == 2
 
-    matching_env = _weight_ok_envelope_with_identity("q8", 0.01, 8000, schema_version=1)
+    matching_env = _weight_ok_envelope_with_identity("q8", 0.01, 8000, schema_version=2)
     (tmp_path / "q8.json").write_text(json.dumps(matching_env))
 
     calls = []
 
-    def _fake_run(quant, reference, partial_path, max_chunks):
+    def _fake_run(
+        quant, reference, partial_path, max_chunks, quant_revision=None, reference_revision=None
+    ):
         calls.append(quant)
         env = _weight_ok_envelope_with_identity(quant, 0.04, 6200)
         partial_path.write_text(json.dumps(env))
@@ -451,4 +479,151 @@ def test_weight_partials_survive_the_kv_schema_bump(monkeypatch, tmp_path):
 
     cmp.compare_weight_fidelity(["q8", "q9"], "ref", artifacts_dir=tmp_path)
 
-    assert "q8" not in calls, "q8 must resume: the weight schema version (1) did not change"
+    assert "q8" not in calls, "q8 must resume: the weight schema version (2) did not change"
+
+
+def test_compare_weight_old_schema_version_partial_recomputes(monkeypatch, tmp_path):
+    """A partial written at schema_version=1 (pre-revision-identity) must not resume once the
+    live constant is 2 — the identity dict shape changed (it gained quant_revision/
+    reference_revision), so an old partial's identity can never equal the new expected one.
+    """
+    stale_env = _weight_ok_envelope_with_identity("q8", 0.01, 8000, schema_version=1)
+    (tmp_path / "q8.json").write_text(json.dumps(stale_env))
+
+    calls = []
+
+    def _fake_run(
+        quant, reference, partial_path, max_chunks, quant_revision=None, reference_revision=None
+    ):
+        calls.append(quant)
+        env = _weight_ok_envelope_with_identity(quant, 0.01, 8000)
+        partial_path.write_text(json.dumps(env))
+        return env
+
+    monkeypatch.setattr(cmp, "_run_weight_target", _fake_run)
+
+    cmp.compare_weight_fidelity(["q8", "q9"], "ref", artifacts_dir=tmp_path)
+
+    assert "q8" in calls, "a schema-1 partial must recompute under the schema-2 constant"
+
+
+def test_compare_weight_stale_quant_revision_partial_is_recomputed(monkeypatch, tmp_path):
+    """A partial pinned to quant_revision='rev-A' must NOT resume for a 'rev-B' run.
+
+    Mirrors test_compare_weight_stale_reference_partial_is_recomputed but for the quant
+    side's own revision pin — the two repos revision independently.
+    """
+    stale_env = _weight_ok_envelope_with_identity("q8", 0.01, 8000, quant_revision="rev-A")
+    (tmp_path / "q8.json").write_text(json.dumps(stale_env))
+
+    calls = []
+
+    def _fake_run(
+        quant, reference, partial_path, max_chunks, quant_revision=None, reference_revision=None
+    ):
+        calls.append((quant, quant_revision))
+        env = _weight_ok_envelope_with_identity(quant, 0.01, 8000, quant_revision=quant_revision)
+        partial_path.write_text(json.dumps(env))
+        return env
+
+    monkeypatch.setattr(cmp, "_run_weight_target", _fake_run)
+
+    cmp.compare_weight_fidelity(["q8", "q9"], "ref", quant_revision="rev-B", artifacts_dir=tmp_path)
+
+    assert any(quant == "q8" and rev == "rev-B" for quant, rev in calls)
+
+
+def test_compare_weight_stale_reference_revision_partial_is_recomputed(monkeypatch, tmp_path):
+    """A partial pinned to reference_revision='rev-A' must NOT resume for a 'rev-B' run."""
+    stale_env = _weight_ok_envelope_with_identity("q8", 0.01, 8000, reference_revision="rev-A")
+    (tmp_path / "q8.json").write_text(json.dumps(stale_env))
+
+    calls = []
+
+    def _fake_run(
+        quant, reference, partial_path, max_chunks, quant_revision=None, reference_revision=None
+    ):
+        calls.append((quant, reference_revision))
+        env = _weight_ok_envelope_with_identity(
+            quant, 0.01, 8000, reference_revision=reference_revision
+        )
+        partial_path.write_text(json.dumps(env))
+        return env
+
+    monkeypatch.setattr(cmp, "_run_weight_target", _fake_run)
+
+    cmp.compare_weight_fidelity(
+        ["q8", "q9"], "ref", reference_revision="rev-B", artifacts_dir=tmp_path
+    )
+
+    assert any(quant == "q8" and rev == "rev-B" for quant, rev in calls)
+
+
+def test_compare_weight_matching_revisions_resume(monkeypatch, tmp_path):
+    """A partial whose stored quant_revision/reference_revision match the current call is
+    resumed, not re-run — proves the new identity fields don't force an unnecessary recompute
+    when nothing changed.
+    """
+    matching_env = _weight_ok_envelope_with_identity(
+        "q8", 0.01, 8000, quant_revision="rev-A", reference_revision="rev-B"
+    )
+    (tmp_path / "q8.json").write_text(json.dumps(matching_env))
+
+    calls = []
+
+    def _fake_run(
+        quant, reference, partial_path, max_chunks, quant_revision=None, reference_revision=None
+    ):
+        calls.append(quant)
+        env = _weight_ok_envelope_with_identity(
+            quant, 0.04, 6200, quant_revision=quant_revision, reference_revision=reference_revision
+        )
+        partial_path.write_text(json.dumps(env))
+        return env
+
+    monkeypatch.setattr(cmp, "_run_weight_target", _fake_run)
+
+    cmp.compare_weight_fidelity(
+        ["q8", "q9"],
+        "ref",
+        quant_revision="rev-A",
+        reference_revision="rev-B",
+        artifacts_dir=tmp_path,
+    )
+
+    assert "q8" not in calls, "q8 must resume: quant_revision/reference_revision match"
+
+
+def test_run_weight_target_passes_revisions_to_worker_cmd_only_when_set(monkeypatch, tmp_path):
+    """`_run_weight_target` appends --quant-revision/--reference-revision to the worker cmd
+    only when set — mirrors how --max-chunks is optionally appended — so a run with no
+    revision pin doesn't grow a redundant flag with an empty/None value.
+    """
+
+    class _FakeCompletedProcess:
+        stdout = ""
+        stderr = ""
+
+    captured: dict[str, list[str]] = {}
+    out = tmp_path / "out.json"
+
+    def fake_run(cmd, check, capture_output, text):
+        captured["cmd"] = cmd
+        out.write_text(json.dumps({"status": "ok", "report": {}}))
+        return _FakeCompletedProcess()
+
+    monkeypatch.setattr(cmp.subprocess, "run", fake_run)
+
+    cmp._run_weight_target(
+        "quant/repo",
+        "ref/repo",
+        out,
+        None,
+        quant_revision="rev-q",
+        reference_revision=None,
+    )
+
+    cmd = captured["cmd"]
+    assert "--quant-revision" in cmd
+    assert cmd[cmd.index("--quant-revision") + 1] == "rev-q"
+    assert "--reference-revision" not in cmd

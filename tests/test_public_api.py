@@ -36,6 +36,10 @@ def test_kv_method_public_exports():
     assert "StockKVMethod" in qf.__all__
     assert hasattr(qf, "TurboQuantKVMethod")
     assert "TurboQuantKVMethod" in qf.__all__
+    assert hasattr(qf, "AffineKVMethod")
+    assert "AffineKVMethod" in qf.__all__
+    assert hasattr(qf, "TurboQuantVOnlyKVMethod")
+    assert "TurboQuantVOnlyKVMethod" in qf.__all__
     assert hasattr(qf, "parse_method_spec")
     assert "parse_method_spec" in qf.__all__
     assert hasattr(qf, "MethodUnavailableError")

@@ -9,8 +9,9 @@ import pytest
 from tests.probes.fake_turboquant import install_fake_port
 from tests.test_cli import _fake_report
 
-from mlx_quant_fidelity.errors import CompareConfigError
+from mlx_quant_fidelity.errors import CompareConfigError, CorpusError, LogitsBudgetError
 from mlx_quant_fidelity.metrics import ScalarSummary
+from mlx_quant_fidelity.policy import verdict_for
 from mlx_quant_fidelity.probes.kv_methods import StockKVMethod, TurboQuantKVMethod
 from mlx_quant_fidelity.runners import compare as cmp
 
@@ -51,6 +52,35 @@ def _fid(label_bits: tuple[int, int], kl_mean: float):  # type: ignore[return]
         cache_supported=True,
         verdict="good",
         warnings=(),
+    )
+
+
+def _fid_with_control(
+    label_bits: tuple[int, int],
+    *,
+    kl_mean: float,
+    kl_p99: float,
+    flip_rate: float,
+    control_mean: float,
+    control_p99: float,
+    control_flip_rate: float,
+):  # type: ignore[return]
+    """A stock FidelityReport carrying both the bundled and quantizer-only (control) lanes.
+
+    `kl`/`flip_rate`/`verdict` are the deployed quantized-attention (bundled) numbers;
+    `control_kl`/`control_flip_rate` are the dequantize-then-standard-SDPA control lane
+    `score_kv_config(control=True)` measures alongside it. The two lanes are deliberately
+    given DIFFERENT verdicts (bundled "bad", control "marginal" by construction below) so a
+    test asserting on `ranked_verdict` fails if the wrong lane's numbers feed the verdict.
+    """
+    base = _fid(label_bits, kl_mean)
+    return dataclasses.replace(
+        base,
+        kl=ScalarSummary(kl_mean, kl_mean, kl_p99, kl_p99),
+        flip_rate=flip_rate,
+        verdict=verdict_for(kl_mean, kl_p99, flip_rate),
+        control_kl=ScalarSummary(control_mean, control_mean, control_p99, control_p99),
+        control_flip_rate=control_flip_rate,
     )
 
 
@@ -567,6 +597,7 @@ def test_compare_kv_collect_loop_isolates_bad_cost_partial(monkeypatch, tmp_path
         "max_chunks": None,
         "chunk_length": 512,
         "schema_version": compare_mod._KV_PARTIAL_SCHEMA_VERSION,
+        "ranked_footing": "quantizer_only",
     }
     (tmp_path / "4_64.json").write_text(
         json.dumps(
@@ -693,6 +724,7 @@ def _kv_partial_with_identity(
         "max_chunks": max_chunks,
         "chunk_length": chunk_length,
         "schema_version": sv,
+        "ranked_footing": "quantizer_only",
     }
     return json.dumps(
         {"status": "ok", "report": dataclasses.asdict(rep), "cost": cost, "run_identity": identity}
@@ -785,7 +817,7 @@ def test_kv_envelope_with_invalid_verdict_is_corrupt_partial():
     assert result.error_type == "CorruptPartial"
 
 
-# ── Task 2: malformed persisted partials (backlog 0028) ───────────────────────
+# ── regression: malformed persisted partials ───────────────────────────────────
 
 
 def _kv_partial_env(bits: int, gs: int, *, kl_mean: float, cost: int) -> dict[str, object]:
@@ -811,6 +843,7 @@ def _kv_partial_env(bits: int, gs: int, *, kl_mean: float, cost: int) -> dict[st
             "max_chunks": None,
             "chunk_length": 512,
             "schema_version": cmp._KV_PARTIAL_SCHEMA_VERSION,
+            "ranked_footing": "quantizer_only",
         },
     }
 
@@ -845,7 +878,7 @@ def test_kv_collect_isolates_malformed_report_body(tmp_path):
     assert "4:64" in report.frontier
 
 
-# ── Task 7: deployment mode — resume regression ───────────────────────────────
+# ── regression: deployment mode — resume regression ────────────────────────────
 
 
 def test_compare_kv_stress_partial_recomputed_for_deployment(monkeypatch, tmp_path):
@@ -878,7 +911,7 @@ def test_compare_kv_stress_partial_recomputed_for_deployment(monkeypatch, tmp_pa
     assert loaded["n"] == 1  # both stress partials rejected → recompute triggered → load fires once
 
 
-# ── Task 1 (0030): non-dict top-level partial isolation ───────────────────────
+# ── regression: non-dict top-level partial isolation ───────────────────────────
 
 
 def test_compare_kv_non_dict_toplevel_partial_is_recomputed(monkeypatch, tmp_path):
@@ -906,14 +939,14 @@ def test_kv_envelope_non_dict_is_corrupt_partial():
     assert (result.status, result.error_type) == ("failed", "CorruptPartial")
 
 
-# ── Task 6 (0033 part 3): chunk_length as a first-class knob ──────────────────
+# ── regression: chunk_length as a first-class knob ─────────────────────────────
 
 
-def test_kv_partial_schema_version_is_3():
+def test_kv_partial_schema_version_is_4():
     # Literal pin (mirrors the weight-side == 1 pin in test_compare_weight.py): a future
     # unrelated edit that accidentally bumps or resets this constant goes red here, not just
     # against whatever the constant happens to be at the time.
-    assert cmp._KV_PARTIAL_SCHEMA_VERSION == 3
+    assert cmp._KV_PARTIAL_SCHEMA_VERSION == 4
 
 
 def test_kv_partial_identity_includes_chunk_length(monkeypatch, tmp_path):
@@ -925,9 +958,9 @@ def test_kv_partial_identity_includes_chunk_length(monkeypatch, tmp_path):
     cmp.compare_kv_fidelity("m", [(4, 64), (8, 64)], chunk_length=1024, artifacts_dir=tmp_path)
     env = json.loads((tmp_path / "4_64.json").read_text())
     assert env["run_identity"]["chunk_length"] == 1024
-    # Literal (not compared against the live constant -- see test_kv_partial_schema_version_is_3
-    # for that pin; this asserts the ACTUAL persisted value is the one Task 4 shipped).
-    assert env["run_identity"]["schema_version"] == 3
+    # Literal (not compared against the live constant -- see test_kv_partial_schema_version_is_4
+    # for that pin; this asserts the ACTUAL persisted value, not a hardcoded guess).
+    assert env["run_identity"]["schema_version"] == 4
 
 
 def test_chunk_length_change_invalidates_partials(monkeypatch, tmp_path):
@@ -972,7 +1005,7 @@ def test_validate_compare_kv_args_quantize_start_bound_follows_chunk_length():
     )
 
 
-# ── Task 8 (0035): compare kv --sweep + KV-byte budget filter ─────────────────
+# ── regression: compare kv --sweep + KV-byte budget filter ─────────────────────
 
 
 def test_sweep_grid_from_head_dim_64():
@@ -1064,7 +1097,7 @@ def test_skipped_configs_appear_in_report_not_frontier(monkeypatch, tmp_path):
     assert "`6:64` — 17408 B/token exceeds the --max-kv-bytes-per-token budget of 1000" in md
 
 
-# ── Task 4 (0.6.0): compare kv over methods ────────────────────────────────────
+# ── regression: compare kv over methods ─────────────────────────────────────────
 
 
 def _fid_method(method_name: str, params: dict, kl_mean: float):
@@ -1099,12 +1132,12 @@ def test_compare_kv_accepts_mixed_tuple_and_method_list(monkeypatch, tmp_path):
     assert (tmp_path / "turboquant_4.json").exists()
 
 
-def test_compare_kv_partial_identity_carries_method_and_schema_3(monkeypatch, tmp_path):
+def test_compare_kv_partial_identity_carries_method_and_schema_4(monkeypatch, tmp_path):
     reports = {(4, 64): _fid((4, 64), 0.09), (8, 64): _fid((8, 64), 0.01)}
     _patch_kv_compare(monkeypatch, reports)
     cmp.compare_kv_fidelity("m", [(4, 64), (8, 64)], artifacts_dir=tmp_path)
     ident = json.loads((tmp_path / "4_64.json").read_text())["run_identity"]
-    assert ident["schema_version"] == 3
+    assert ident["schema_version"] == 4
     assert ident["method"] == "stock"
     assert ident["params"] == {"bits": 4, "group_size": 64}
     assert "bits" not in ident
@@ -1147,6 +1180,7 @@ def test_compare_kv_stale_method_provenance_commit_is_recomputed(monkeypatch, tm
         "max_chunks": None,
         "chunk_length": 512,
         "schema_version": cmp._KV_PARTIAL_SCHEMA_VERSION,
+        "ranked_footing": "quantizer_only",
     }
     envelope = {
         "status": "ok",
@@ -1212,3 +1246,226 @@ def test_compare_kv_filename_validation_rejects_bad_labels():
             max_chunks=None,
             chunk_length=512,
         )
+
+
+# ── regression: compare ranks every config on quantizer-only drift ─────────────
+
+
+def test_ranked_kl_and_verdict_uses_control_when_present():
+    """A report with a control lane ranks on the control (quantizer-only) numbers, not the
+    bundled `kl`/`verdict` — that's the whole point of this ranking rule.
+    """
+    rep = _fid_with_control(
+        (4, 64),
+        kl_mean=0.15,
+        kl_p99=0.20,
+        flip_rate=0.02,
+        control_mean=0.08,
+        control_p99=0.09,
+        control_flip_rate=0.005,
+    )
+    kl, verdict = cmp._ranked_kl_and_verdict(rep)
+    assert kl == 0.08
+    assert verdict == verdict_for(0.08, 0.09, 0.005)
+    # Precondition: the bundled and ranked verdicts must actually differ, or this test would
+    # pass even if the wrong lane's numbers were used.
+    assert verdict != rep.verdict
+
+
+def test_ranked_kl_and_verdict_falls_back_to_native_without_control():
+    """A report with no control lane (native quantizer-only methods) ranks on its own kl/verdict."""
+    rep = _fid((4, 64), 0.03)
+    kl, verdict = cmp._ranked_kl_and_verdict(rep)
+    assert kl == rep.kl.mean
+    assert verdict == rep.verdict
+
+
+def test_compare_kv_runs_control_only_for_stock(monkeypatch, tmp_path):
+    """score_kv_config is called with control=True for a method exposing control_method
+    (stock) and control=False for one that doesn't (turboquant) — proving the flow never
+    AttributeErrors on a method lacking the attribute.
+    """
+    monkeypatch.setattr(cmp, "install_memory_caps", lambda: (0, 0))
+    monkeypatch.setattr(cmp, "_load_model", lambda model_id, revision: (object(), object()))
+    monkeypatch.setattr(cmp, "_kv_dims", lambda model: (16, 8, 64))
+    monkeypatch.setattr(
+        cmp,
+        "_load_corpus_for_kv",
+        lambda tokenizer, model_id, max_chunks, *, chunk_length: object(),
+    )
+    seen_control: dict[str, object] = {}
+
+    def fake_score(model, corpus, *, method, control=False, **kw):  # type: ignore[return]
+        seen_control[method.name] = control
+        if method.name == "stock":
+            return _fid_with_control(
+                (4, 64),
+                kl_mean=0.15,
+                kl_p99=0.20,
+                flip_rate=0.02,
+                control_mean=0.08,
+                control_p99=0.09,
+                control_flip_rate=0.005,
+            )
+        return _fid_method("turboquant", {"bits": 4, "seed": 42}, 0.05)
+
+    monkeypatch.setattr(cmp, "score_kv_config", fake_score)
+    cmp.compare_kv_fidelity("m", [(4, 64), TurboQuantKVMethod(bits=4)], artifacts_dir=tmp_path)
+    assert seen_control == {"stock": True, "turboquant": False}
+
+
+def test_compare_kv_ranks_on_quantizer_only_kl(monkeypatch, tmp_path):
+    """The ranked RankPoint quality is the quantizer-only KL, not the bundled one, for a
+    control-ran stock config; a native quantizer-only config (no control) ranks on its own kl.
+    """
+    monkeypatch.setattr(cmp, "install_memory_caps", lambda: (0, 0))
+    monkeypatch.setattr(cmp, "_load_model", lambda model_id, revision: (object(), object()))
+    monkeypatch.setattr(cmp, "_kv_dims", lambda model: (16, 8, 64))
+    monkeypatch.setattr(
+        cmp,
+        "_load_corpus_for_kv",
+        lambda tokenizer, model_id, max_chunks, *, chunk_length: object(),
+    )
+
+    def fake_score(model, corpus, *, method, control=False, **kw):  # type: ignore[return]
+        if method.name == "stock":
+            return _fid_with_control(
+                (4, 64),
+                kl_mean=0.15,
+                kl_p99=0.20,
+                flip_rate=0.02,
+                control_mean=0.08,
+                control_p99=0.09,
+                control_flip_rate=0.005,
+            )
+        return _fid_method("turboquant", {"bits": 4, "seed": 42}, 0.05)
+
+    monkeypatch.setattr(cmp, "score_kv_config", fake_score)
+    report = cmp.compare_kv_fidelity(
+        "m", [(4, 64), TurboQuantKVMethod(bits=4)], artifacts_dir=tmp_path
+    )
+    stock_result = next(r for r in report.results if r.label == "4:64")
+    turbo_result = next(r for r in report.results if r.label == "turboquant:4")
+    assert stock_result.point is not None
+    assert stock_result.point.quality == 0.08  # control (quantizer-only), NOT bundled 0.15
+    assert stock_result.ranked_kl == 0.08
+    assert turbo_result.point is not None
+    assert turbo_result.point.quality == 0.05  # native quantizer-only, no control to prefer
+
+
+def test_compare_kv_logits_budget_error_becomes_skipped_no_partial(monkeypatch, tmp_path):
+    """A LogitsBudgetError from score_kv_config isolates that config as a 'skipped' row with
+    the gate's message, writes NO partial for it, and lets the run complete with the other
+    config scored normally.
+    """
+    reports = {
+        (4, 64): LogitsBudgetError("chunk_length=4096: paired fp32 logits peak too large"),
+        (8, 64): _fid((8, 64), 0.01),
+    }
+    _patch_kv_compare(monkeypatch, reports)
+    report = cmp.compare_kv_fidelity("m", [(4, 64), (8, 64)], artifacts_dir=tmp_path)
+
+    skipped = next(r for r in report.results if r.label == "4:64")
+    assert skipped.status == "skipped"
+    assert skipped.report is None
+    assert skipped.point is None
+    assert "too large" in (skipped.excluded_reason or "")
+    assert not (tmp_path / "4_64.json").exists()
+
+    good = next(r for r in report.results if r.label == "8:64")
+    assert good.status == "ok"
+    assert "8:64" in report.frontier
+
+
+def test_compare_kv_plain_corpus_error_becomes_failed(monkeypatch, tmp_path):
+    """A plain CorpusError (not the LogitsBudgetError subclass) is isolated as a 'failed' row
+    via the generic handler — distinguishing it from the LogitsBudgetError-specific skip path.
+    A partial IS still written for a 'failed' row (unlike the skip path).
+    """
+    reports = {
+        (4, 64): CorpusError("corpus contains a token id outside the model's vocab_size"),
+        (8, 64): _fid((8, 64), 0.01),
+    }
+    _patch_kv_compare(monkeypatch, reports)
+    report = cmp.compare_kv_fidelity("m", [(4, 64), (8, 64)], artifacts_dir=tmp_path)
+
+    failed = next(r for r in report.results if r.label == "4:64")
+    assert failed.status == "failed"
+    assert failed.error_type == "CorpusError"
+    assert (tmp_path / "4_64.json").exists()
+
+
+def test_compare_kv_schema_3_partial_recomputes(monkeypatch, tmp_path):
+    """A partial written under the pre-Task-9 schema (schema_version=3, no ranked_footing)
+    must NOT be resumed — the ranking-footing upgrade recomputes every old KV partial.
+    """
+    rep = _fid((4, 64), 0.09)
+    (tmp_path / "4_64.json").write_text(
+        _kv_partial_with_identity(rep, 1000, bits=4, group_size=64, schema_version=3)
+    )
+    reports = {(4, 64): _fid((4, 64), 0.09), (8, 64): _fid((8, 64), 0.01)}
+    calls = _patch_kv_compare(monkeypatch, reports)
+    cmp.compare_kv_fidelity("m", [(4, 64), (8, 64)], artifacts_dir=tmp_path)
+    assert (4, 64) in calls, "schema_version=3 partial must not resume under schema 4"
+
+
+def test_kv_partial_with_ranked_footing_resumes(monkeypatch, tmp_path):
+    """A partial built by the current `_kv_partial_with_identity` (which now carries
+    `ranked_footing`) still resumes correctly — reds if the identity dict written by
+    production code and the one built by the test helper drift apart.
+    """
+    rep = _fid((4, 64), 0.09)
+    (tmp_path / "4_64.json").write_text(_kv_partial_with_identity(rep, 1000, bits=4, group_size=64))
+    reports = {(8, 64): _fid((8, 64), 0.01)}
+    calls = _patch_kv_compare(monkeypatch, reports)
+    cmp.compare_kv_fidelity("m", [(4, 64), (8, 64)], artifacts_dir=tmp_path)
+    assert (4, 64) not in calls, "helper-built partial (with ranked_footing) must still resume"
+    assert (8, 64) in calls
+
+
+def test_kv_run_identity_carries_ranked_footing(monkeypatch, tmp_path):
+    """A freshly-scored KV partial's run_identity records the constant ranking footing."""
+    reports = {(4, 64): _fid((4, 64), 0.09), (8, 64): _fid((8, 64), 0.01)}
+    _patch_kv_compare(monkeypatch, reports)
+    cmp.compare_kv_fidelity("m", [(4, 64), (8, 64)], artifacts_dir=tmp_path)
+    ident = json.loads((tmp_path / "4_64.json").read_text())["run_identity"]
+    assert ident["ranked_footing"] == "quantizer_only"
+
+
+def test_compare_kv_isolates_partial_with_invalid_ranked_verdict(monkeypatch, tmp_path):
+    """A partial carrying a garbage `ranked_verdict` (not in VALID_VERDICTS) is isolated as a
+    'failed' CorruptPartial row, not left to crash the whole compare run.
+
+    Reds if a garbage ranked_verdict crashes the whole compare instead of isolating the row:
+    with no validation, this row keeps its RankPoint and enters `assemble_comparison_report`'s
+    qualifying-set computation under `--min-tier`, which calls `tier_rank("excellent")` and
+    raises an uncaught ValueError — the entire run aborts instead of the other config still
+    ranking normally.
+    """
+    rep = _fid((4, 64), 0.09)
+    env = json.loads(_kv_partial_with_identity(rep, 1000, bits=4, group_size=64))
+    env["ranked_kl"] = 0.09
+    env["ranked_verdict"] = "excellent"  # not in VALID_VERDICTS
+    env["ranked_footing"] = "quantizer_only"
+    (tmp_path / "4_64.json").write_text(json.dumps(env))
+
+    reports = {(8, 64): _fid((8, 64), 0.01)}
+    calls = _patch_kv_compare(monkeypatch, reports)
+
+    # Must NOT raise, even with a --min-tier budget that forces tier_rank(ranked_verdict).
+    report = cmp.compare_kv_fidelity(
+        "m", [(4, 64), (8, 64)], min_tier="good", artifacts_dir=tmp_path
+    )
+
+    assert (4, 64) not in calls, "the corrupt partial resumes (identity matches); not re-scored"
+
+    bad = next(r for r in report.results if r.label == "4:64")
+    assert bad.status == "failed"
+    assert bad.error_type == "CorruptPartial"
+    assert "excellent" in (bad.message or "")
+    assert bad.point is None
+    assert "4:64" not in report.frontier
+
+    good = next(r for r in report.results if r.label == "8:64")
+    assert good.status == "ok"
+    assert "8:64" in report.frontier

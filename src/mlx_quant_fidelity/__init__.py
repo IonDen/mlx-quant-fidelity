@@ -5,9 +5,11 @@ from mlx_quant_fidelity.badge import badge_color, badge_for_report, render_badge
 from mlx_quant_fidelity.errors import MethodUnavailableError
 from mlx_quant_fidelity.probes.kv import measure_kv_fidelity
 from mlx_quant_fidelity.probes.kv_methods import (
+    AffineKVMethod,
     KVCacheMethod,
     StockKVMethod,
     TurboQuantKVMethod,
+    TurboQuantVOnlyKVMethod,
     parse_method_spec,
 )
 from mlx_quant_fidelity.probes.weights import measure_weight_fidelity
@@ -15,12 +17,14 @@ from mlx_quant_fidelity.report import ComparisonReport, FidelityReport, WeightFi
 from mlx_quant_fidelity.runners.compare import compare_kv_fidelity, compare_weight_fidelity
 
 __all__ = [
+    "AffineKVMethod",
     "ComparisonReport",
     "FidelityReport",
     "KVCacheMethod",
     "MethodUnavailableError",
     "StockKVMethod",
     "TurboQuantKVMethod",
+    "TurboQuantVOnlyKVMethod",
     "WeightFidelityReport",
     "__version__",
     "badge_color",

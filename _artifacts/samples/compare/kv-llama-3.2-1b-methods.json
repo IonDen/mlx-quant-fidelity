@@ -16,11 +16,24 @@
     [
       "4:64",
       "turboquant:4"
+    ],
+    [
+      "affine:8:2",
+      "turboquant:4"
+    ],
+    [
+      "turboquant-vonly:3",
+      "affine:8:4"
+    ],
+    [
+      "turboquant-vonly:4",
+      "8:64"
     ]
   ],
   "frontier": [
     "turboquant:3",
     "turboquant:4",
+    "affine:8:4",
     "8:64"
   ],
   "mlx_lm_version": "0.31.3",
@@ -39,10 +52,20 @@
       "point": {
         "cost_bytes": 17408,
         "label": "8:64",
-        "quality": 0.0004305653305290256
+        "quality": 0.00042820526645053527
       },
+      "ranked_footing": "quantizer_only",
+      "ranked_kl": 0.00042820526645053527,
+      "ranked_verdict": "marginal",
       "report": {
         "cache_supported": true,
+        "control_flip_rate": 0.012074363992172212,
+        "control_kl": {
+          "max": 0.05661579966545105,
+          "mean": 0.00042820526645053527,
+          "median": 0.00027343115652911365,
+          "p99": 0.002842790298163892
+        },
         "corpus": {
           "bos_policy": "none",
           "chunk_length": 512,
@@ -55,6 +78,7 @@
           "tokenizer_id": "mlx-community/Llama-3.2-1B-Instruct-4bit"
         },
         "device": "Apple M1 Max, 32 GB",
+        "drift_footing": "bundled",
         "flip_rate": 0.012583170254403132,
         "kl": {
           "max": 0.04656221345067024,
@@ -138,14 +162,15 @@
         "model_revision": "08231374eeacb049a0eade7922910865b8fce912",
         "n_chunks": 100,
         "n_positions": 51100,
-        "peak_memory_bytes": 2440798457,
+        "peak_memory_bytes": 2557158726,
         "perplexity_delta": 0.015172139713783395,
         "perplexity_quant": 22.956222423277037,
         "perplexity_ref": 22.941050283563253,
         "quantize_mode": "stress",
         "quantize_start": 0,
         "verdict": "marginal",
-        "warnings": []
+        "warnings": [],
+        "working_set_bytes_per_token": 0
       },
       "status": "ok"
     },
@@ -157,10 +182,20 @@
       "point": {
         "cost_bytes": 9216,
         "label": "4:64",
-        "quality": 0.14773540842612012
+        "quality": 0.14845751504083918
       },
+      "ranked_footing": "quantizer_only",
+      "ranked_kl": 0.14845751504083918,
+      "ranked_verdict": "bad",
       "report": {
         "cache_supported": true,
+        "control_flip_rate": 0.20557729941291586,
+        "control_kl": {
+          "max": 4.985298156738281,
+          "mean": 0.14845751504083918,
+          "median": 0.0976184718310833,
+          "p99": 0.9571420365571983
+        },
         "corpus": {
           "bos_policy": "none",
           "chunk_length": 512,
@@ -173,6 +208,7 @@
           "tokenizer_id": "mlx-community/Llama-3.2-1B-Instruct-4bit"
         },
         "device": "Apple M1 Max, 32 GB",
+        "drift_footing": "bundled",
         "flip_rate": 0.20483365949119373,
         "kl": {
           "max": 6.249123573303223,
@@ -256,14 +292,15 @@
         "model_revision": "08231374eeacb049a0eade7922910865b8fce912",
         "n_chunks": 100,
         "n_positions": 51100,
-        "peak_memory_bytes": 2436341997,
+        "peak_memory_bytes": 2618009878,
         "perplexity_delta": 4.121097638366695,
         "perplexity_quant": 27.06214792192995,
         "perplexity_ref": 22.941050283563253,
         "quantize_mode": "stress",
         "quantize_start": 0,
         "verdict": "bad",
-        "warnings": []
+        "warnings": [],
+        "working_set_bytes_per_token": 0
       },
       "status": "ok"
     },
@@ -277,8 +314,13 @@
         "label": "turboquant:4",
         "quality": 0.08252853838752101
       },
+      "ranked_footing": "quantizer_only",
+      "ranked_kl": 0.08252853838752101,
+      "ranked_verdict": "bad",
       "report": {
         "cache_supported": true,
+        "control_flip_rate": null,
+        "control_kl": null,
         "corpus": {
           "bos_policy": "none",
           "chunk_length": 512,
@@ -291,6 +333,7 @@
           "tokenizer_id": "mlx-community/Llama-3.2-1B-Instruct-4bit"
         },
         "device": "Apple M1 Max, 32 GB",
+        "drift_footing": "quantizer_only",
         "flip_rate": 0.15816046966731898,
         "kl": {
           "max": 3.815145969390869,
@@ -382,7 +425,7 @@
         "model_revision": "08231374eeacb049a0eade7922910865b8fce912",
         "n_chunks": 100,
         "n_positions": 51100,
-        "peak_memory_bytes": 2438467821,
+        "peak_memory_bytes": 2569506055,
         "perplexity_delta": 2.25544917037238,
         "perplexity_quant": 25.196499453935633,
         "perplexity_ref": 22.941050283563253,
@@ -390,8 +433,9 @@
         "quantize_start": 0,
         "verdict": "bad",
         "warnings": [
-          "turboquant: the quantized run dequantizes on fetch and rides standard SDPA in prefill (the port's fused kernel is decode-only and not exercised), so drift measures the quantizer round-trip only, while stock bundles quantizer + quantized-attention numerics; uniform-bit cache at the port's default seed \u2014 its asymmetric and layer-adaptive configurations are not measured; resident memory in this path is the stored bytes plus two full-precision working copies \u2014 roughly 2.3x an fp16 cache on Llama-3.2-1B geometry, derived from the port's retained dequantization buffers \u2014 so peak memory does not show the compression."
-        ]
+          "turboquant: the quantized run dequantizes on fetch and rides standard SDPA in prefill (the port's fused kernel is decode-only and not exercised), so drift measures the quantizer round-trip only, while stock bundles quantizer + quantized-attention numerics; uniform-bit cache at the port's default seed \u2014 its V-only configuration is measured separately (`turboquant-vonly`); its layer-adaptive configuration is not \u2014 and its `make_adaptive_cache` silently ignores the documented `k_bits`/`v_bits` parameters at the pinned commit; resident memory in this path is the stored bytes plus two full-precision working copies \u2014 roughly 2.3x an fp16 cache on Llama-3.2-1B geometry, derived from the port's retained dequantization buffers \u2014 so peak memory does not show the compression."
+        ],
+        "working_set_bytes_per_token": 65536
       },
       "status": "ok"
     },
@@ -405,8 +449,13 @@
         "label": "turboquant:3",
         "quality": 0.4229192788570247
       },
+      "ranked_footing": "quantizer_only",
+      "ranked_kl": 0.4229192788570247,
+      "ranked_verdict": "bad",
       "report": {
         "cache_supported": true,
+        "control_flip_rate": null,
+        "control_kl": null,
         "corpus": {
           "bos_policy": "none",
           "chunk_length": 512,
@@ -419,6 +468,7 @@
           "tokenizer_id": "mlx-community/Llama-3.2-1B-Instruct-4bit"
         },
         "device": "Apple M1 Max, 32 GB",
+        "drift_footing": "quantizer_only",
         "flip_rate": 0.3259491193737769,
         "kl": {
           "max": 9.891815185546875,
@@ -510,7 +560,7 @@
         "model_revision": "08231374eeacb049a0eade7922910865b8fce912",
         "n_chunks": 100,
         "n_positions": 51100,
-        "peak_memory_bytes": 2437941445,
+        "peak_memory_bytes": 2634498852,
         "perplexity_delta": 12.850533441038014,
         "perplexity_quant": 35.79158372460127,
         "perplexity_ref": 22.941050283563253,
@@ -518,8 +568,539 @@
         "quantize_start": 0,
         "verdict": "bad",
         "warnings": [
-          "turboquant: the quantized run dequantizes on fetch and rides standard SDPA in prefill (the port's fused kernel is decode-only and not exercised), so drift measures the quantizer round-trip only, while stock bundles quantizer + quantized-attention numerics; uniform-bit cache at the port's default seed \u2014 its asymmetric and layer-adaptive configurations are not measured; resident memory in this path is the stored bytes plus two full-precision working copies \u2014 roughly 2.3x an fp16 cache on Llama-3.2-1B geometry, derived from the port's retained dequantization buffers \u2014 so peak memory does not show the compression."
-        ]
+          "turboquant: the quantized run dequantizes on fetch and rides standard SDPA in prefill (the port's fused kernel is decode-only and not exercised), so drift measures the quantizer round-trip only, while stock bundles quantizer + quantized-attention numerics; uniform-bit cache at the port's default seed \u2014 its V-only configuration is measured separately (`turboquant-vonly`); its layer-adaptive configuration is not \u2014 and its `make_adaptive_cache` silently ignores the documented `k_bits`/`v_bits` parameters at the pinned commit; resident memory in this path is the stored bytes plus two full-precision working copies \u2014 roughly 2.3x an fp16 cache on Llama-3.2-1B geometry, derived from the port's retained dequantization buffers \u2014 so peak memory does not show the compression."
+        ],
+        "working_set_bytes_per_token": 65536
+      },
+      "status": "ok"
+    },
+    {
+      "error_type": null,
+      "excluded_reason": null,
+      "label": "turboquant-vonly:4",
+      "message": null,
+      "point": {
+        "cost_bytes": 37376,
+        "label": "turboquant-vonly:4",
+        "quality": 0.007787304360382574
+      },
+      "ranked_footing": "quantizer_only",
+      "ranked_kl": 0.007787304360382574,
+      "ranked_verdict": "bad",
+      "report": {
+        "cache_supported": true,
+        "control_flip_rate": null,
+        "control_kl": null,
+        "corpus": {
+          "bos_policy": "none",
+          "chunk_length": 512,
+          "final_chunk_policy": "drop",
+          "n_tokens": 51200,
+          "name": "wikitext-2-raw",
+          "normalization": "raw",
+          "split": "test",
+          "stride": 512,
+          "tokenizer_id": "mlx-community/Llama-3.2-1B-Instruct-4bit"
+        },
+        "device": "Apple M1 Max, 32 GB",
+        "drift_footing": "quantizer_only",
+        "flip_rate": 0.05082191780821918,
+        "kl": {
+          "max": 0.5293738842010498,
+          "mean": 0.007787304360382574,
+          "median": 0.004995390307158232,
+          "p99": 0.05203970983624463
+        },
+        "kl_by_depth": [
+          {
+            "end": 63,
+            "kl_mean": 0.011711987534018005,
+            "kl_p99": 0.07506413109600552,
+            "n_positions": 6300,
+            "start": 0
+          },
+          {
+            "end": 127,
+            "kl_mean": 0.008258168722730233,
+            "kl_p99": 0.0497674259543419,
+            "n_positions": 6400,
+            "start": 63
+          },
+          {
+            "end": 191,
+            "kl_mean": 0.007676000291515166,
+            "kl_p99": 0.05289360255002976,
+            "n_positions": 6400,
+            "start": 127
+          },
+          {
+            "end": 255,
+            "kl_mean": 0.007651526986283139,
+            "kl_p99": 0.052787079960107904,
+            "n_positions": 6400,
+            "start": 191
+          },
+          {
+            "end": 319,
+            "kl_mean": 0.007131650664194831,
+            "kl_p99": 0.044954554066062004,
+            "n_positions": 6400,
+            "start": 255
+          },
+          {
+            "end": 383,
+            "kl_mean": 0.006806913086670043,
+            "kl_p99": 0.04815991554409266,
+            "n_positions": 6400,
+            "start": 319
+          },
+          {
+            "end": 447,
+            "kl_mean": 0.006610373454582312,
+            "kl_p99": 0.04097040601074708,
+            "n_positions": 6400,
+            "start": 383
+          },
+          {
+            "end": 511,
+            "kl_mean": 0.006513137317654909,
+            "kl_p99": 0.04344043612480164,
+            "n_positions": 6400,
+            "start": 447
+          }
+        ],
+        "kv_bits": null,
+        "kv_group_size": null,
+        "kv_method": "turboquant-vonly",
+        "kv_method_params": {
+          "seed": 42,
+          "v_bits": 4
+        },
+        "kv_method_provenance": {
+          "commit": "6e928d715595dee9f6b6cc3968baa44e1f408d28",
+          "dist_version": "0.3.0",
+          "module_version": "0.3.0",
+          "no_v_buffer": "false",
+          "package": "turboquant-mlx",
+          "pinned_commit": "6e928d715595dee9f6b6cc3968baa44e1f408d28",
+          "v_seed": "43"
+        },
+        "measured_kv_bytes_per_token": 37376,
+        "mlx_lm_version": "0.31.3",
+        "mlx_version": "0.31.2",
+        "model_id": "mlx-community/Llama-3.2-1B-Instruct-4bit",
+        "model_revision": "08231374eeacb049a0eade7922910865b8fce912",
+        "n_chunks": 100,
+        "n_positions": 51100,
+        "peak_memory_bytes": 2641083699,
+        "perplexity_delta": 0.12282417374674637,
+        "perplexity_quant": 23.06387445731,
+        "perplexity_ref": 22.941050283563253,
+        "quantize_mode": "stress",
+        "quantize_start": 0,
+        "verdict": "bad",
+        "warnings": [
+          "turboquant-vonly: K stays fp16 and rides standard SDPA; only V is quantized-and-dequantized on fetch, so drift measures the V quantizer round-trip only, at the port's default seed.",
+          "turboquant-vonly: the pinned port stores an unused fp16 copy of V in its inner KVCache, so stored bytes EXCEED a plain fp16 cache \u2014 the V-only value at this commit is V-compression quality, not memory."
+        ],
+        "working_set_bytes_per_token": 32768
+      },
+      "status": "ok"
+    },
+    {
+      "error_type": null,
+      "excluded_reason": null,
+      "label": "turboquant-vonly:3",
+      "message": null,
+      "point": {
+        "cost_bytes": 36864,
+        "label": "turboquant-vonly:3",
+        "quality": 0.029727023402755754
+      },
+      "ranked_footing": "quantizer_only",
+      "ranked_kl": 0.029727023402755754,
+      "ranked_verdict": "bad",
+      "report": {
+        "cache_supported": true,
+        "control_flip_rate": null,
+        "control_kl": null,
+        "corpus": {
+          "bos_policy": "none",
+          "chunk_length": 512,
+          "final_chunk_policy": "drop",
+          "n_tokens": 51200,
+          "name": "wikitext-2-raw",
+          "normalization": "raw",
+          "split": "test",
+          "stride": 512,
+          "tokenizer_id": "mlx-community/Llama-3.2-1B-Instruct-4bit"
+        },
+        "device": "Apple M1 Max, 32 GB",
+        "drift_footing": "quantizer_only",
+        "flip_rate": 0.09741682974559687,
+        "kl": {
+          "max": 2.7788350582122803,
+          "mean": 0.029727023402755754,
+          "median": 0.019229470752179623,
+          "p99": 0.2025356210768225
+        },
+        "kl_by_depth": [
+          {
+            "end": 63,
+            "kl_mean": 0.04512275146176444,
+            "kl_p99": 0.2947006350755694,
+            "n_positions": 6300,
+            "start": 0
+          },
+          {
+            "end": 127,
+            "kl_mean": 0.03163982517871475,
+            "kl_p99": 0.21565612971782744,
+            "n_positions": 6400,
+            "start": 63
+          },
+          {
+            "end": 191,
+            "kl_mean": 0.029022880111689346,
+            "kl_p99": 0.18309434294700633,
+            "n_positions": 6400,
+            "start": 127
+          },
+          {
+            "end": 255,
+            "kl_mean": 0.028168639994953962,
+            "kl_p99": 0.17676477760076564,
+            "n_positions": 6400,
+            "start": 191
+          },
+          {
+            "end": 319,
+            "kl_mean": 0.027012229670709046,
+            "kl_p99": 0.18435679703950897,
+            "n_positions": 6400,
+            "start": 255
+          },
+          {
+            "end": 383,
+            "kl_mean": 0.026062340478939808,
+            "kl_p99": 0.1807367961108688,
+            "n_positions": 6400,
+            "start": 319
+          },
+          {
+            "end": 447,
+            "kl_mean": 0.025666528032250967,
+            "kl_p99": 0.15991796061396632,
+            "n_positions": 6400,
+            "start": 383
+          },
+          {
+            "end": 511,
+            "kl_mean": 0.025361550543945732,
+            "kl_p99": 0.1671908839046955,
+            "n_positions": 6400,
+            "start": 447
+          }
+        ],
+        "kv_bits": null,
+        "kv_group_size": null,
+        "kv_method": "turboquant-vonly",
+        "kv_method_params": {
+          "seed": 42,
+          "v_bits": 3
+        },
+        "kv_method_provenance": {
+          "commit": "6e928d715595dee9f6b6cc3968baa44e1f408d28",
+          "dist_version": "0.3.0",
+          "module_version": "0.3.0",
+          "no_v_buffer": "false",
+          "package": "turboquant-mlx",
+          "pinned_commit": "6e928d715595dee9f6b6cc3968baa44e1f408d28",
+          "v_seed": "43"
+        },
+        "measured_kv_bytes_per_token": 36864,
+        "mlx_lm_version": "0.31.3",
+        "mlx_version": "0.31.2",
+        "model_id": "mlx-community/Llama-3.2-1B-Instruct-4bit",
+        "model_revision": "08231374eeacb049a0eade7922910865b8fce912",
+        "n_chunks": 100,
+        "n_positions": 51100,
+        "peak_memory_bytes": 2640320238,
+        "perplexity_delta": 0.47452414450993885,
+        "perplexity_quant": 23.415574428073192,
+        "perplexity_ref": 22.941050283563253,
+        "quantize_mode": "stress",
+        "quantize_start": 0,
+        "verdict": "bad",
+        "warnings": [
+          "turboquant-vonly: K stays fp16 and rides standard SDPA; only V is quantized-and-dequantized on fetch, so drift measures the V quantizer round-trip only, at the port's default seed.",
+          "turboquant-vonly: the pinned port stores an unused fp16 copy of V in its inner KVCache, so stored bytes EXCEED a plain fp16 cache \u2014 the V-only value at this commit is V-compression quality, not memory."
+        ],
+        "working_set_bytes_per_token": 32768
+      },
+      "status": "ok"
+    },
+    {
+      "error_type": null,
+      "excluded_reason": null,
+      "label": "affine:8:4",
+      "message": null,
+      "point": {
+        "cost_bytes": 13312,
+        "label": "affine:8:4",
+        "quality": 0.011987392001219078
+      },
+      "ranked_footing": "quantizer_only",
+      "ranked_kl": 0.011987392001219078,
+      "ranked_verdict": "bad",
+      "report": {
+        "cache_supported": true,
+        "control_flip_rate": null,
+        "control_kl": null,
+        "corpus": {
+          "bos_policy": "none",
+          "chunk_length": 512,
+          "final_chunk_policy": "drop",
+          "n_tokens": 51200,
+          "name": "wikitext-2-raw",
+          "normalization": "raw",
+          "split": "test",
+          "stride": 512,
+          "tokenizer_id": "mlx-community/Llama-3.2-1B-Instruct-4bit"
+        },
+        "device": "Apple M1 Max, 32 GB",
+        "drift_footing": "quantizer_only",
+        "flip_rate": 0.0628375733855186,
+        "kl": {
+          "max": 1.7478713989257812,
+          "mean": 0.011987392001219078,
+          "median": 0.0074628854636102915,
+          "p99": 0.08180131874978545
+        },
+        "kl_by_depth": [
+          {
+            "end": 63,
+            "kl_mean": 0.01867492159447249,
+            "kl_p99": 0.12532094940543181,
+            "n_positions": 6300,
+            "start": 0
+          },
+          {
+            "end": 127,
+            "kl_mean": 0.012965012462800019,
+            "kl_p99": 0.09034711971879013,
+            "n_positions": 6400,
+            "start": 63
+          },
+          {
+            "end": 191,
+            "kl_mean": 0.012056122368190642,
+            "kl_p99": 0.08271219618618489,
+            "n_positions": 6400,
+            "start": 127
+          },
+          {
+            "end": 255,
+            "kl_mean": 0.011012815784871321,
+            "kl_p99": 0.07434568107128156,
+            "n_positions": 6400,
+            "start": 191
+          },
+          {
+            "end": 319,
+            "kl_mean": 0.010886139534730522,
+            "kl_p99": 0.07428938902914527,
+            "n_positions": 6400,
+            "start": 255
+          },
+          {
+            "end": 383,
+            "kl_mean": 0.010445515292506364,
+            "kl_p99": 0.07431770645081999,
+            "n_positions": 6400,
+            "start": 319
+          },
+          {
+            "end": 447,
+            "kl_mean": 0.009971484999482954,
+            "kl_p99": 0.06432282559573653,
+            "n_positions": 6400,
+            "start": 383
+          },
+          {
+            "end": 511,
+            "kl_mean": 0.009991616622592901,
+            "kl_p99": 0.06421237081289295,
+            "n_positions": 6400,
+            "start": 447
+          }
+        ],
+        "kv_bits": null,
+        "kv_group_size": 64,
+        "kv_method": "affine",
+        "kv_method_params": {
+          "group_size": 64,
+          "k_bits": 8,
+          "v_bits": 4
+        },
+        "kv_method_provenance": {
+          "group_size": "64",
+          "k_bits": "8",
+          "known_runtime": "arozanov/mlx-lm@feature/turboquant-kv-cache (MixedQuantKVCache, mlx-lm 0.31.3) \u2014 not upstream mlx-lm",
+          "package": "mlx",
+          "v_bits": "4",
+          "version": "0.31.2"
+        },
+        "measured_kv_bytes_per_token": 13312,
+        "mlx_lm_version": "0.31.3",
+        "mlx_version": "0.31.2",
+        "model_id": "mlx-community/Llama-3.2-1B-Instruct-4bit",
+        "model_revision": "08231374eeacb049a0eade7922910865b8fce912",
+        "n_chunks": 100,
+        "n_positions": 51100,
+        "peak_memory_bytes": 2554825985,
+        "perplexity_delta": 0.21651651348132717,
+        "perplexity_quant": 23.15756679704458,
+        "perplexity_ref": 22.941050283563253,
+        "quantize_mode": "stress",
+        "quantize_start": 0,
+        "verdict": "bad",
+        "warnings": [
+          "affine: per-tensor asymmetric bits have no shipped runtime \u2014 upstream mlx-lm's QuantizedKVCache is symmetric; the only known implementation is an idle mlx-lm fork. The probe dequantizes on fetch and rides standard SDPA, so this drift is the quantizer round-trip only, for a hypothetical deployment."
+        ],
+        "working_set_bytes_per_token": 32768
+      },
+      "status": "ok"
+    },
+    {
+      "error_type": null,
+      "excluded_reason": null,
+      "label": "affine:8:2",
+      "message": null,
+      "point": {
+        "cost_bytes": 11264,
+        "label": "affine:8:2",
+        "quality": 0.2180266530585127
+      },
+      "ranked_footing": "quantizer_only",
+      "ranked_kl": 0.2180266530585127,
+      "ranked_verdict": "bad",
+      "report": {
+        "cache_supported": true,
+        "control_flip_rate": null,
+        "control_kl": null,
+        "corpus": {
+          "bos_policy": "none",
+          "chunk_length": 512,
+          "final_chunk_policy": "drop",
+          "n_tokens": 51200,
+          "name": "wikitext-2-raw",
+          "normalization": "raw",
+          "split": "test",
+          "stride": 512,
+          "tokenizer_id": "mlx-community/Llama-3.2-1B-Instruct-4bit"
+        },
+        "device": "Apple M1 Max, 32 GB",
+        "drift_footing": "quantizer_only",
+        "flip_rate": 0.23908023483365948,
+        "kl": {
+          "max": 7.913250923156738,
+          "mean": 0.2180266530585127,
+          "median": 0.14795389771461487,
+          "p99": 1.3105098998546636
+        },
+        "kl_by_depth": [
+          {
+            "end": 63,
+            "kl_mean": 0.29847069328357945,
+            "kl_p99": 1.7472157287597667,
+            "n_positions": 6300,
+            "start": 0
+          },
+          {
+            "end": 127,
+            "kl_mean": 0.23100971214788388,
+            "kl_p99": 1.3776886367797883,
+            "n_positions": 6400,
+            "start": 63
+          },
+          {
+            "end": 191,
+            "kl_mean": 0.2153506575386473,
+            "kl_p99": 1.2465614771842966,
+            "n_positions": 6400,
+            "start": 127
+          },
+          {
+            "end": 255,
+            "kl_mean": 0.21284995902745096,
+            "kl_p99": 1.3066109263896946,
+            "n_positions": 6400,
+            "start": 191
+          },
+          {
+            "end": 319,
+            "kl_mean": 0.2029422466834626,
+            "kl_p99": 1.172537525892261,
+            "n_positions": 6400,
+            "start": 255
+          },
+          {
+            "end": 383,
+            "kl_mean": 0.19467415978385816,
+            "kl_p99": 1.224120409488678,
+            "n_positions": 6400,
+            "start": 319
+          },
+          {
+            "end": 447,
+            "kl_mean": 0.19789978907305794,
+            "kl_p99": 1.1695699679851543,
+            "n_positions": 6400,
+            "start": 383
+          },
+          {
+            "end": 511,
+            "kl_mean": 0.19227294505867804,
+            "kl_p99": 1.1687911427021058,
+            "n_positions": 6400,
+            "start": 447
+          }
+        ],
+        "kv_bits": null,
+        "kv_group_size": 64,
+        "kv_method": "affine",
+        "kv_method_params": {
+          "group_size": 64,
+          "k_bits": 8,
+          "v_bits": 2
+        },
+        "kv_method_provenance": {
+          "group_size": "64",
+          "k_bits": "8",
+          "known_runtime": "arozanov/mlx-lm@feature/turboquant-kv-cache (MixedQuantKVCache, mlx-lm 0.31.3) \u2014 not upstream mlx-lm",
+          "package": "mlx",
+          "v_bits": "2",
+          "version": "0.31.2"
+        },
+        "measured_kv_bytes_per_token": 11264,
+        "mlx_lm_version": "0.31.3",
+        "mlx_version": "0.31.2",
+        "model_id": "mlx-community/Llama-3.2-1B-Instruct-4bit",
+        "model_revision": "08231374eeacb049a0eade7922910865b8fce912",
+        "n_chunks": 100,
+        "n_positions": 51100,
+        "peak_memory_bytes": 2619313441,
+        "perplexity_delta": 5.372875147346974,
+        "perplexity_quant": 28.313925430910228,
+        "perplexity_ref": 22.941050283563253,
+        "quantize_mode": "stress",
+        "quantize_start": 0,
+        "verdict": "bad",
+        "warnings": [
+          "affine: per-tensor asymmetric bits have no shipped runtime \u2014 upstream mlx-lm's QuantizedKVCache is symmetric; the only known implementation is an idle mlx-lm fork. The probe dequantizes on fetch and rides standard SDPA, so this drift is the quantizer round-trip only, for a hypothetical deployment."
+        ],
+        "working_set_bytes_per_token": 32768
       },
       "status": "ok"
     }

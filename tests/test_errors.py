@@ -48,3 +48,10 @@ def test_quantize_start_error_is_value_error_too():
 
     assert issubclass(QuantizeStartError, QuantFidelityError)
     assert issubclass(QuantizeStartError, ValueError)
+
+
+def test_logits_budget_error_is_corpus_error():
+    from mlx_quant_fidelity.errors import CorpusError, LogitsBudgetError, QuantFidelityError
+
+    assert issubclass(LogitsBudgetError, CorpusError)
+    assert issubclass(LogitsBudgetError, QuantFidelityError)

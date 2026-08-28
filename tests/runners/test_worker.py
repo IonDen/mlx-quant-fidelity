@@ -123,3 +123,55 @@ def test_worker_forwards_quant_reference_and_max_chunks(tmp_path, monkeypatch):
     assert received["quant"] == "q4"  # first positional is the quant repo
     assert received["reference"] == "ref"  # a quant/reference swap would fail here
     assert received["kw"]["max_chunks"] == 3  # type: ignore[index]
+
+
+def test_worker_forwards_quant_and_reference_revision(tmp_path, monkeypatch):
+    """--quant-revision/--reference-revision reach measure_weight_fidelity by name."""
+    received: dict[str, object] = {}
+
+    def fake(quant, reference, **kw):
+        received["kw"] = kw
+        return _wreport("q4", 0.09, 4200)
+
+    monkeypatch.setattr(_worker, "measure_weight_fidelity", fake)
+    out = tmp_path / "q4.json"
+    rc = _worker.run_weight_worker(
+        [
+            "--quant",
+            "q4",
+            "--reference",
+            "ref",
+            "--out",
+            str(out),
+            "--quant-revision",
+            "rev-q",
+            "--reference-revision",
+            "rev-r",
+        ]
+    )
+    assert rc == 0
+    assert received["kw"]["quant_revision"] == "rev-q"  # type: ignore[index]
+    assert received["kw"]["reference_revision"] == "rev-r"  # type: ignore[index]
+
+
+def test_worker_ok_envelope_run_identity_includes_revisions(tmp_path, monkeypatch):
+    """The run_identity block records both revision pins, defaulting to None when unset."""
+    out = tmp_path / "q4.json"
+    monkeypatch.setattr(
+        _worker, "measure_weight_fidelity", lambda *a, **k: _wreport("q4", 0.09, 4200)
+    )
+    _worker.run_weight_worker(
+        [
+            "--quant",
+            "q4",
+            "--reference",
+            "ref",
+            "--out",
+            str(out),
+            "--quant-revision",
+            "rev-q",
+        ]
+    )
+    identity = json.loads(out.read_text())["run_identity"]
+    assert identity["quant_revision"] == "rev-q"
+    assert identity["reference_revision"] is None

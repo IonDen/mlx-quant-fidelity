@@ -24,17 +24,58 @@ class FakeFullCache:
         return ()
 
 
+class FakeControlCache:
+    """Control-lane stand-in: distinct marker so the fake model perturbs it separately."""
+
+    control_marker = True
+    offset = 4
+
+    @property
+    def state(self):
+        """Empty state — the fake model never reads cache contents."""
+        return ()
+
+
+class FakeControlMethod:
+    """What a stock-like FakeKVMethod's control_method() returns."""
+
+    name = "fake-control"
+    label = "fake-control"
+
+    def make_cache(self, *, n_layers):
+        """Fresh control caches."""
+        return [FakeControlCache() for _ in range(n_layers)]
+
+    def convert_prefix(self, fp_cache):
+        """Deployment boundary stand-in."""
+        return [FakeControlCache() for _ in fp_cache]
+
+
 class FakeKVMethod:
     """Drives score_kv_config with no MLX cache code; records what the probe asked of it."""
 
-    def __init__(self, *, convert_noop: bool = False, bytes_per_chunk: int = 144):
+    def __init__(
+        self,
+        *,
+        convert_noop: bool = False,
+        bytes_per_chunk: int = 144,
+        stock_like: bool = False,
+    ):
         self.convert_noop = convert_noop
         self.bytes_per_chunk = bytes_per_chunk
         self.calls: list[str] = []
+        self._stock_like = stock_like
+        if stock_like:
+
+            def _control():
+                self.calls.append("control_method")
+                return FakeControlMethod()
+
+            self.control_method = _control
 
     @property
     def name(self):
-        return "fake"
+        return "stock" if self._stock_like else "fake"
 
     @property
     def label(self):
@@ -68,6 +109,10 @@ class FakeKVMethod:
     def bytes_per_token(self, *, n_layers, n_kv_heads, head_dim):
         return 100 * n_layers
 
+    def working_set_bytes(self, *, window, n_layers, n_kv_heads, head_dim, dtype_bytes):
+        """No working-set model for the fake method; the seam's division must still handle 0."""
+        return 0
+
     def measured_bytes(self, cache):
         # default: 4 tokens * (8 words * 4 B + 4 B norm) = 144 B per layer; grows per call so a
         # "measure every chunk / keep the last" bug changes the recorded number
@@ -83,9 +128,14 @@ class FakeKVMethod:
 
 
 class FakeMethodModel:
-    """Peak on token 0 for a cache without ``.marker``; peak on token 1 with it."""
+    """Peak on token 0 with no marker; token 1 with ``.marker``; control-lane logic with
+    ``.control_marker`` (uniform ``control_gain`` at ``control_peak``, or position-keyed
+    when ``control_gain`` is the sentinel ``None``, for the slicing-oracle tests below).
+    """
 
-    def __init__(self, head_dim=64, kv_heads=None):
+    def __init__(self, head_dim=64, kv_heads=None, control_peak: int = 0, control_gain=5.0):
+        self.control_peak = control_peak
+        self.control_gain = control_gain
         self.args = type(
             "A",
             (),
@@ -100,7 +150,16 @@ class FakeMethodModel:
         )()
 
     def __call__(self, inp, cache=None):
-        bump = 1 if (cache is not None and getattr(cache[0], "marker", False)) else 0
         out = mx.zeros((1, inp.shape[1], 3))
-        out[:, :, bump] = 5.0
+        if cache is not None and getattr(cache[0], "control_marker", False):
+            if self.control_gain is None:
+                token_ids = inp[0]
+                gains = 4.0 + 0.5 * (token_ids % 2).astype(mx.float32)
+                out[:, :, 0] = gains
+            else:
+                out[:, :, self.control_peak] = self.control_gain
+        elif cache is not None and getattr(cache[0], "marker", False):
+            out[:, :, 1] = 5.0
+        else:
+            out[:, :, 0] = 5.0
         return out

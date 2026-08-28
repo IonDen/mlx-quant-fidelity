@@ -28,7 +28,7 @@ from mlx_quant_fidelity.probes.kv import (
 from mlx_quant_fidelity.probes.kv_methods import StockKVMethod
 
 # ---------------------------------------------------------------------------
-# Task 4.1 — pure helpers: capability gate, exact-zero guard, aggregation
+# regression: pure helpers — capability gate, exact-zero guard, aggregation
 # ---------------------------------------------------------------------------
 
 
@@ -58,7 +58,7 @@ def test_two_chunk_aggregation_combines_both():
 
 
 # ---------------------------------------------------------------------------
-# Task 4.2 — _score_chunk: teacher-forced loop, reduce/eval, KLD detection
+# regression: _score_chunk — teacher-forced loop, reduce/eval, KLD detection
 # ---------------------------------------------------------------------------
 
 
@@ -107,7 +107,7 @@ def test_score_chunk_identical_paths_is_exactly_zero():
 
 
 # ---------------------------------------------------------------------------
-# Task 4.5 — memory cap is installed BEFORE the model load (safety ordering)
+# regression: memory cap is installed BEFORE the model load (safety ordering)
 # ---------------------------------------------------------------------------
 
 
@@ -137,7 +137,7 @@ def test_measure_installs_caps_before_model_load(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Task 4.6 — empty-corpus / bad max_chunks raise a clean CorpusError before load
+# regression: empty-corpus / bad max_chunks raise a clean CorpusError before load
 # ---------------------------------------------------------------------------
 
 
@@ -163,7 +163,7 @@ def test_empty_corpus_raises_clean_error():
 
 
 # ---------------------------------------------------------------------------
-# Task 0009 — head_dim gate: group-size divisibility check before scoring
+# regression: head_dim gate — group-size divisibility check before scoring
 # ---------------------------------------------------------------------------
 
 
@@ -222,7 +222,7 @@ def test_kv_head_dim_zero_falls_back_to_derived():
 
 
 # ---------------------------------------------------------------------------
-# Task 4 — score_kv_config: extracted helper operating on an already-loaded model
+# regression: score_kv_config — extracted helper operating on an already-loaded model
 # ---------------------------------------------------------------------------
 
 
@@ -421,7 +421,7 @@ def test_score_kv_config_raises_exact_zero_when_quant_indistinguishable(monkeypa
 
 
 # ---------------------------------------------------------------------------
-# Task 5 — _score_chunk_deployment: split-forward scorer for deployment mode
+# regression: _score_chunk_deployment — split-forward scorer for deployment mode
 # ---------------------------------------------------------------------------
 
 
@@ -447,7 +447,7 @@ def test_score_chunk_deployment_boundary():
     n = 2
     ref_cache = [_FakeLayerCachePreQ()]
     quant_cache = [_FakeLayerCachePreQ()]  # full-precision; converted at the boundary
-    kl, flips, ref_nll, quant_nll = _score_chunk_deployment(
+    kl, flips, ref_nll, quant_nll, kl_c, flip_c = _score_chunk_deployment(
         model,
         ids,
         ref_cache,
@@ -460,10 +460,12 @@ def test_score_chunk_deployment_boundary():
     assert float(kl[:n].max()) == 0.0  # prefix exact-0 (offline)
     assert float(kl[n:].min()) > 0.0  # post-boundary drift engaged
     assert int(kl[n:].shape[0]) == len(ids) - 1 - n  # segment-2 length exactly L-1-N == 3
+    assert kl_c is None  # no control_method passed -> no control lane
+    assert flip_c is None
 
 
 # ---------------------------------------------------------------------------
-# Task 6 — score_kv_config deployment mode (quantize_start > 0)
+# regression: score_kv_config deployment mode (quantize_start > 0)
 # ---------------------------------------------------------------------------
 
 
@@ -666,7 +668,7 @@ def test_packed_width_message_offers_only_workable_bits():
 
 
 # ---------------------------------------------------------------------------
-# Task 5 — score_kv_config populates kl_by_depth in stress mode only
+# regression: score_kv_config populates kl_by_depth in stress mode only
 # ---------------------------------------------------------------------------
 
 
@@ -704,7 +706,7 @@ def test_unequal_chunks_warn_when_depth_suppressed(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Task 6 (0033 part 3) — chunk_length as a first-class knob + memory warning
+# regression: chunk_length as a first-class knob + memory warning
 # ---------------------------------------------------------------------------
 
 
@@ -831,6 +833,119 @@ def test_underivable_vocab_reports_unchecked_budget(monkeypatch):
     assert any("unchecked" in w.lower() for w in report.warnings)
 
 
+def test_preflight_below_warn_band_returns_none(monkeypatch):
+    """Reds if the zero-term path starts warning where 0.6.0 stayed silent."""
+    monkeypatch.setattr(kvmod, "compute_safe_caps_gb", lambda: (20, 22))
+    # est(512, 128k) = 7 * 511 * 128000 * 4 ~= 1.83 GiB < the 4 GiB warn band -> None
+    assert kvmod._preflight_logits_budget(512, 128_000) is None
+
+
+def test_preflight_warn_band_text_unchanged(monkeypatch):
+    """Reds if the zero-term path changes the legacy warning wording or threshold."""
+    monkeypatch.setattr(kvmod, "compute_safe_caps_gb", lambda: (20, 22))
+    # est(2048, 128k) = 7 * 2047 * 128000 * 4 ~= 6.8 GiB: above 4 GiB warn, under the 14 GiB gate
+    warning = kvmod._preflight_logits_budget(2048, 128_000)
+    assert warning is not None and "GiB per chunk" in warning  # noqa: PT018
+
+
+def test_control_bytes_tips_the_gate_with_drop_control_remedy(monkeypatch):
+    """Reds unless control_bytes adds to the gate estimate and the remedy names --control.
+
+    window=4096/vocab=128_000 squeaks under the 14.0 GiB gate (0.7 x the pinned 20 GiB wired
+    cap) with both extra terms at 0 (asserted below via margin > 0); tipping it by exactly
+    margin + 1 bytes of control_bytes proves the term is additive to the byte, not merely
+    "large enough to usually matter".
+    """
+    monkeypatch.setattr(kvmod, "compute_safe_caps_gb", lambda: (20, 22))
+    window, vocab = 4096, 128_000
+    gate = int(kvmod.LOGITS_BUDGET_FRACTION * 20 * 1024**3)
+    est = kvmod._paired_logits_bytes(window, vocab)
+    margin = gate - est
+    assert margin > 0  # sanity: confirms the zero-term estimate really is under the gate
+    with pytest.raises(kvmod.LogitsBudgetError) as excinfo:
+        kvmod._preflight_logits_budget(window, vocab, control_bytes=margin + 1)
+    assert "drop --control" in str(excinfo.value)
+
+
+def test_method_ws_bytes_tips_the_gate_without_drop_control_remedy(monkeypatch):
+    """Reds unless method_ws_bytes adds to the gate estimate without naming --control.
+
+    Same margin+1 tip as the control_bytes test above, but via method_ws_bytes -- the remedy
+    must NOT suggest dropping --control when control was never the cause.
+    """
+    monkeypatch.setattr(kvmod, "compute_safe_caps_gb", lambda: (20, 22))
+    window, vocab = 4096, 128_000
+    gate = int(kvmod.LOGITS_BUDGET_FRACTION * 20 * 1024**3)
+    est = kvmod._paired_logits_bytes(window, vocab)
+    margin = gate - est
+    assert margin > 0
+    with pytest.raises(kvmod.LogitsBudgetError) as excinfo:
+        kvmod._preflight_logits_budget(window, vocab, method_ws_bytes=margin + 1)
+    assert "drop --control" not in str(excinfo.value)
+
+
+class _FakeFullGeometryModel(_FakeDivergentModel):
+    """_FakeDivergentModel plus num_hidden_layers/num_key_value_heads on args.
+
+    The pre-cache gate's geometry is args-derived (num_hidden_layers, num_key_value_heads,
+    head_dim) and must be known BEFORE score_kv_config builds any cache; _FakeDivergentModel
+    alone never resolves num_hidden_layers, so its gate terms always default to 0. This
+    subclass lets a call-site test exercise the true (geometry-known) branch instead of only
+    the always-0 branch every other fake model in this file exercises.
+    """
+
+    def __init__(self, *, head_dim=64, num_hidden_layers=2, num_key_value_heads=2):
+        super().__init__(head_dim=head_dim)
+        self.args.num_hidden_layers = num_hidden_layers
+        self.args.num_key_value_heads = num_key_value_heads
+
+
+class _FakeControlWithCost:
+    """A control-method stand-in exposing only the cost members the pre-cache gate reads.
+
+    Never reached beyond the gate call in the tests that use it -- LogitsBudgetError fires
+    before score_kv_config builds any cache, so make_cache/convert_prefix are never needed.
+    """
+
+    def bytes_per_token(self, *, n_layers, n_kv_heads, head_dim):
+        """Zero: the tip in these tests comes entirely from working_set_bytes."""
+        return 0
+
+    def working_set_bytes(self, *, window, n_layers, n_kv_heads, head_dim, dtype_bytes):
+        """A cost that dwarfs any pinned cap used in these tests."""
+        return 10**9
+
+
+def test_method_ws_bytes_from_call_site_tips_the_gate(monkeypatch):
+    """Reds unless score_kv_config computes method_ws_bytes from model.args geometry.
+
+    make_prompt_cache is deliberately NOT patched: a clean LogitsBudgetError is itself
+    evidence the gate (and the geometry read that feeds it) precedes any cache construction.
+    """
+    monkeypatch.setattr(kvmod, "compute_safe_caps_gb", lambda: (0.001, 0.001))
+    model = _FakeFullGeometryModel()
+    method = FakeKVMethod()
+    method.working_set_bytes = lambda **kwargs: 10**9  # dwarfs the tiny pinned cap
+    with pytest.raises(kvmod.LogitsBudgetError) as excinfo:
+        score_kv_config(model, _kv_corpus(1, 4), model_id="org/m", method=method)
+    assert "drop --control" not in str(excinfo.value)
+
+
+def test_control_bytes_from_call_site_tips_the_gate_with_remedy(monkeypatch):
+    """Reds unless score_kv_config folds the control cache's cost (args geometry) into the
+    pre-cache gate estimate when --control is on, and the remedy names --control.
+
+    make_prompt_cache is deliberately NOT patched, for the same reason as the sibling test
+    above.
+    """
+    monkeypatch.setattr(kvmod, "compute_safe_caps_gb", lambda: (0.001, 0.001))
+    model = _FakeFullGeometryModel()
+    method = FakeKVMethod()
+    method.control_method = lambda: _FakeControlWithCost()
+    with pytest.raises(kvmod.LogitsBudgetError, match="drop --control"):
+        score_kv_config(model, _kv_corpus(1, 4), model_id="org/m", method=method, control=True)
+
+
 def test_score_kv_config_reports_device_from_device_string(monkeypatch):
     """The report's device provenance comes from device_string() -- not hardcoded/None.
 
@@ -891,6 +1006,32 @@ def test_seam_warns_when_measured_disagrees_with_analytic(monkeypatch):
     assert any(
         "measured KV bytes/token 72 differs from the analytic 200" in w for w in report.warnings
     )
+
+
+def test_seam_fills_working_set_bytes_per_token_when_geometry_resolves(monkeypatch):
+    """working_set_bytes_per_token needs window + n_layers/n_kv/head_dim, same guard as the
+    analytic-vs-measured comparison above. FakeMethodModel(kv_heads=2) resolves n_kv (head_dim
+    is always 64), so the seam calls FakeKVMethod.working_set_bytes(...) (which returns 0) and
+    divides by the window -> 0. A default FakeMethodModel() leaves both num_key_value_heads and
+    num_attention_heads None, so n_kv does NOT resolve there — see the sibling test below, which
+    asserts None for exactly that case.
+    """
+    _patch_prompt_cache(monkeypatch)
+    report = score_kv_config(
+        FakeMethodModel(kv_heads=2), _kv_corpus(1, 4), model_id="org/m", method=FakeKVMethod()
+    )
+    assert report.working_set_bytes_per_token == 0
+
+
+def test_seam_leaves_working_set_bytes_per_token_none_without_kv_head_count(monkeypatch):
+    """A default FakeMethodModel() has num_key_value_heads=num_attention_heads=None, so n_kv
+    never resolves — the seam must leave working_set_bytes_per_token None rather than guess.
+    """
+    _patch_prompt_cache(monkeypatch)
+    report = score_kv_config(
+        FakeMethodModel(), _kv_corpus(1, 4), model_id="org/m", method=FakeKVMethod()
+    )
+    assert report.working_set_bytes_per_token is None
 
 
 class _NoOffsetCache:
@@ -977,7 +1118,9 @@ def test_method_with_non_default_sugar_raises():
 def test_warnings_order_head_dim_then_budget(monkeypatch):
     """Stock byte-identity depends on the 0.5.x warnings order: head_dim warning, then budget."""
     _patch_kv_caches_divergent(monkeypatch)
-    monkeypatch.setattr(kvmod, "_preflight_logits_budget", lambda window, vocab: "budget note")
+    monkeypatch.setattr(
+        kvmod, "_preflight_logits_budget", lambda window, vocab, **kwargs: "budget note"
+    )
     report = score_kv_config(_FakeDivergentModel(head_dim=None), _kv_corpus(1, 4), model_id="org/m")
     assert len(report.warnings) == 2
     assert "unverified for 'llama'" in report.warnings[0]
@@ -1017,6 +1160,32 @@ def test_nonstock_large_window_warns_stock_stays_silent(monkeypatch):
     assert not any("memory ceiling was validated" in w for w in stock_report.warnings)
 
 
+class _ReceiptedNameMethod(FakeKVMethod):
+    """FakeKVMethod reporting a receipted third-party name (see ``kvmod.RECEIPTED_METHODS``)."""
+
+    @property
+    def name(self):
+        return "turboquant"
+
+
+def test_receipted_method_name_large_window_stays_silent(monkeypatch):
+    """A receipted method name, not only 'stock', must stay silent past the 512 warning band.
+
+    Reds under the old ``method.name != "stock"`` condition, which warned for ANY non-stock
+    name -- including one with a measured long-window receipt in
+    docs/measurement-principles.md. ``RECEIPTED_METHODS`` narrows the warning to names with
+    no receipt yet.
+    """
+    _patch_prompt_cache(monkeypatch)
+    report = score_kv_config(
+        FakeMethodModel(),
+        _kv_corpus(1, 4, prov_chunk_len=1024),
+        model_id="org/m",
+        method=_ReceiptedNameMethod(),
+    )
+    assert not any("memory ceiling was validated" in w for w in report.warnings)
+
+
 # ---------------------------------------------------------------------------
 # review follow-up — out-of-vocab corpus tokens raise before any scoring
 # ---------------------------------------------------------------------------
@@ -1033,3 +1202,153 @@ def test_out_of_vocab_corpus_raises_before_scoring(monkeypatch):
             model_id="org/m",
             method=FakeKVMethod(),
         )
+
+
+# ---------------------------------------------------------------------------
+# regression: quantizer-only control lane in stress mode
+# ---------------------------------------------------------------------------
+
+
+def test_control_identical_to_reference_fires_exact_zero_guard(monkeypatch):
+    """Reds if a bypassed control lane reports 0 drift instead of raising."""
+    _patch_prompt_cache(monkeypatch)
+    with pytest.raises(ExactZeroError, match="control"):
+        score_kv_config(
+            FakeMethodModel(control_peak=0, control_gain=5.0),
+            _kv_corpus(1, 4),
+            model_id="m",
+            method=FakeKVMethod(stock_like=True),
+            control=True,
+        )
+
+
+def test_control_lane_measured_and_bundled_unchanged(monkeypatch):
+    """Reds if the control lane leaks into the bundled metrics or measures the wrong pair."""
+    _patch_prompt_cache(monkeypatch)
+    model = FakeMethodModel(control_peak=2)
+    report = score_kv_config(
+        model,
+        _kv_corpus(1, 4),
+        model_id="m",
+        method=FakeKVMethod(stock_like=True),
+        control=True,
+    )
+    baseline = score_kv_config(
+        model,
+        _kv_corpus(1, 4),
+        model_id="m",
+        method=FakeKVMethod(stock_like=True),
+        control=False,
+    )
+    assert report.kl == baseline.kl
+    assert report.flip_rate == baseline.flip_rate
+    # peak [5,0,0] vs [0,0,5]: KL = 5 * (p0 - p2) ≈ 4.90 nats (p = softmax([5,0,0]))
+    assert math.isclose(report.control_kl.mean, 4.90, abs_tol=0.02)
+    assert report.control_flip_rate == 1.0
+    assert report.drift_footing == "bundled"
+
+
+def test_converse_oracle_bundled_drifts_control_small_nonzero(monkeypatch):
+    """Reds if control metrics mirror the bundled lane instead of their own forward."""
+    _patch_prompt_cache(monkeypatch)
+    model = FakeMethodModel(control_peak=0, control_gain=4.0)  # same argmax, small KL
+    report = score_kv_config(
+        model,
+        _kv_corpus(1, 4),
+        model_id="m",
+        method=FakeKVMethod(stock_like=True),
+        control=True,
+    )
+    assert math.isclose(report.kl.mean, 4.90, abs_tol=0.02)
+    import numpy as np
+
+    p = np.exp([5.0, 0, 0])
+    p /= p.sum()
+    q = np.exp([4.0, 0, 0])
+    q /= q.sum()
+    expected = float((p * np.log(p / q)).sum())  # ≈ 0.00929
+    assert math.isclose(report.control_kl.mean, expected, rel_tol=1e-4)
+    assert report.control_flip_rate == 0.0  # argmax unchanged -> flips 0, KL > 0 -> no guard
+
+
+def test_control_rejected_for_methods_without_a_control():
+    """Reds if --control silently no-ops on an adapter method."""
+    with pytest.raises(CompareConfigError, match="already quantizer-only"):
+        score_kv_config(
+            FakeMethodModel(),
+            _kv_corpus(1, 4),
+            model_id="m",
+            method=FakeKVMethod(),
+            control=True,
+        )
+
+
+# ---------------------------------------------------------------------------
+# regression: control lane composed with deployment mode
+# ---------------------------------------------------------------------------
+
+
+def _corpus_from_chunks(chunks: list[mx.array]) -> Corpus:
+    """Build a Corpus from EXACT chunk arrays -- no `% vocab` transform.
+
+    Unlike ``_kv_corpus`` (which mods every id by 3 to stay under FakeMethodModel's default
+    vocab_size=3), this helper hands the chunks through unchanged. Needed whenever a test's fake
+    model keys its behavior off the literal token id (e.g. the position-keyed control-lane
+    sentinel, which reads ``token_id % 2`` on the real input values).
+    """
+    declared_len = int(chunks[0].size) if chunks else 0
+    total_tokens = sum(int(c.size) for c in chunks)
+    prov = CorpusProvenance(
+        "x", "test", "org/m", declared_len, declared_len, "none", "drop", "raw", total_tokens
+    )
+    return Corpus(chunks=tuple(chunks), provenance=prov)
+
+
+def test_control_deployment_covers_exactly_the_post_boundary_positions(monkeypatch):
+    """Reds if the deployment control lane is mis-sliced or mis-aligned by even one position."""
+    import numpy as np
+
+    _patch_prompt_cache(monkeypatch, n_layers=1)
+    ids = mx.arange(6)  # sequential tokens 0..5 -> 5 scored positions, targets 1..5
+    corpus = _corpus_from_chunks([ids])
+    model = FakeMethodModel(control_gain=None)  # position-keyed control lane (see fake)
+    # ids run 0..5; FakeMethodModel's default vocab_size=3 would otherwise trip the
+    # out-of-vocab guard before scoring, which is irrelevant to what this test exercises
+    # (the control lane's position slicing, not vocabulary validation).
+    model.args.vocab_size = 6
+    report = score_kv_config(
+        model,
+        corpus,
+        model_id="m",
+        method=FakeKVMethod(stock_like=True),
+        quantize_start=2,
+        control=True,
+    )
+    assert report.quantize_mode == "deployment"
+
+    def _kl(gain: float) -> float:
+        """First-principles KL([5,0,0] || [gain,0,0]) over vocab 3."""
+        p = np.exp([5.0, 0, 0])
+        p /= p.sum()
+        q = np.exp([gain, 0, 0])
+        q /= q.sum()
+        return float((p * np.log(p / q)).sum())
+
+    # control seg-2 inputs are tokens 2, 3, 4 -> gains 4.0, 4.5, 4.0
+    expected = (_kl(4.0) + _kl(4.5) + _kl(4.0)) / 3
+    assert math.isclose(report.control_kl.mean, expected, rel_tol=1e-4)
+
+
+def test_control_multi_chunk_stress_aggregation(monkeypatch):
+    """Reds if multi-chunk control aggregation drops or double-counts a chunk's arrays."""
+    _patch_prompt_cache(monkeypatch)
+    model = FakeMethodModel(control_peak=2)
+    report = score_kv_config(
+        model,
+        _kv_corpus(2, 4),
+        model_id="m",
+        method=FakeKVMethod(stock_like=True),
+        control=True,
+    )
+    assert math.isclose(report.control_kl.mean, 4.90, abs_tol=0.02)
+    assert report.control_flip_rate == 1.0

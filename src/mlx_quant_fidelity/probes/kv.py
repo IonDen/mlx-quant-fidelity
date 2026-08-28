@@ -17,9 +17,10 @@ from mlx_quant_fidelity._memory_caps import (
 from mlx_quant_fidelity.errors import (
     CompareConfigError,
     CorpusError,
+    LogitsBudgetError,
     QuantizeStartError,
 )
-from mlx_quant_fidelity.metrics import bucket_by_depth
+from mlx_quant_fidelity.metrics import bucket_by_depth, kl_divergence, summarize, top_token_flips
 from mlx_quant_fidelity.policy import verdict_for
 from mlx_quant_fidelity.probes._paired import _aggregate_chunks, _check_exact_zero, _reduce_pair
 from mlx_quant_fidelity.probes.kv_methods import StockKVMethod
@@ -57,19 +58,37 @@ _LOGITS_ARRAYS_PER_WINDOW = 7
 # Estimate above which the report carries a memory warning (the band below the hard gate).
 _LOGITS_WARN_BYTES = 4 * 1024**3
 
+# Method names carrying a MEASURED long-window receipt in docs/measurement-principles.md (the
+# long-window memory spike, scripts/spike_long_window_memory.py, run per method lane). A method
+# name outside this set has no measured evidence that windows above 512 stay within the memory
+# ceiling, so it still gets the interim >512 warning below.
+RECEIPTED_METHODS = frozenset({"stock", "turboquant", "turboquant-vonly", "affine"})
+
 
 def _paired_logits_bytes(window: int, vocab: int) -> int:
     """Estimated transient bytes held by the paired fp32 logits for one chunk."""
     return _LOGITS_ARRAYS_PER_WINDOW * (window - 1) * int(vocab) * 4
 
 
-def _preflight_logits_budget(window: int | None, vocab: int | None) -> str | None:
-    """Refuse windows whose paired-logits estimate exceeds the installed wired cap.
+def _preflight_logits_budget(
+    window: int | None,
+    vocab: int | None,
+    *,
+    method_ws_bytes: int = 0,
+    control_bytes: int = 0,
+) -> str | None:
+    """Refuse windows whose paired-logits + method/control working-set estimate exceeds the cap.
 
-    Returns a warning string (or None) for the band below the gate; raises ``CorpusError``
-    above it. The gate runs BEFORE any cache construction or forward pass — a warning
-    emitted in the report arrives after the allocation it was meant to prevent, which is
-    exactly the pageable-allocation paging-storm path the ceiling exists to avoid.
+    ``method_ws_bytes`` (the scored method's own :meth:`KVCacheMethod.working_set_bytes`) and
+    ``control_bytes`` (the control cache's stored + working-set bytes, when ``--control`` is on)
+    both ADD to the paired-logits estimate, for both the gate comparison and the warn band —
+    they are real resident/transient memory the same run holds, not a separate budget.
+
+    Returns a warning string (or None) for the band below the gate; raises
+    ``LogitsBudgetError`` above it. The gate runs BEFORE any cache construction or forward
+    pass — a warning emitted in the report arrives after the allocation it was meant to
+    prevent, which is exactly the pageable-allocation paging-storm path the ceiling exists to
+    avoid.
 
     Skipped (warning path only) when the device reports no working-set size, since there is
     no cap to measure against.
@@ -81,17 +100,19 @@ def _preflight_logits_budget(window: int | None, vocab: int | None) -> str | Non
             "not be gated against the installed wired cap. Prefer a smaller --chunk-length "
             "on an unfamiliar architecture."
         )
-    est = _paired_logits_bytes(window, vocab)
+    est = _paired_logits_bytes(window, vocab) + method_ws_bytes + control_bytes
     wired_gb, _ = compute_safe_caps_gb()
     if wired_gb:
         gate = int(LOGITS_BUDGET_FRACTION * wired_gb * 1024**3)
         if est > gate:
-            raise CorpusError(
+            remedy = "Lower --chunk-length (halving it roughly halves the estimate)"
+            if control_bytes > 0:
+                remedy += " or drop --control"
+            raise LogitsBudgetError(
                 f"chunk_length={window} at vocab_size={int(vocab)}: paired fp32 logits peak ≈ "
                 f"{est / 1024**3:.1f} GiB per chunk, above the {gate / 1024**3:.1f} GiB "
                 f"pre-flight budget ({LOGITS_BUDGET_FRACTION:.0%} of the {wired_gb} GiB "
-                "installed wired cap). Lower --chunk-length (halving it roughly halves the "
-                "estimate); see docs/measurement-principles.md."
+                f"installed wired cap). {remedy}; see docs/measurement-principles.md."
             )
     if est > _LOGITS_WARN_BYTES:
         return (
@@ -150,6 +171,17 @@ def _score_chunk(
     return _reduce_pair(ref_logits, quant_logits, targets)
 
 
+def _score_chunk_control(
+    model: object,
+    ids: mx.array,
+    ref_logits: mx.array,
+    control_cache: list[object],
+) -> tuple[mx.array, mx.array]:
+    """Third forward against already-computed reference logits; KL + flips only."""
+    control_logits = model(ids[None, :-1], cache=control_cache)[0].astype(mx.float32)  # type: ignore[operator]
+    return kl_divergence(ref_logits, control_logits), top_token_flips(ref_logits, control_logits)
+
+
 def _resolve_method(
     method: KVCacheMethod | None, kv_bits: int, kv_group_size: int
 ) -> KVCacheMethod:
@@ -180,13 +212,19 @@ def _score_chunk_deployment(
     *,
     quantize_start: int,
     method: KVCacheMethod,
-) -> tuple[mx.array, mx.array, mx.array, mx.array]:
+    control_method: KVCacheMethod | None = None,
+) -> tuple[mx.array, mx.array, mx.array, mx.array, mx.array | None, mx.array | None]:
     """Deployment split: compute the prefix in full precision, then convert the stored cache.
 
-    Returns per-position (kl, flips, ref_nll, quant_nll) over ALL L-1 prediction positions.
-    `quant_cache` starts full-precision (make_prompt_cache) and is converted at the boundary
-    via ``method.convert_prefix`` (mirrors mlx-lm's maybe_quantize_kv_cache). The caller
-    aggregates only [quantize_start:] for the reported metrics.
+    Returns per-position (kl, flips, ref_nll, quant_nll) over ALL L-1 prediction positions,
+    plus (control_kl, control_flips) over ONLY the post-boundary [n:L-1) region when
+    ``control_method`` is given (``(None, None)`` otherwise). `quant_cache` starts
+    full-precision (make_prompt_cache) and is converted at the boundary via
+    ``method.convert_prefix`` (mirrors mlx-lm's maybe_quantize_kv_cache). The caller
+    aggregates the bundled arrays with ``[quantize_start:]``; the control arrays already
+    cover exactly that region and need no further slicing (the control lane has no seg-1 —
+    it never scores the full-precision prefix, since it exists to isolate quantizer error
+    at the boundary, not to double as a stress-mode run over the whole chunk).
     """
     n = quantize_start
     targets = ids[1:]
@@ -198,17 +236,30 @@ def _score_chunk_deployment(
     mx.eval(kl1, flip1, refnll1, qnll1)
     del seg1  # free the prefix logits before the boundary + seg2 forward (one segment live)
     mx.eval([c.state for c in quant_cache])  # type: ignore[attr-defined]  # collapse seg-1 graph before boundary
-    # Boundary: convert each layer cache (quantizes the stored [0:n) prefix).
+    # Boundary: control conversion FIRST, while quant_cache still holds fp state -- the
+    # bundled conversion below mutates quant_cache in place and would leave nothing for the
+    # control lane to replay from if it ran second.
+    control_caches = control_method.convert_prefix(quant_cache) if control_method else None
     quant_cache[:] = method.convert_prefix(quant_cache)  # in place: the caller's list sees it
     # Segment 2: [n:L-1) through the now-quantized cache. NOTE ids[n:-1], not ids[n:].
     seg2 = model(ids[None, n:-1], cache=quant_cache)[0].astype(mx.float32)  # type: ignore[operator]
     kl2, flip2, refnll2, qnll2 = _reduce_pair(ref_logits[n:], seg2, targets[n:])
     mx.eval(kl2, flip2, refnll2, qnll2)
+    del seg2  # free the bundled seg-2 logits before the control forward (two-tensor peak, spec §5)
+    control_kl: mx.array | None = None
+    control_flip: mx.array | None = None
+    if control_caches is not None:
+        control_logits = model(ids[None, n:-1], cache=control_caches)[0].astype(mx.float32)  # type: ignore[operator]
+        control_kl = kl_divergence(ref_logits[n:], control_logits)
+        control_flip = top_token_flips(ref_logits[n:], control_logits)
+        mx.eval(control_kl, control_flip)
     return (
         mx.concatenate([kl1, kl2]),
         mx.concatenate([flip1, flip2]),
         mx.concatenate([refnll1, refnll2]),
         mx.concatenate([qnll1, qnll2]),
+        control_kl,
+        control_flip,
     )
 
 
@@ -223,28 +274,81 @@ def score_kv_config(
     method: KVCacheMethod | None = None,
     quantize_start: int = 0,
     max_chunks: int | None = None,
+    control: bool = False,
 ) -> FidelityReport:
     """Score one KV config on an ALREADY-LOADED model (no load, no caps install).
 
     Shared by ``measure_kv_fidelity`` (load -> delegate) and the KV ``compare`` adapter
     (load once -> loop configs). Applies ``max_chunks`` to the provided corpus,
     so a caller-supplied corpus is capped identically to the weight probe.
+
+    ``control=True`` runs a third, quantizer-only forward per chunk (via
+    ``method.control_method()``) so the report can separate quantizer error from
+    quantized-attention-kernel numerics; raises CompareConfigError if ``method`` has no
+    ``control_method``. In stress mode (``quantize_start=0``) the control forward covers
+    the whole chunk; with ``quantize_start > 0`` the control cache converts from the same
+    full-precision prefix as the bundled path and scores only the post-boundary region.
     """
     method = _resolve_method(method, kv_bits, kv_group_size)
+    control_m: KVCacheMethod | None = None
+    if control:
+        maker = getattr(method, "control_method", None)
+        if maker is None:
+            raise CompareConfigError(
+                f"--control only applies to the stock method; method {method.name!r} is "
+                "already quantizer-only (dequantize-on-fetch, standard SDPA)."
+            )
+        control_m = maker()
     probe_warnings: list[str] = []
-    model_type = str(getattr(getattr(model, "args", None), "model_type", "unknown"))
+    args = getattr(model, "args", None)
+    model_type = str(getattr(args, "model_type", "unknown"))
     head_dim = _kv_head_dim(model)
     # Pure pre-flight first (keeps the 0.5.x warnings order: head_dim, then budget). It allocates
     # nothing, so the kernel-panic budget gate below still precedes any cache construction.
     probe_warnings.extend(method.check(head_dim=head_dim, model_type=model_type))
+    window = getattr(corpus.provenance, "chunk_length", None)
+    # Gate geometry is model.args-derived and computed BEFORE any cache construction (the gate's
+    # whole point is running before cache/model allocations — see make_prompt_cache below, which
+    # this precedes). Each of method_ws_bytes/control_bytes degrades to 0 (the 0.6.0 estimate)
+    # when any one piece of geometry is unknown, rather than guessing.
+    gate_n_layers = getattr(args, "num_hidden_layers", None)
+    gate_n_kv = getattr(args, "num_key_value_heads", None) or getattr(
+        args, "num_attention_heads", None
+    )
+    method_ws_bytes = 0
+    control_bytes = 0
+    if (
+        isinstance(window, int)
+        and isinstance(gate_n_layers, int)
+        and isinstance(gate_n_kv, int)
+        and head_dim is not None
+    ):
+        method_ws_bytes = method.working_set_bytes(
+            window=window,
+            n_layers=gate_n_layers,
+            n_kv_heads=gate_n_kv,
+            head_dim=head_dim,
+            dtype_bytes=2,
+        )
+        if control_m is not None:
+            control_bytes = control_m.bytes_per_token(
+                n_layers=gate_n_layers, n_kv_heads=gate_n_kv, head_dim=head_dim
+            ) * window + control_m.working_set_bytes(
+                window=window,
+                n_layers=gate_n_layers,
+                n_kv_heads=gate_n_kv,
+                head_dim=head_dim,
+                dtype_bytes=2,
+            )
     budget_warning = _preflight_logits_budget(
-        getattr(corpus.provenance, "chunk_length", None),
-        getattr(getattr(model, "args", None), "vocab_size", None),
+        window,
+        getattr(args, "vocab_size", None),
+        method_ws_bytes=method_ws_bytes,
+        control_bytes=control_bytes,
     )
     if budget_warning is not None:
         probe_warnings.append(budget_warning)
-    window = getattr(corpus.provenance, "chunk_length", None)
-    if method.name != "stock" and isinstance(window, int) and window > 512:
+    if method.name not in RECEIPTED_METHODS and isinstance(window, int) and window > 512:
         probe_warnings.append(
             f"chunk_length={window}: the memory ceiling was validated on the stock method; "
             f"method {method.name!r} retains additional full-precision working buffers, so "
@@ -271,23 +375,55 @@ def score_kv_config(
     flips: list[mx.array] = []
     ref_nlls: list[mx.array] = []
     quant_nlls: list[mx.array] = []
+    control_kls: list[mx.array] = []
+    control_flips: list[mx.array] = []
     n_scored = 0
     measured_bpt: int | None = None
     for ids in chunks:
         if quantize_start > 0 and int(ids.size) < quantize_start + 2:
             continue  # too short to have a post-boundary position; skip
         ref_cache = make_prompt_cache(model)
+        kl_c: mx.array | None = None
+        flip_c: mx.array | None = None
         with method.guard():
             if quantize_start == 0:
                 quant_cache: list[object] = method.make_cache(n_layers=n_layers)
-                kl, flip, ref_nll, quant_nll = _score_chunk(model, ids, ref_cache, quant_cache)
+                if control_m is None:
+                    kl, flip, ref_nll, quant_nll = _score_chunk(model, ids, ref_cache, quant_cache)
+                else:
+                    # Peak two vocab-wide tensors at once (spec §5): ref forward -> bundled
+                    # forward -> reduce+eval bundled -> release bundled logits -> control
+                    # forward -> reduce+eval control -> release ref logits.
+                    inp, targets = ids[None, :-1], ids[1:]
+                    ref_logits = model(inp, cache=ref_cache)[0].astype(mx.float32)  # type: ignore[operator]
+                    quant_logits = model(inp, cache=quant_cache)[0].astype(mx.float32)  # type: ignore[operator]
+                    kl, flip, ref_nll, quant_nll = _reduce_pair(ref_logits, quant_logits, targets)
+                    mx.eval(kl, flip, ref_nll, quant_nll)
+                    del quant_logits  # bundled logits out of scope before the third forward
+                    control_cache = control_m.make_cache(n_layers=n_layers)
+                    kl_c, flip_c = _score_chunk_control(model, ids, ref_logits, control_cache)
+                    mx.eval(kl_c, flip_c)
+                    control_kls.append(kl_c)
+                    control_flips.append(flip_c)
+                    del control_cache, ref_logits
             else:
                 quant_cache = make_prompt_cache(model)
-                kl, flip, ref_nll, quant_nll = _score_chunk_deployment(
-                    model, ids, ref_cache, quant_cache, quantize_start=quantize_start, method=method
+                kl, flip, ref_nll, quant_nll, kl_c, flip_c = _score_chunk_deployment(
+                    model,
+                    ids,
+                    ref_cache,
+                    quant_cache,
+                    quantize_start=quantize_start,
+                    method=method,
+                    control_method=control_m,
                 )
                 kl, flip = kl[quantize_start:], flip[quantize_start:]
                 ref_nll, quant_nll = ref_nll[quantize_start:], quant_nll[quantize_start:]
+                if kl_c is not None and flip_c is not None:
+                    # No [quantize_start:] slice: kl_c/flip_c already cover exactly the
+                    # post-boundary region (see _score_chunk_deployment's docstring).
+                    control_kls.append(kl_c)
+                    control_flips.append(flip_c)
         mx.eval(kl, flip, ref_nll, quant_nll)
         if measured_bpt is None:
             measured_bpt = _measured_bytes_per_token(method, quant_cache)
@@ -315,8 +451,34 @@ def score_kv_config(
         ),
     )
 
+    control_summary = None
+    control_flip_rate = None
+    if control_m is not None:
+        kl_all = np.concatenate([np.asarray(k, dtype=np.float64) for k in control_kls])
+        flip_all = np.concatenate(
+            [np.asarray(f.astype(mx.float32), dtype=np.float64) for f in control_flips]
+        )
+        control_summary = summarize(kl_all)
+        control_flip_rate = float(flip_all.mean())
+        _check_exact_zero(
+            kl_mean=control_summary.mean,
+            flip_rate=control_flip_rate,
+            context="the control lane saw reference logits — its cache was bypassed "
+            "(control did not engage)",
+        )
+
     kl_by_depth = None
     if mode == "stress" and kls:
+        # This np.asarray conversion of kls is built exactly once here and reused for both
+        # the uniform-window check and bucket_by_depth below. _aggregate_chunks (called just
+        # above) does its own equivalent conversion of the SAME kls internally, so the array
+        # data is technically walked twice overall — but sharing the two would mean either
+        # changing _aggregate_chunks's list[mx.array] signature (it's exercised directly,
+        # with that exact signature, by tests/probes/test_kv_fakeforward.py) or passing it
+        # pre-converted numpy arrays where mypy --strict expects mx.array (an ignore-driven
+        # type lie). _aggregate_chunks is also shared verbatim with probes/weights.py, which
+        # has no depth-bucket concept at all. Not worth that churn for one extra host-side
+        # float64 cast over a per-chunk KLD list.
         arrays = [np.asarray(k, dtype=np.float64) for k in kls]
         if len({a.shape[0] for a in arrays}) == 1:  # uniform windows only
             kl_by_depth = bucket_by_depth(arrays)
@@ -326,7 +488,6 @@ def score_kv_config(
                 "(drift-by-depth requires a fixed-window corpus)."
             )
 
-    args = getattr(model, "args", None)
     n_kv = getattr(args, "num_key_value_heads", None) or getattr(args, "num_attention_heads", None)
     if measured_bpt is not None and head_dim is not None and isinstance(n_kv, int):
         analytic = method.bytes_per_token(n_layers=n_layers, n_kv_heads=n_kv, head_dim=head_dim)
@@ -336,6 +497,18 @@ def score_kv_config(
                 f"method {method.name!r} (ranking uses the analytic figure; a scale/bias dtype other "
                 "than fp16/bf16 is the usual cause)."
             )
+    working_set_bytes_per_token: int | None = None
+    if isinstance(window, int) and window > 0 and head_dim is not None and isinstance(n_kv, int):
+        working_set_bytes_per_token = (
+            method.working_set_bytes(
+                window=window,
+                n_layers=n_layers,
+                n_kv_heads=n_kv,
+                head_dim=head_dim,
+                dtype_bytes=2,
+            )
+            // window
+        )
     probe_warnings.extend(method.report_warnings())
 
     return FidelityReport(
@@ -365,6 +538,10 @@ def score_kv_config(
         kv_method_params=dict(method.params),
         kv_method_provenance=method.provenance(),
         measured_kv_bytes_per_token=measured_bpt,
+        drift_footing="bundled" if method.name == "stock" else "quantizer_only",
+        control_kl=control_summary,
+        control_flip_rate=control_flip_rate,
+        working_set_bytes_per_token=working_set_bytes_per_token,
     )
 
 
@@ -379,6 +556,7 @@ def measure_kv_fidelity(
     max_chunks: int | None = None,
     model_revision: str | None = None,
     chunk_length: int = 512,
+    control: bool = False,
 ) -> FidelityReport:
     """Measure how much KV-cache quantization costs, via teacher-forced paired scoring.
 
@@ -404,6 +582,11 @@ def measure_kv_fidelity(
             recommendation. ``MAX_CHUNK_LENGTH`` alone is vocabulary-blind, so a second,
             vocabulary-aware pre-flight also refuses any window whose paired fp32 logits
             would exceed a fraction of the installed wired cap.
+        control: Run a third, quantizer-only forward per chunk so the report can separate
+            quantizer error from quantized-attention-kernel numerics. With
+            ``quantize_start > 0`` the control lane converts from the same full-precision
+            prefix and scores only the post-boundary region. See
+            :func:`~mlx_quant_fidelity.probes.kv.score_kv_config`'s ``control`` docs.
 
     Returns:
         A :class:`~mlx_quant_fidelity.report.FidelityReport` with all metrics and provenance.
@@ -414,8 +597,10 @@ def measure_kv_fidelity(
         ExactZeroError: If KLD and flip rate are exactly 0 (quantization did not engage).
         CorpusError: If chunk_length is out of range, or is set together with a caller-provided
             corpus, or a caller-provided corpus's own chunk_length exceeds MAX_CHUNK_LENGTH, or
-            the corpus/max_chunks combination yields no chunks, or the window x vocabulary
-            paired-logits estimate exceeds the installed wired-memory budget.
+            the corpus/max_chunks combination yields no chunks.
+        LogitsBudgetError: If the window x vocabulary paired-logits estimate (plus the scored
+            method's and, when ``--control`` is on, the control cache's working-set bytes)
+            exceeds the installed wired-memory budget. A CorpusError subclass.
     """
     from mlx_lm import load
 
@@ -474,4 +659,5 @@ def measure_kv_fidelity(
         method=method,
         quantize_start=quantize_start,
         max_chunks=max_chunks,
+        control=control,
     )
