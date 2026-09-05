@@ -32,6 +32,8 @@ This is a change from the 0.6.0 ranking, which used whichever number a method ha
 
 For weight quantization, cost is total on-disk model bytes as reported by the model repository.
 
+The comparison table also shows each target's effective bits per weight, measured on the loaded model: its array bytes times eight over its parameter count, the definition `mlx_lm.convert` prints. It is a per-parameter view of the cost rather than a second axis — the two have been checked against each other on a real repo and agree to within a percent — and it is useful when repos with the same nominal bit width store different amounts, as a group-32 embedding or a mixed 4/5-bit layout does. It is never used for ranking.
+
 For KV quantization, cost is KV-cache bytes per token:
 
 ```

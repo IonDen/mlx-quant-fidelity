@@ -144,6 +144,8 @@ On this model and corpus, drift at position 4000 looks about the same as drift a
 
 Same corpus and recipe, but the comparison is now a quantized model repo against a higher-precision reference repo. Reproduce any row with `mlx-quant-fidelity weights <quant> --reference <reference> --max-chunks 100`; the committed reports are under [`_artifacts/samples/weights/`](_artifacts/samples/weights).
 
+These five rows were captured with the 0.5.0 report format and are kept as recorded, so they predate the measured-geometry column in the comparison below.
+
 | Model | quant | reference | KL mean (nats) | flip rate | perplexity Δ | verdict |
 |---|---|---|---|---|---|---|
 | Llama-3.2-1B | 4-bit | bf16 | 0.158 | 0.21 | +3.5 | marginal |
@@ -155,6 +157,33 @@ Same corpus and recipe, but the comparison is now a quantized model repo against
 8-bit weights are near-lossless: about 2% of top tokens flip and perplexity barely moves. 4-bit is a real trade: 15 to 21% of top tokens flip and perplexity climbs by 0.9 to 3.5 points, worst on the small 1B model. The Qwen row compares 4-bit against 8-bit rather than bf16, so its drift is relative to an already-quantized reference, not full precision; the report records that the reference is 8-bit and says so in plain text. The verdict tiers are provisional, anchored to these q8 and q4 reference points on short prose rather than to downstream task accuracy.
 
 Unlike the KV probe, both runs use standard attention, so the drift is the deployed quantized model's weight-quant cost with no quantized-attention kernel folded in. It does still include the quantized-matmul kernel's numerics, which is exactly what you run when you load the model.
+
+### One model, five quantizations
+
+Qwen3-0.6B has a bf16 reference on the Hub and five quantized repos beside it, three of them at 4 bits. `compare weights` scores all five against that one reference:
+
+| target | cost | KL mean | KL p99 | flip | bits/wt | verdict | frontier |
+|---|---|---|---|---|---|---|---|
+| `mlx-community/Qwen3-0.6B-4bit-DWQ` | 335.5 MB | 0.3539 | 1.4570 | 0.2289 | 4.50 | bad | ✓ |
+| `mlx-community/Qwen3-0.6B-4bit` | 335.5 MB | 0.2538 | 1.5364 | 0.2586 | 4.50 | bad | ✓ |
+| `mlx-community/Qwen3-0.6B-4bit-AWQ` | 345.2 MB | 0.1608 | 1.1002 | 0.2117 | 4.63 | marginal | ✓ |
+| `mlx-community/Qwen3-0.6B-6bit` | 484.4 MB | 0.0213 | 0.1324 | 0.0781 | 6.50 | marginal | ✓ |
+| `mlx-community/Qwen3-0.6B-8bit` | 633.4 MB | 0.0040 | 0.0198 | 0.0331 | 8.50 | good | ✓ |
+
+```bash
+mlx-quant-fidelity compare weights \
+  mlx-community/Qwen3-0.6B-4bit@73e3e38d981303bc594367cd910ea6eb48349da8 \
+  mlx-community/Qwen3-0.6B-4bit-DWQ@e630d870397d5a2d95fe0c9075c6f499fc0fc5c8 \
+  mlx-community/Qwen3-0.6B-4bit-AWQ@3c064b3401d4a7d355262a1d518faa823a4d8f11 \
+  mlx-community/Qwen3-0.6B-6bit@45d962b21b1e813c3e9a7f3505391e72e8daba1e \
+  mlx-community/Qwen3-0.6B-8bit@11de96878523501bcaa86104e3c186de07ff9068 \
+  --reference mlx-community/Qwen3-0.6B-bf16@42096995f6402fde107068cf530136fe64b604f8 \
+  --max-chunks 100
+```
+
+Apple M1 Max, WikiText-2 test, 100 chunks of 512 tokens, peaking at 3.87 GB on the heaviest target. The committed report is [`_artifacts/samples/compare/weight-qwen3-0.6b-ladder.md`](_artifacts/samples/compare/weight-qwen3-0.6b-ladder.md).
+
+The plain `-4bit` repo and the `-4bit-DWQ` repo are the same size to within 36 bytes, and they disagree about which of them is better. The `-4bit-DWQ` repo has the higher mean KL, 0.3539 against 0.2538, and the lower flip rate, p99 tail and perplexity delta: 0.2289, 1.4570 and +3.59, against 0.2586, 1.5364 and +4.51. Ranking scores quality on mean KL alone, so on that axis DWQ is the worse of the two, and neither row is dominated, because each is ahead of the other on one axis. Of the three 4-bit repos, `-4bit-AWQ` is the best on every quality column and on perplexity delta (+3.23), and it stores 4.63 bits per weight rather than 4.50 to get there, its embedding quantized at group 32 where the rest of the model uses 64. Above 4 bits the drift falls away quickly: 6-bit is marginal and 8-bit good on this model and this corpus. The report does not know which of these repos was produced with learned scales or activation-aware scaling — mlx-lm records only the geometry — so the rows are labeled by repo, not by method.
 
 ## Comparing quantizations
 
@@ -281,7 +310,7 @@ print(report.kl.mean, report.flip_rate, report.verdict)
 
 ## Status
 
-0.7.0, released on PyPI as `mlx-quant-fidelity`. `compare kv` now ranks every method — stock, TurboQuant-MLX, its V-only variant, and an independent-per-side-bits `affine` method — on the same quantizer-only footing, with stock's own deployed-path number shown alongside. Threshold validation and wider attention coverage are on the [roadmap](ROADMAP.md).
+0.8.0, released on PyPI as `mlx-quant-fidelity`. A weight report now carries the quantization geometry measured on the model it loaded — per-module bits and group sizes, and the effective bits per weight — so a ladder of repos published at the same nominal bit width can be ranked against one reference and read against each other. Threshold validation and wider attention coverage are on the [roadmap](ROADMAP.md).
 
 ## License
 

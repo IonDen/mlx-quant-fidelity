@@ -3,6 +3,30 @@
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0] - 2026-09-05
+
+The weights probe reports the quantization geometry it measured on the loaded model, and repos published as DWQ and AWQ quantizations are ranked on one yardstick for the first time.
+
+### Added
+
+- Four `WeightFidelityReport` fields, read off the loaded model rather than its `config.json`: `quant_geometry` (each distinct bits/group-size combination and how many modules use it), `quant_n_full_precision` (quantizable modules left at full precision), `quant_bits_per_weight` (effective precision, using the definition `mlx_lm.convert` prints), and `quant_precision` (`uniform` or `mixed`).
+- A `bits/wt` column in `compare weights`, and each target's own report notes under a weight comparison, where previously only a KV comparison carried them.
+- `repo@revision` on `weights` and `compare weights`, pinning a Hub revision inline; an inline pin wins over the flag. `kv` and `compare kv` keep `--model-revision`.
+- `--quant-revision` and `--reference-revision` on `weights`, matching what `compare weights` already accepted.
+- A committed `compare weights` sample ranking five Qwen3-0.6B repos against the bf16 reference: two 4-bit repos of the same size, one published as a DWQ quantization and one plain, a third published as AWQ, and the 6-bit and 8-bit rungs (`_artifacts/samples/compare/weight-qwen3-0.6b-ladder.{json,md}`). A Qwen3-4B ladder follows in a later release.
+- `pytest --hide-port`: the default suite can now be run with the TurboQuant port masked, matching CI.
+
+### Changed
+
+- A weight report's headline carries the measured precision instead of the declared nominal: `@ 4-bit (group 64, 4.50 bits/weight)` for a uniform model, and a `mixed 4/5-bit` form naming how many modules sit at each width when more than one bit width is in use. A report written before 0.8.0 keeps its original headline byte-for-byte.
+- The weight badge labels a report spanning more than one bit width by the widths it found (`mixed 4/5-bit` for a model holding both) rather than by the declared nominal.
+- Every new weight report carries a standing note that the method producing the quantization is not recorded anywhere the tool can read.
+- The committed Qwen2.5-0.5B `compare weights` sample was regenerated with pinned revisions.
+
+### Notes
+
+- A repo published as a DWQ quantization is indistinguishable from a plain quantized repo by anything the tool can read. mlx-lm's DWQ, AWQ and dynamic quantizers all write a `quantization` block recording geometry alone — bits, group sizes, per-module overrides — and never the recipe, so a repo id ending in `-DWQ` is a claim the tool does not check. Rows are labeled by repo, not by method (`docs/measurement-principles.md`).
+
 ## [0.7.0] - 2026-08-27
 
 `compare kv` now ranks every method on the same footing — quantizer error alone — instead of whichever number a method happened to report natively. Two more KV methods join the comparison.
