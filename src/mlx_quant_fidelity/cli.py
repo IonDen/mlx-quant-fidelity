@@ -33,6 +33,7 @@ from mlx_quant_fidelity.runners.compare import (
     filter_configs_by_kv_budget,
     generate_sweep_configs,
     kv_geometry_from_config,
+    split_target,
 )
 
 if TYPE_CHECKING:
@@ -143,18 +144,25 @@ def main(argv: list[str] | None = None) -> int:
     )
     kv.add_argument("--format", choices=["json", "md", "badge"], default="md")
 
+    repo_help = (
+        "repo id or local path; repo@revision pins a Hub revision (an inline pin wins "
+        "over the --*-revision flag)"
+    )
+
     weights = sub.add_parser("weights", help="measure weight-quantization fidelity")
-    weights.add_argument("quant_model")
-    weights.add_argument("--reference", required=True)
+    weights.add_argument("quant_model", help=repo_help)
+    weights.add_argument("--reference", required=True, help=repo_help)
     weights.add_argument("--max-chunks", type=int, default=None)
+    weights.add_argument("--quant-revision", default=None)
+    weights.add_argument("--reference-revision", default=None)
     weights.add_argument("--format", choices=["json", "md", "badge"], default="md")
 
     compare = sub.add_parser("compare", help="rank N quantizations on a memory-normalized Pareto")
     csub = compare.add_subparsers(dest="compare_mode", required=True)
 
     cw = csub.add_parser("weights", help="rank N weight-quant repos vs a reference")
-    cw.add_argument("quant_models", nargs="+")
-    cw.add_argument("--reference", required=True)
+    cw.add_argument("quant_models", nargs="+", help=repo_help)
+    cw.add_argument("--reference", required=True, help=repo_help)
     cw.add_argument("--max-chunks", type=int, default=None)
     cw.add_argument("--max-kld", type=float, default=None)
     cw.add_argument("--min-tier", choices=["good", "marginal", "bad"], default=None)
@@ -215,10 +223,16 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 out = render_markdown(report)
         elif args.command == "weights":
+            quant_id, quant_inline = split_target(args.quant_model)
+            reference_id, reference_inline = split_target(args.reference)
             wreport = measure_weight_fidelity(
-                args.quant_model,
-                args.reference,
+                quant_id,
+                reference_id,
                 max_chunks=args.max_chunks,
+                quant_revision=quant_inline if quant_inline is not None else args.quant_revision,
+                reference_revision=(
+                    reference_inline if reference_inline is not None else args.reference_revision
+                ),
             )
             if args.format == "json":
                 out = render_json(wreport)

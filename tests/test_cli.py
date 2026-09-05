@@ -148,6 +148,61 @@ def test_weights_subcommand_forwards_max_chunks(monkeypatch, capsys):
     assert captured["kw"]["max_chunks"] == 3
 
 
+def test_weights_subcommand_forwards_revision_flags(monkeypatch, capsys):
+    captured = {}
+
+    def fake_measure(quant, reference, **kw):
+        captured["kw"] = kw
+        return _weight_report()
+
+    monkeypatch.setattr(cli, "measure_weight_fidelity", fake_measure)
+    rc = cli.main(
+        ["weights", "q", "--reference", "r", "--quant-revision", "A", "--reference-revision", "B"]
+    )
+    assert rc == 0
+    assert (captured["kw"]["quant_revision"], captured["kw"]["reference_revision"]) == ("A", "B")
+
+
+def test_weights_subcommand_inline_revisions_win_over_flags(monkeypatch, capsys):
+    """Reds if `repo@rev` is passed through unsplit or a flag overrides the inline pin on
+    either the quant or the reference side."""
+    captured = {}
+
+    def fake_measure(quant, reference, **kw):
+        captured["args"] = (quant, reference, kw)
+        return _weight_report()
+
+    monkeypatch.setattr(cli, "measure_weight_fidelity", fake_measure)
+    rc = cli.main(
+        [
+            "weights",
+            "org/q@inline",
+            "--reference",
+            "org/r@rinline",
+            "--quant-revision",
+            "flag",
+            "--reference-revision",
+            "rflag",
+        ]
+    )
+    assert rc == 0
+    quant, reference, kw = captured["args"]
+    assert (quant, kw["quant_revision"]) == ("org/q", "inline")
+    assert (reference, kw["reference_revision"]) == ("org/r", "rinline")
+
+
+def test_weights_subcommand_malformed_inline_revision_is_a_usage_error(monkeypatch, capsys):
+    """Reds if a malformed pin reaches the probe (a real Hub load would follow)."""
+
+    def boom(*a, **k):
+        raise AssertionError("measure must not be called")
+
+    monkeypatch.setattr(cli, "measure_weight_fidelity", boom)
+    rc = cli.main(["weights", "org/q@", "--reference", "r"])
+    assert rc == 2
+    assert "malformed target" in capsys.readouterr().err
+
+
 def test_cli_weights_installs_caps_before_measure(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[str] = []
     monkeypatch.setattr(cli, "install_memory_caps", lambda: calls.append("caps") or (20, 22))
