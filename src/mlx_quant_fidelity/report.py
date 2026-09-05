@@ -430,8 +430,8 @@ def render_comparison_markdown(report: ComparisonReport) -> str:
         ]
     else:
         lines += [
-            "| target | cost | KL mean | KL p99 | flip | verdict | frontier |",
-            "|---|---|---|---|---|---|---|",
+            "| target | cost | KL mean | KL p99 | flip | bits/wt | verdict | frontier |",
+            "|---|---|---|---|---|---|---|---|",
         ]
     dominated_by: dict[str, str] = dict(report.dominated)
     ranked = [r for r in report.results if r.point is not None]
@@ -457,9 +457,11 @@ def render_comparison_markdown(report: ComparisonReport) -> str:
                 f"{kl_p99:.4f} | {flip:.4f} | {bundled} | {resident} | {verdict} | {mark} |"
             )
         else:
+            bpw_value = getattr(r.report, "quant_bits_per_weight", None)
+            bpw = f"{bpw_value:.2f}" if bpw_value is not None else "—"
             lines.append(
                 f"| `{r.label}` | {_human_bytes(r.point.cost_bytes)} | {r.report.kl.mean:.4f} | "
-                f"{r.report.kl.p99:.4f} | {r.report.flip_rate:.4f} | {r.report.verdict} | {mark} |"
+                f"{r.report.kl.p99:.4f} | {r.report.flip_rate:.4f} | {bpw} | {r.report.verdict} | {mark} |"
             )
     excluded = [r for r in report.results if r.point is None]
     if excluded:
@@ -474,15 +476,15 @@ def render_comparison_markdown(report: ComparisonReport) -> str:
         )
     elif report.budget is not None:
         lines.append(f"No target clears the budget ({report.budget}).")
+    seen_warnings: set[str] = set()
+    for r in report.results:
+        if r.report is None:
+            continue
+        for w in r.report.warnings:
+            if w not in seen_warnings:
+                seen_warnings.add(w)
+                lines.append(f"\n> Note: {w}")
     if is_kv:
-        seen_warnings: set[str] = set()
-        for r in report.results:
-            if r.report is None:
-                continue
-            for w in r.report.warnings:
-                if w not in seen_warnings:
-                    seen_warnings.add(w)
-                    lines.append(f"\n> Note: {w}")
         lines.append(
             "\n_ranked on quantizer-only drift; stock rows carry their bundled deployment "
             "drift alongside._"
