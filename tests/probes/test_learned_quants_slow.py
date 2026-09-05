@@ -40,13 +40,39 @@ def _tiny_corpus(tok, *, chunk_length: int = 64, n_chunks: int = 2) -> Corpus:
 
 
 def _tokenizer_only(repo: str, revision: str):
-    """Load for the tokenizer, then release the model before the probe loads its own pair."""
+    """Load for the tokenizer, then release the model before the probe loads its own pair.
+
+    `lazy=True` is what keeps this cheap: mlx-lm skips the `mx.eval(model.parameters())` it
+    otherwise runs at the end of `load`, so the weights stay unevaluated graph nodes and are
+    dropped without ever being materialized.
+    """
     from mlx_lm import load
 
-    model, tok = load(repo, revision=revision)
+    model, tok = load(repo, revision=revision, lazy=True)
     del model
     mx.clear_cache()
     return tok
+
+
+def _awq_bits_per_weight() -> tuple[float, float, int]:
+    """(ours, mlx-lm's, parameter count) off the loaded AWQ model, released in a `finally`.
+
+    The scalars come back and the model goes away before the caller asserts, so a failing
+    assertion cannot leave a whole model resident for the probe's own pair of loads.
+    """
+    from mlx_lm import load
+    from mlx_lm.utils import compute_bits_per_weight, get_total_parameters
+
+    model, _ = load(AWQ[0], revision=AWQ[1])
+    try:
+        return (
+            bits_per_weight(model),
+            compute_bits_per_weight(model),
+            get_total_parameters(model),
+        )
+    finally:
+        del model
+        mx.clear_cache()
 
 
 @pytest.mark.slow
@@ -73,14 +99,9 @@ def test_awq_repo_measures_mixed_group_sizes_and_matches_mlx_lm_bits_per_weight(
     """Reds if per-module group sizes are lost (the embedding is group 32), if our bits/weight
     diverges from mlx-lm's own definition on a real model, or if bits/weight and on-disk bytes
     stop agreeing (a wrong safetensors glob, or a numerator drift)."""
-    from mlx_lm import load
-    from mlx_lm.utils import compute_bits_per_weight, get_total_parameters
-
-    model, tok = load(AWQ[0], revision=AWQ[1])
-    assert abs(bits_per_weight(model) - compute_bits_per_weight(model)) < 1e-6
-    params = get_total_parameters(model)
-    del model
-    mx.clear_cache()
+    tok = _tokenizer_only(REF, REF_REV)  # the corpus provenance records REF as its tokenizer
+    ours, theirs, params = _awq_bits_per_weight()
+    assert abs(ours - theirs) < 1e-6
     mx.reset_peak_memory()
     report = measure_weight_fidelity(
         AWQ[0], REF, corpus=_tiny_corpus(tok), quant_revision=AWQ[1], reference_revision=REF_REV

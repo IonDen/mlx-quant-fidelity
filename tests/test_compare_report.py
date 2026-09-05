@@ -873,7 +873,8 @@ def _ok(label, report):
 
 def test_weight_table_has_bits_per_weight_before_verdict_and_dash_for_legacy_rows():
     """Reds if the column is missing, placed before KL (shifting cells[2]/[3]), or a legacy row
-    renders `None` instead of a dash."""
+    renders `None` instead of a dash. Also reds if the separator row and the header drift apart
+    — GitHub renders a table whose separator has the wrong column count as literal text."""
     measured = dataclasses.replace(
         _wreport("q4", 0.05, 3000),
         quant_geometry=((4, 64, 3),),
@@ -884,8 +885,12 @@ def test_weight_table_has_bits_per_weight_before_verdict_and_dash_for_legacy_row
     md = render_comparison_markdown(
         _weight_comparison(_ok("q4", measured), _ok("q8", _wreport("q8", 0.01, 6000)))
     )
-    header = next(line for line in md.splitlines() if line.startswith("| target"))
-    assert header == "| target | cost | KL mean | KL p99 | flip | bits/wt | verdict | frontier |"
+    lines = md.splitlines()
+    header_i = next(i for i, line in enumerate(lines) if line.startswith("| target"))
+    assert lines[header_i] == (
+        "| target | cost | KL mean | KL p99 | flip | bits/wt | verdict | frontier |"
+    )
+    assert lines[header_i + 1] == "|---|---|---|---|---|---|---|---|"
     q4 = [
         c.strip()
         for c in next(ln for ln in md.splitlines() if "| `q4` |" in ln)

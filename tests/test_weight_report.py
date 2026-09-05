@@ -9,6 +9,7 @@ from mlx_quant_fidelity.report import (
     WeightFidelityReport,
     render_json,
     render_weight_markdown,
+    weight_bits_text,
     weight_report_from_dict,
 )
 
@@ -163,6 +164,41 @@ def test_headline_with_no_quantized_modules_says_so():
     assert (
         "@ 4-bit (group 64, 4.50 bits/weight; 0 quantized modules) vs"
         in render_weight_markdown(r).splitlines()[0]
+    )
+
+
+def test_headline_with_no_group_size_at_all_says_unknown():
+    """Reds if an empty group-size set renders as a dangling `group , 4.50 bits/weight` —
+    a measured report whose geometry is empty and whose config declared no group size."""
+    r = _measured(quant_geometry=(), quant_group_size=None)
+    assert (
+        "@ 4-bit (group ?, 4.50 bits/weight; 0 quantized modules) vs"
+        in render_weight_markdown(r).splitlines()[0]
+    )
+
+
+def test_mixed_headline_uses_the_singular_noun_for_a_single_module():
+    """Reds on the plural slip: one module at the lowest width must read `1 module at 4-bit`,
+    the same singular/plural rule the full-precision clause already applies."""
+    r = _measured(
+        quant_geometry=((4, 64, 1), (5, 64, 196)),
+        quant_bits_per_weight=5.0,
+        quant_precision="mixed",
+    )
+    assert (
+        "@ mixed 4/5-bit (group 64, 5.00 bits/weight; 1 module at 4-bit, 196 at 5-bit) vs"
+        in render_weight_markdown(r).splitlines()[0]
+    )
+
+
+def test_legacy_report_with_geometry_uses_the_nominal_everywhere():
+    """One legacy predicate: a report is legacy iff it has no bits/weight. Reds if the badge
+    keys off geometry instead — a foreign partial carrying geometry but no bits/weight would
+    get a `mixed 4/5-bit` badge beside a legacy `4-bit (group 64)` headline."""
+    r = dataclasses.replace(_report(), quant_geometry=((4, 64, 3), (5, 64, 1)))
+    assert weight_bits_text(r) == "4-bit"
+    assert render_weight_markdown(r).splitlines()[0] == (
+        "# Weight-fidelity: `org/m-4bit` @ 4-bit (group 64) vs `org/m-bf16`"
     )
 
 

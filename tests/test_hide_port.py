@@ -1,6 +1,8 @@
 """The pre-PR lane that mirrors CI: no turboquant_mlx import, no distribution metadata."""
 
+import importlib
 import importlib.metadata
+import sys
 
 import pytest
 from tests._hide_port import (
@@ -30,6 +32,15 @@ def test_mask_port_sets_none_and_evicts_only_the_port_tree():
     assert modules["mlx"] == 2
 
 
+def test_none_sentinel_makes_the_real_import_raise(monkeypatch):
+    """Pins the CPython contract the lane relies on: `None` in sys.modules halts the import.
+    A future `mask_port` that parked a stub module instead would leave every other test green
+    while `import turboquant_mlx` quietly succeeded."""
+    monkeypatch.setitem(sys.modules, "turboquant_mlx", None)
+    with pytest.raises(ModuleNotFoundError):
+        importlib.import_module("turboquant_mlx")
+
+
 def test_hiding_distribution_hides_both_spellings_and_passes_others_through():
     """Reds if only one spelling is hidden or the wrapper swallows other packages."""
     calls = []
@@ -44,6 +55,15 @@ def test_hiding_distribution_hides_both_spellings_and_passes_others_through():
             wrapped(hidden)
     assert wrapped("mlx-lm") == "dist:mlx-lm"
     assert calls == ["mlx-lm"]
+
+
+def test_hiding_distribution_accepts_the_stdlib_keyword():
+    """Reds if the wrapper renames importlib.metadata.distribution's `distribution_name`
+    parameter: any caller using the documented keyword form would TypeError under the lane."""
+    wrapped = hiding_distribution(lambda name: f"dist:{name}", HIDDEN_DISTRIBUTIONS)
+    assert wrapped(distribution_name="mlx-lm") == "dist:mlx-lm"
+    with pytest.raises(importlib.metadata.PackageNotFoundError):
+        wrapped(distribution_name="turboquant-mlx")
 
 
 def test_flag_conflict_names_run_slow():
@@ -62,6 +82,33 @@ def test_apply_hide_port_records_usage_error_exit_code_before_raising():
             hide_port=True, run_slow=True, modules={}, set_exit_code=lambda c: events.append(c)
         )
     assert events == [int(pytest.ExitCode.USAGE_ERROR)]
+
+
+def test_apply_hide_port_masks_the_module_tree_and_the_distribution_lookup(monkeypatch):
+    """Reds if the enabled path drops the mask or the metadata wrap — a mutant deleting
+    `mask_port(modules)` (or the `distribution` reassignment) survives every other test here.
+    The monkeypatch goes first so teardown restores `distribution` even though the helper
+    reassigns the attribute itself."""
+    monkeypatch.setattr(importlib.metadata, "distribution", lambda name: f"dist:{name}")
+    modules: dict[str, object] = {
+        "turboquant_mlx": object(),
+        "turboquant_mlx.cache": object(),
+        "mlx": 1,
+    }
+    events: list[object] = []
+    assert (
+        apply_hide_port(
+            hide_port=True, run_slow=False, modules=modules, set_exit_code=events.append
+        )
+        is True
+    )
+    assert modules["turboquant_mlx"] is None
+    assert "turboquant_mlx.cache" not in modules
+    assert modules["mlx"] == 1
+    with pytest.raises(importlib.metadata.PackageNotFoundError):
+        importlib.metadata.distribution("turboquant-mlx")
+    assert importlib.metadata.distribution("mlx-lm") == "dist:mlx-lm"
+    assert events == []
 
 
 def test_apply_hide_port_is_a_no_op_without_the_flag():

@@ -146,7 +146,7 @@ def main(argv: list[str] | None = None) -> int:
 
     repo_help = (
         "repo id or local path; repo@revision pins a Hub revision (an inline pin wins "
-        "over the --*-revision flag)"
+        "over --quant-revision / --reference-revision)"
     )
 
     weights = sub.add_parser("weights", help="measure weight-quantization fidelity")

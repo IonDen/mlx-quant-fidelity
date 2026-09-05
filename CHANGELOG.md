@@ -5,7 +5,7 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [0.8.0] - 2026-09-05
 
-The weights probe reports the quantization geometry it measured on the loaded model, and repos published as DWQ and AWQ quantizations are ranked on one yardstick for the first time.
+The weights probe reports the quantization geometry it measured on the loaded model, and repos published as DWQ and AWQ quantizations are ranked on one yardstick.
 
 ### Added
 
@@ -25,7 +25,7 @@ The weights probe reports the quantization geometry it measured on the loaded mo
 
 ### Notes
 
-- A repo published as a DWQ quantization is indistinguishable from a plain quantized repo by anything the tool can read. mlx-lm's DWQ, AWQ and dynamic quantizers all write a `quantization` block recording geometry alone — bits, group sizes, per-module overrides — and never the recipe, so a repo id ending in `-DWQ` is a claim the tool does not check. Rows are labeled by repo, not by method (`docs/measurement-principles.md`).
+- A repo published as a DWQ quantization is indistinguishable from a plain quantized repo by anything the tool can read. mlx-lm's DWQ, AWQ and dynamic quantizers all write a `quantization` block recording geometry alone — bits, group sizes, per-module overrides — and never the recipe, so a repo id ending in `-DWQ` is a claim the tool does not check. The comparison rows therefore carry repo ids (`docs/measurement-principles.md`).
 
 ## [0.7.0] - 2026-08-27
 

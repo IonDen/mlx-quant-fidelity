@@ -53,6 +53,7 @@ That model at 8-bit KV clears the good tier on this corpus. Apple Silicon, Pytho
 - `--chunk-length N` — the scoring window, default 512, hard ceiling 4096.
 - `--quantize-start N` — `0` for stress mode, the default; any N above 0 for deployment mode.
 - `--format json|md|badge` — `md` by default. `json` is the machine-readable form the reports under [`_artifacts/samples/`](_artifacts/samples) are written in, and `badge` works on `weights` as well as `kv`. The two `compare` subcommands take `json` and `md` only.
+- `repo@revision` on `weights` and `compare weights` pins a Hugging Face revision inline; an inline pin wins over `--quant-revision` / `--reference-revision`. `kv` and `compare kv` keep `--model-revision`.
 
 Both cost something to run. The quickstart pulls roughly 1.8 GB of weights plus the corpus on first use, and a wider window costs memory rather than time: the 4096-token run further down peaks at 13.53 GiB, so it will not fit a 16 GB machine. [docs/measurement-principles.md](docs/measurement-principles.md#drift-by-position-depth) lists the measured peak for every window length and explains the pre-flight that refuses one too large for your device.
 
@@ -154,7 +155,7 @@ These five rows were captured with the 0.5.0 report format and are kept as recor
 | Llama-3.2-3B | 8-bit | bf16 | 0.0009 | 0.021 | 0.00 | good |
 | Qwen2.5-7B | 4-bit | 8-bit | 0.109 | 0.16 | +0.9 | marginal |
 
-8-bit weights are near-lossless: about 2% of top tokens flip and perplexity barely moves. 4-bit is a real trade: 15 to 21% of top tokens flip and perplexity climbs by 0.9 to 3.5 points, worst on the small 1B model. The Qwen row compares 4-bit against 8-bit rather than bf16, so its drift is relative to an already-quantized reference, not full precision; the report records that the reference is 8-bit and says so in plain text. The verdict tiers are provisional, anchored to these q8 and q4 reference points on short prose rather than to downstream task accuracy.
+8-bit weights are near-lossless: about 2% of top tokens flip and perplexity barely moves. Across these five rows, 4-bit flips 15 to 21% of top tokens and perplexity climbs by 0.9 to 3.5 points, worst on the smallest model here. The Qwen row compares 4-bit against 8-bit rather than bf16, so its drift is relative to an already-quantized reference, not full precision; the report records that the reference is 8-bit and says so in plain text. The verdict tiers are provisional, anchored to these q8 and q4 reference points on short prose rather than to downstream task accuracy.
 
 Unlike the KV probe, both runs use standard attention, so the drift is the deployed quantized model's weight-quant cost with no quantized-attention kernel folded in. It does still include the quantized-matmul kernel's numerics, which is exactly what you run when you load the model.
 
@@ -181,9 +182,11 @@ mlx-quant-fidelity compare weights \
   --max-chunks 100
 ```
 
-Apple M1 Max, WikiText-2 test, 100 chunks of 512 tokens, peaking at 3.87 GB on the heaviest target. The committed report is [`_artifacts/samples/compare/weight-qwen3-0.6b-ladder.md`](_artifacts/samples/compare/weight-qwen3-0.6b-ladder.md).
+Apple M1 Max, WikiText-2 test, 100 chunks of 512 tokens, peaking at 3.87 GB across the five runs. The committed report is [`_artifacts/samples/compare/weight-qwen3-0.6b-ladder.md`](_artifacts/samples/compare/weight-qwen3-0.6b-ladder.md).
 
-The plain `-4bit` repo and the `-4bit-DWQ` repo are the same size to within 36 bytes, and the metrics disagree about which of them is better. The `-4bit-DWQ` repo has the higher mean KL, 0.3539 against 0.2538, and the lower flip rate and p99 tail, with a smaller perplexity delta: +3.59 against +4.51. Ranking scores quality on mean KL alone, so on that axis the `-4bit-DWQ` repo is the worse of the two, and neither row is dominated: the `-4bit-DWQ` row stays on the frontier only on its 36-byte cost edge. Of the three 4-bit repos, `-4bit-AWQ` is the best on every quality column and on perplexity delta (+3.23), and it stores 4.63 bits per weight rather than 4.50, one module at group 32 where the rest of the model uses 64. Above 4 bits the drift falls away quickly: 6-bit is marginal and 8-bit good on this model and this corpus. The report does not know which of these repos was produced with learned scales or activation-aware scaling — mlx-lm records only the geometry — so the rows are labeled by repo, not by method.
+The plain `-4bit` repo and the `-4bit-DWQ` repo are the same size to within 36 bytes, and the metrics disagree about which of them is better. The `-4bit-DWQ` repo has the higher mean KL, 0.3539 against 0.2538, and the lower flip rate and p99 tail, with a smaller perplexity delta: +3.59 against +4.51. Ranking scores quality on mean KL alone, so on that axis the `-4bit-DWQ` repo is the worse of the two, and neither row is dominated: the `-4bit-DWQ` row stays on the frontier only on its 36-byte cost edge.
+
+Of the three 4-bit repos, `-4bit-AWQ` is the best on every quality column and on perplexity delta (+3.23), and it stores 4.63 [bits per weight](docs/measurement-principles.md#what-the-weight-report-can-and-cannot-say-about-the-method) rather than 4.50; its geometry has one module at group 32 where the other 196 use 64. Above 4 bits the drift falls away quickly: 6-bit is marginal and 8-bit good on this model and this corpus. The report does not know which of these repos was produced with learned scales or activation-aware scaling — mlx-lm records only the geometry — so the rows are labeled by repo, not by method.
 
 ## Comparing quantizations
 

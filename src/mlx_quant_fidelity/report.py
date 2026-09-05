@@ -98,8 +98,13 @@ class WeightFidelityReport:
 
 
 def weight_bits_text(report: WeightFidelityReport) -> str:
-    """`4-bit`, `mixed 4/5-bit`, or `?-bit` — the short precision label for badges."""
-    if report.quant_geometry:
+    """`4-bit`, `mixed 4/5-bit`, or `?-bit` — the short precision label for badges.
+
+    Legacy is decided by one rule, shared with `weight_precision_text`: a report is legacy iff it
+    carries no `quant_bits_per_weight`. A legacy report reads its declared nominal `quant_bits`
+    whatever geometry it happens to carry, so the badge and the headline never disagree.
+    """
+    if report.quant_bits_per_weight is not None and report.quant_geometry:
         bits = sorted({b for b, _, _ in report.quant_geometry})
         if len(bits) > 1:
             return "mixed " + "/".join(str(b) for b in bits) + "-bit"
@@ -116,13 +121,17 @@ def weight_precision_text(report: WeightFidelityReport) -> str | None:
     groups = sorted({g for _, g, _ in geometry}) or (
         [report.quant_group_size] if report.quant_group_size is not None else []
     )
-    parts = ["group " + "/".join(str(g) for g in groups), f"{bpw:.2f} bits/weight"]
+    parts = [
+        "group " + ("/".join(str(g) for g in groups) if groups else "?"),
+        f"{bpw:.2f} bits/weight",
+    ]
     extras: list[str] = []
     bits = sorted({b for b, _, _ in geometry})
     if len(bits) > 1:
         per_bits = {b: sum(n for bb, _, n in geometry if bb == b) for b in bits}
+        lowest = per_bits[bits[0]]
         extras.append(
-            f"{per_bits[bits[0]]} modules at {bits[0]}-bit, "
+            f"{lowest} {'module' if lowest == 1 else 'modules'} at {bits[0]}-bit, "
             + ", ".join(f"{per_bits[b]} at {b}-bit" for b in bits[1:])
         )
     if not geometry:

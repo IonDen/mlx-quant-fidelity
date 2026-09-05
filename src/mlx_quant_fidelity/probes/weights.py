@@ -282,8 +282,11 @@ def measure_weight_fidelity(
     InsufficientMemoryError (pair too large for the device), ExactZeroError (identical repos).
 
     Args:
-        quant_model_id: Local path or HF repo id of the quantized model.
-        reference_model_id: Local path or HF repo id of the full-precision (or lower-quant) reference.
+        quant_model_id: Local path or HF repo id of the quantized model (no inline ``@revision``
+            here — pass ``quant_revision``; the CLI splits ``repo@revision`` for you).
+        reference_model_id: Local path or HF repo id of the full-precision (or lower-quant)
+            reference (no inline ``@revision`` here — pass ``reference_revision``; the CLI splits
+            ``repo@revision`` for you).
         corpus: Pre-built corpus to score; if None, WikiText-2 is loaded automatically.
         max_chunks: Score at most this many corpus chunks (applies to both the auto-loaded
             and a caller-provided corpus).

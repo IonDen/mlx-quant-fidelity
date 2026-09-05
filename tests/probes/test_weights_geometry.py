@@ -101,8 +101,11 @@ def test_measured_geometry_groups_by_bits_and_group_size_and_counts_full_precisi
 
 
 def test_measured_geometry_is_uniform_when_all_modules_share_one_bit_width():
-    """The AWQ-shaped case: a dummy top-level nominal must not leak in — only the modules'
-    own bits count. Reds if anything but the modules is consulted."""
-    geometry, n_full = measured_geometry(_Tree(a=_Quant(8, 64), b=_Quant(8, 64)))
+    """All modules at one width collapse to a single geometry triple with n_full == 0, and the
+    helper consults only the modules — it has no config to read. The root carries a contradictory
+    `bits` of its own: reds if a non-leaf attribute reaches the geometry."""
+    tree = _Tree(a=_Quant(8, 64), b=_Quant(8, 64))
+    tree.bits = 3
+    geometry, n_full = measured_geometry(tree)
     assert geometry == ((8, 64, 2),)
     assert n_full == 0

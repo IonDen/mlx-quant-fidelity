@@ -25,13 +25,14 @@ def hiding_distribution(
     real: Callable[[str], object], hidden: frozenset[str] = HIDDEN_DISTRIBUTIONS
 ) -> Callable[[str], object]:
     """Wrap importlib.metadata.distribution so the hidden names look uninstalled.
-    `version()` resolves `distribution` from the same module globals, so one wrapper covers both."""
+    `version()` resolves `distribution` from the same module globals, so one wrapper covers both.
+    The parameter keeps the stdlib's own name so a keyword call still resolves."""
     hidden_canonical = {_canonical(h) for h in hidden}
 
-    def _distribution(name: str) -> object:
-        if _canonical(name) in hidden_canonical:
-            raise importlib.metadata.PackageNotFoundError(name)
-        return real(name)
+    def _distribution(distribution_name: str) -> object:
+        if _canonical(distribution_name) in hidden_canonical:
+            raise importlib.metadata.PackageNotFoundError(distribution_name)
+        return real(distribution_name)
 
     return _distribution
 
