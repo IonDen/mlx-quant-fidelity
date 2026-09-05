@@ -1,6 +1,8 @@
 import dataclasses
 import json
 
+import pytest
+
 from mlx_quant_fidelity.corpora.provenance import CorpusProvenance
 from mlx_quant_fidelity.metrics import ScalarSummary
 from mlx_quant_fidelity.report import (
@@ -86,3 +88,119 @@ def test_weight_from_dict_accepts_missing_device():
     d = dataclasses.asdict(_report())
     del d["device"]
     assert weight_report_from_dict(d).device is None
+
+
+def _measured(**overrides) -> WeightFidelityReport:
+    base = _report()
+    fields = {
+        "quant_geometry": ((4, 64, 197),),
+        "quant_n_full_precision": 0,
+        "quant_bits_per_weight": 4.501,
+        "quant_precision": "uniform",
+    }
+    fields.update(overrides)
+    return dataclasses.replace(base, **fields)
+
+
+def test_legacy_report_defaults_new_fields_to_none_and_keeps_the_old_headline():
+    """Reds if a legacy report (no bits/weight) picks up the new headline."""
+    r = _report()
+    assert (
+        r.quant_geometry,
+        r.quant_n_full_precision,
+        r.quant_bits_per_weight,
+        r.quant_precision,
+    ) == (None, None, None, None)
+    assert render_weight_markdown(r).splitlines()[0] == (
+        "# Weight-fidelity: `org/m-4bit` @ 4-bit (group 64) vs `org/m-bf16`"
+    )
+
+
+def test_uniform_headline_carries_group_and_bits_per_weight():
+    """Reds if nominal and measured are swapped or bits/weight is not two decimals."""
+    assert render_weight_markdown(_measured()).splitlines()[0] == (
+        "# Weight-fidelity: `org/m-4bit` @ 4-bit (group 64, 4.50 bits/weight) vs `org/m-bf16`"
+    )
+
+
+def test_uniform_with_two_group_sizes_prints_both():
+    """Reds if the group-size set collapses to the first (or the nominal) group size."""
+    r = _measured(quant_geometry=((4, 32, 1), (4, 64, 196)), quant_bits_per_weight=4.632)
+    assert "@ 4-bit (group 32/64, 4.63 bits/weight) vs" in render_weight_markdown(r).splitlines()[0]
+
+
+def test_mixed_headline_lists_modules_per_bit_width():
+    """Reds if a mixed report renders as uniform or the per-bits counts are lost."""
+    r = _measured(
+        quant_geometry=((4, 64, 53), (5, 64, 144)),
+        quant_bits_per_weight=5.02,
+        quant_precision="mixed",
+    )
+    assert (
+        "@ mixed 4/5-bit (group 64, 5.02 bits/weight; 53 modules at 4-bit, 144 at 5-bit) vs"
+        in (render_weight_markdown(r).splitlines()[0])
+    )
+
+
+def test_headline_reports_quantizable_modules_left_at_full_precision():
+    """Reds on a singular/plural slip or if the count is dropped."""
+    r = _measured(quant_n_full_precision=1)
+    assert (
+        "; 1 quantizable module left at full precision) vs"
+        in render_weight_markdown(r).splitlines()[0]
+    )
+    r2 = _measured(quant_n_full_precision=2)
+    assert (
+        "; 2 quantizable modules left at full precision) vs"
+        in render_weight_markdown(r2).splitlines()[0]
+    )
+
+
+def test_headline_with_no_quantized_modules_says_so():
+    """Unreachable through the gate today (the config declares quantization) but reachable if a
+    config lies; reds if an empty geometry renders as a bare uniform headline."""
+    r = _measured(quant_geometry=())
+    assert (
+        "@ 4-bit (group 64, 4.50 bits/weight; 0 quantized modules) vs"
+        in render_weight_markdown(r).splitlines()[0]
+    )
+
+
+def test_weight_from_dict_round_trips_geometry_as_tuples():
+    d = json.loads(render_json(_measured(quant_geometry=((4, 32, 1), (4, 64, 196)))))
+    back = weight_report_from_dict(d)
+    assert back.quant_geometry == ((4, 32, 1), (4, 64, 196))
+    assert isinstance(back.quant_geometry[0], tuple)
+
+
+def test_weight_from_dict_accepts_the_asdict_tuple_form():
+    """`dataclasses.asdict` keeps tuples; reds if the validator accepts lists only."""
+    original = _measured(quant_geometry=((4, 32, 1), (4, 64, 196)))
+    assert weight_report_from_dict(dataclasses.asdict(original)) == original
+
+
+def test_weight_from_dict_legacy_dict_yields_none_fields():
+    d = json.loads(render_json(_report()))
+    for key in (
+        "quant_geometry",
+        "quant_n_full_precision",
+        "quant_bits_per_weight",
+        "quant_precision",
+    ):
+        d.pop(key, None)
+    back = weight_report_from_dict(d)
+    assert back.quant_geometry is None
+    assert back.quant_bits_per_weight is None
+
+
+@pytest.mark.parametrize(
+    "bad", [[[4, 64]], [["4", 64, 1]], [[True, 64, 1]], "4-64-1", [[4, 64, 1, 9]]]
+)
+def test_weight_from_dict_rejects_malformed_geometry(bad):
+    """Reds if geometry is passed through unvalidated (a frozen dataclass checks nothing)."""
+    from mlx_quant_fidelity.errors import ReportSchemaError
+
+    d = json.loads(render_json(_measured()))
+    d["quant_geometry"] = bad
+    with pytest.raises(ReportSchemaError, match="quant_geometry"):
+        weight_report_from_dict(d)

@@ -80,6 +80,48 @@ class WeightFidelityReport:
     verdict: str
     warnings: tuple[str, ...]
     device: str | None = None
+    quant_geometry: tuple[tuple[int, int, int], ...] | None = None
+    quant_n_full_precision: int | None = None
+    quant_bits_per_weight: float | None = None
+    quant_precision: str | None = None  # "uniform" | "mixed"
+
+
+def weight_bits_text(report: WeightFidelityReport) -> str:
+    """`4-bit`, `mixed 4/5-bit`, or `?-bit` — the short precision label for badges."""
+    if report.quant_geometry:
+        bits = sorted({b for b, _, _ in report.quant_geometry})
+        if len(bits) > 1:
+            return "mixed " + "/".join(str(b) for b in bits) + "-bit"
+        return f"{bits[0]}-bit"
+    return f"{report.quant_bits}-bit" if report.quant_bits is not None else "?-bit"
+
+
+def weight_precision_text(report: WeightFidelityReport) -> str | None:
+    """Headline precision text for a measured report; None for a legacy (pre-0.8.0) report."""
+    bpw = report.quant_bits_per_weight
+    if bpw is None:
+        return None
+    geometry = report.quant_geometry or ()
+    groups = sorted({g for _, g, _ in geometry}) or (
+        [report.quant_group_size] if report.quant_group_size is not None else []
+    )
+    parts = ["group " + "/".join(str(g) for g in groups), f"{bpw:.2f} bits/weight"]
+    extras: list[str] = []
+    bits = sorted({b for b, _, _ in geometry})
+    if len(bits) > 1:
+        per_bits = {b: sum(n for bb, _, n in geometry if bb == b) for b in bits}
+        extras.append(
+            f"{per_bits[bits[0]]} modules at {bits[0]}-bit, "
+            + ", ".join(f"{per_bits[b]} at {b}-bit" for b in bits[1:])
+        )
+    if not geometry:
+        extras.append("0 quantized modules")
+    n_full = report.quant_n_full_precision or 0
+    if n_full:
+        noun = "module" if n_full == 1 else "modules"
+        extras.append(f"{n_full} quantizable {noun} left at full precision")
+    tail = "; " + "; ".join(extras) if extras else ""
+    return f"{weight_bits_text(report)} ({', '.join(parts)}{tail})"
 
 
 def render_json(report: FidelityReport | WeightFidelityReport) -> str:
@@ -89,11 +131,13 @@ def render_json(report: FidelityReport | WeightFidelityReport) -> str:
 
 def render_weight_markdown(report: WeightFidelityReport) -> str:
     """Human-readable weight-fidelity report. Always qualifies by corpus + context length."""
-    bits = report.quant_bits if report.quant_bits is not None else "unknown"
+    precision = weight_precision_text(report)
+    if precision is None:  # legacy report: the pre-0.8.0 headline, byte-for-byte
+        bits = report.quant_bits if report.quant_bits is not None else "unknown"
+        precision = f"{bits}-bit (group {report.quant_group_size})"
     c = report.corpus
     lines = [
-        f"# Weight-fidelity: `{report.quant_model_id}` @ {bits}-bit "
-        f"(group {report.quant_group_size}) vs `{report.reference_model_id}`",
+        f"# Weight-fidelity: `{report.quant_model_id}` @ {precision} vs `{report.reference_model_id}`",
         "",
         f"**Verdict:** {report.verdict} (provisional tiers — WikiText-2, "
         "not validated against downstream accuracy)",
@@ -307,6 +351,21 @@ def weight_report_from_dict(d: dict[str, object]) -> WeightFidelityReport:
             raise ReportSchemaError("persisted report 'kl'/'corpus' must be dicts")
         fields = {**d, "kl": ScalarSummary(**kl), "corpus": CorpusProvenance(**corpus)}
         fields["warnings"] = tuple(cast("list[str]", fields.get("warnings") or []))
+        geometry = d.get("quant_geometry")
+        if geometry is not None:
+            ok = isinstance(geometry, (list, tuple)) and all(
+                isinstance(t, (list, tuple))
+                and len(t) == 3
+                and all(isinstance(x, int) and not isinstance(x, bool) for x in t)
+                for t in geometry
+            )
+            if not ok:
+                raise ReportSchemaError(
+                    "persisted 'quant_geometry' must be a list of [bits, group_size, n_modules] int triples"
+                )
+            fields["quant_geometry"] = tuple(
+                (int(t[0]), int(t[1]), int(t[2])) for t in cast("list[list[int]]", geometry)
+            )
         return WeightFidelityReport(**fields)  # type: ignore[arg-type]
     except ReportSchemaError:
         raise

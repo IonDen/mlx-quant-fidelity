@@ -21,7 +21,7 @@ def badge_color(verdict: str) -> str:
 
 def badge_for_report(report: "FidelityReport | WeightFidelityReport") -> dict[str, str]:
     """Assemble {label, message, color} from a report. Message carries corpus + length + mode."""
-    from mlx_quant_fidelity.report import FidelityReport, method_bits_text
+    from mlx_quant_fidelity.report import FidelityReport, method_bits_text, weight_bits_text
 
     corpus = report.corpus
     if isinstance(report, FidelityReport):
@@ -34,10 +34,7 @@ def badge_for_report(report: "FidelityReport | WeightFidelityReport") -> dict[st
             message = f"{message} · {report.kv_method}"
     else:
         label = "Weight fidelity"
-        bits = report.quant_bits if report.quant_bits is not None else "?"
-        message = (
-            f"{report.verdict} · {bits}-bit · {corpus.name}/{corpus.chunk_length} · provisional"
-        )
+        message = f"{report.verdict} · {weight_bits_text(report)} · {corpus.name}/{corpus.chunk_length} · provisional"
     return {"label": label, "message": message, "color": badge_color(report.verdict)}
 
 
