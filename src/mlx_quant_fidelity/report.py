@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import math
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, cast
 
@@ -362,6 +363,33 @@ class ComparisonReport:
     mlx_lm_version: str
 
 
+def _validate_measured_precision_fields(d: dict[str, object], fields: dict[str, object]) -> None:
+    """Validate the three measured-precision siblings of `quant_geometry`, in place on `fields`.
+
+    A frozen dataclass checks nothing, so an unvalidated field reaches the renderers — where
+    `quant_bits_per_weight` is formatted with `:.2f` and `quant_n_full_precision` is pluralized.
+    Raising `ReportSchemaError` here is what lets `_envelope_to_result` isolate one corrupt
+    partial as a failed row instead of crashing the whole comparison.
+    """
+    bpw = d.get("quant_bits_per_weight")
+    if bpw is not None:
+        if isinstance(bpw, bool) or not isinstance(bpw, (int, float)) or not math.isfinite(bpw):
+            raise ReportSchemaError(
+                "persisted 'quant_bits_per_weight' must be a finite number or null"
+            )
+        fields["quant_bits_per_weight"] = float(bpw)
+    n_full = d.get("quant_n_full_precision")
+    if n_full is not None and (
+        isinstance(n_full, bool) or not isinstance(n_full, int) or n_full < 0
+    ):
+        raise ReportSchemaError(
+            "persisted 'quant_n_full_precision' must be a non-negative integer or null"
+        )
+    precision = d.get("quant_precision")
+    if precision is not None and precision not in ("uniform", "mixed"):
+        raise ReportSchemaError("persisted 'quant_precision' must be 'uniform', 'mixed' or null")
+
+
 def weight_report_from_dict(d: dict[str, object]) -> WeightFidelityReport:
     """Rehydrate a WeightFidelityReport from `dataclasses.asdict` output (subprocess partials)."""
     try:
@@ -386,6 +414,7 @@ def weight_report_from_dict(d: dict[str, object]) -> WeightFidelityReport:
             fields["quant_geometry"] = tuple(
                 (int(t[0]), int(t[1]), int(t[2])) for t in cast("list[list[int]]", geometry)
             )
+        _validate_measured_precision_fields(d, fields)
         return WeightFidelityReport(**fields)  # type: ignore[arg-type]
     except ReportSchemaError:
         raise

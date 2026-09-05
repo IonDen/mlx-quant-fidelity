@@ -4,6 +4,7 @@ import json
 import pytest
 
 from mlx_quant_fidelity.corpora.provenance import CorpusProvenance
+from mlx_quant_fidelity.errors import ReportSchemaError
 from mlx_quant_fidelity.metrics import ScalarSummary
 from mlx_quant_fidelity.report import (
     WeightFidelityReport,
@@ -240,3 +241,52 @@ def test_weight_from_dict_rejects_malformed_geometry(bad):
     d["quant_geometry"] = bad
     with pytest.raises(ReportSchemaError, match="quant_geometry"):
         weight_report_from_dict(d)
+
+
+@pytest.mark.parametrize("bad", ["4.5", True, float("nan"), [4.5]])
+def test_weight_from_dict_rejects_malformed_bits_per_weight(bad):
+    """Reds if a corrupt partial's quant_bits_per_weight escapes CorruptPartial isolation and
+    crashes the render: the comparison table formats it with `:.2f`, which raises on a string."""
+    d = json.loads(render_json(_measured()))
+    d["quant_bits_per_weight"] = bad
+    with pytest.raises(ReportSchemaError, match="quant_bits_per_weight"):
+        weight_report_from_dict(d)
+
+
+@pytest.mark.parametrize("bad", ["0", -1, True])
+def test_weight_from_dict_rejects_malformed_n_full_precision(bad):
+    """Reds if a corrupt partial's quant_n_full_precision escapes CorruptPartial isolation and
+    crashes the render: the headline pluralizes on it and a string would read as a count."""
+    d = json.loads(render_json(_measured()))
+    d["quant_n_full_precision"] = bad
+    with pytest.raises(ReportSchemaError, match="quant_n_full_precision"):
+        weight_report_from_dict(d)
+
+
+@pytest.mark.parametrize("bad", ["UNIFORM", "none", 4])
+def test_weight_from_dict_rejects_malformed_precision(bad):
+    """Reds if a corrupt partial's quant_precision escapes CorruptPartial isolation and reaches
+    the render as an unrecognized precision label."""
+    d = json.loads(render_json(_measured()))
+    d["quant_precision"] = bad
+    with pytest.raises(ReportSchemaError, match="quant_precision"):
+        weight_report_from_dict(d)
+
+
+@pytest.mark.parametrize(
+    "field", ["quant_bits_per_weight", "quant_n_full_precision", "quant_precision"]
+)
+def test_weight_from_dict_accepts_an_explicit_null_measured_field(field):
+    """Reds if a validator rejects an explicit null instead of only a malformed value — every
+    partial written before 0.8.0 carries all three fields as null."""
+    d = json.loads(render_json(_measured()))
+    d[field] = None
+    assert getattr(weight_report_from_dict(d), field) is None
+
+
+def test_weight_from_dict_stores_an_integral_bits_per_weight_as_a_float():
+    """Reds if the validator passes an int through: the field is declared `float | None`, and a
+    partial hand-written (or emitted by another tool) as `8` would violate that contract."""
+    d = json.loads(render_json(_measured()))
+    d["quant_bits_per_weight"] = 8
+    assert isinstance(weight_report_from_dict(d).quant_bits_per_weight, float)

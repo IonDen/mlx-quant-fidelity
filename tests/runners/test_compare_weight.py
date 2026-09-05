@@ -401,6 +401,31 @@ def test_weight_collect_isolates_malformed_cached_partial(monkeypatch, tmp_path)
     assert "q8" in report.frontier  # the good target still ranks; no abort
 
 
+def test_weight_collect_isolates_a_partial_with_a_non_numeric_bits_per_weight(
+    monkeypatch, tmp_path
+):
+    """Reds if a corrupt `quant_bits_per_weight` escapes CorruptPartial isolation: the string
+    reaches the comparison renderer's `bits/wt` column, whose `:.2f` raises ValueError and takes
+    the whole run's output down with it."""
+    from mlx_quant_fidelity.report import render_comparison_markdown
+
+    good = _weight_ok_envelope_with_identity("q8", 0.01, 8000)
+    bad = _weight_ok_envelope_with_identity("q6", 0.04, 6200)
+    bad["report"]["quant_bits_per_weight"] = "not-a-number"  # run_identity stays valid → no re-run
+    (tmp_path / "q8.json").write_text(json.dumps(good))
+    (tmp_path / "q6.json").write_text(json.dumps(bad))
+
+    def _boom(*a, **k):
+        raise AssertionError("worker must not run for cached partials")
+
+    monkeypatch.setattr(cmp, "_run_weight_target", _boom)
+    report = cmp.compare_weight_fidelity(["q8", "q6"], "ref", artifacts_dir=tmp_path)
+    q6 = next(r for r in report.results if r.label == "q6")
+    assert (q6.status, q6.error_type) == ("failed", "CorruptPartial")
+    assert "q8" in report.frontier  # the good target still ranks; no abort
+    assert "`q8`" in render_comparison_markdown(report)  # and the run still renders
+
+
 def test_weight_envelope_with_invalid_verdict_is_corrupt_partial():
     from mlx_quant_fidelity.runners.compare import _envelope_to_result
 
