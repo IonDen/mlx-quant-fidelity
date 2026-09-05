@@ -5,9 +5,10 @@ from __future__ import annotations
 import importlib.metadata
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import mlx.core as mx
+from mlx.utils import tree_flatten
 
 from mlx_quant_fidelity._memory_caps import device_string, install_memory_caps
 from mlx_quant_fidelity.errors import (
@@ -21,6 +22,8 @@ from mlx_quant_fidelity.probes._paired import _aggregate_chunks, _check_exact_ze
 from mlx_quant_fidelity.report import WeightFidelityReport
 
 if TYPE_CHECKING:
+    from mlx.nn.layers.base import Module
+
     from mlx_quant_fidelity.corpora.provenance import Corpus
 
 TOKENIZER_ASSUMPTION_WARNING = (
@@ -81,6 +84,79 @@ def extract_quant_meta(config: dict[str, object]) -> QuantMeta | None:
     if isinstance(text, dict):
         return extract_quant_meta(cast("dict[str, object]", text))
     return None
+
+
+Geometry = tuple[tuple[int, int, int], ...]
+"""Measured quantization geometry: sorted (bits, group_size, module_count) triples."""
+
+METHOD_NOT_RECORDED_WARNING = (
+    "Quantization method is not recorded in the repo config — mlx-lm's DWQ, AWQ and dynamic "
+    "quantizers write a quantization block that records only geometry (bits, group sizes, "
+    "per-module overrides), never the recipe. This report describes the geometry of the loaded "
+    "model, not the method that produced it."
+)
+
+
+def _is_module(obj: object) -> bool:
+    from mlx.nn.layers.base import Module as _Module
+
+    return isinstance(obj, _Module)
+
+
+def _leaf_modules(model: Module) -> list[tuple[str, Any]]:
+    """mlx-lm's leaf view (`get_total_parameters`): every childless module, with its path."""
+    return cast(
+        "list[tuple[str, Any]]",
+        tree_flatten(model.leaf_modules(), is_leaf=_is_module),  # type: ignore[no-untyped-call]
+    )
+
+
+def measured_geometry(model: Module) -> tuple[Geometry, int]:
+    """Read the loaded model's quantization geometry from its modules, not its config.
+
+    Returns ``(geometry, n_full_precision)``: sorted ``(bits, group_size, module_count)`` triples
+    over leaf modules exposing ``bits`` (mlx's quantized layers all carry ``bits`` and
+    ``group_size`` — the same duck-typing mlx-lm uses), and the number of leaves that expose
+    ``to_quantized`` but carry no ``bits``: quantizable modules the quantizer left at full
+    precision. Norms and RoPE have no ``to_quantized`` and are never counted.
+    """
+    counts: dict[tuple[int, int], int] = {}
+    n_full_precision = 0
+    for _, module in _leaf_modules(model):
+        if hasattr(module, "bits"):
+            key = (int(module.bits), int(module.group_size))
+            counts[key] = counts.get(key, 0) + 1
+        elif hasattr(module, "to_quantized"):
+            n_full_precision += 1
+    geometry: Geometry = tuple((b, g, n) for (b, g), n in sorted(counts.items()))
+    return geometry, n_full_precision
+
+
+def bits_per_weight(model: Module) -> float:
+    """Effective bits per weight over the whole model, as mlx-lm defines it.
+
+    Numerator: bytes of every array in the module tree (``mlx_lm.utils.compute_bits_per_weight``
+    at 0.31.3 reduces over the whole model, so arrays on non-leaf modules and ``_``-prefixed
+    buffers count). Denominator: mlx-lm's ``get_total_parameters`` rule over leaf modules — a
+    quantized module contributes ``weight.size * 32 // bits`` (+ its layer bias), any other
+    module its ``parameters()`` sizes. Two quirks are inherited on purpose so the number matches
+    what ``mlx_lm.convert`` prints: ``_``-prefixed arrays count as bytes but not params, and a
+    quantized module is recognised by duck-typed ``bits``.
+    """
+    flat = cast("list[tuple[str, object]]", tree_flatten(model))
+    total_bytes = sum(a.nbytes for _, a in flat if isinstance(a, mx.array))
+    params = 0
+    for _, module in _leaf_modules(model):
+        if hasattr(module, "bits"):
+            params += int(module.weight.size) * 32 // int(module.bits)
+            if hasattr(module, "bias"):
+                params += int(module.bias.size)
+        else:
+            arrays = cast("list[tuple[str, mx.array]]", tree_flatten(module.parameters()))
+            params += sum(v.size for _, v in arrays)
+    if params == 0:
+        raise ValueError("model has no parameters; cannot compute bits per weight")
+    return total_bytes * 8 / params
 
 
 def _top_or_text(config: dict[str, object], key: str) -> object:
