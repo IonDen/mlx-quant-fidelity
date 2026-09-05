@@ -13,12 +13,12 @@ The weights probe reports the quantization geometry it measured on the loaded mo
 - A `bits/wt` column in `compare weights`, and each target's own report notes under a weight comparison, where previously only a KV comparison carried them.
 - `repo@revision` on `weights` and `compare weights`, pinning a Hub revision inline; an inline pin wins over the flag. `kv` and `compare kv` keep `--model-revision`.
 - `--quant-revision` and `--reference-revision` on `weights`, matching what `compare weights` already accepted.
-- A committed `compare weights` sample ranking five Qwen3-0.6B repos against the bf16 reference: two 4-bit repos of the same size, one published as a DWQ quantization and one plain, a third published as AWQ, and the 6-bit and 8-bit rungs (`_artifacts/samples/compare/weight-qwen3-0.6b-ladder.{json,md}`). A Qwen3-4B ladder follows in a later release.
+- A committed `compare weights` sample ranking five Qwen3-0.6B repos against the bf16 reference: two 4-bit repos of the same size, one published as a DWQ quantization and one plain, a third published as AWQ, and the 6-bit and 8-bit rungs (`_artifacts/samples/compare/weight-qwen3-0.6b-ladder.{json,md}`).
 - `pytest --hide-port`: the default suite can now be run with the TurboQuant port masked, matching CI.
 
 ### Changed
 
-- A weight report's headline carries the measured precision instead of the declared nominal: `@ 4-bit (group 64, 4.50 bits/weight)` for a uniform model, and a `mixed 4/5-bit` form naming how many modules sit at each width when more than one bit width is in use. A report written before 0.8.0 keeps its original headline byte-for-byte.
+- A weight report's headline carries the measured precision instead of the declared nominal: `@ 4-bit (group 64, 4.50 bits/weight)` for a uniform model, and a `mixed 4/5-bit` form when more than one bit width is in use. A report written before 0.8.0 keeps its original headline byte-for-byte.
 - The weight badge labels a report spanning more than one bit width by the widths it found (`mixed 4/5-bit` for a model holding both) rather than by the declared nominal.
 - Every new weight report carries a standing note that the method producing the quantization is not recorded anywhere the tool can read.
 - The committed Qwen2.5-0.5B `compare weights` sample was regenerated with pinned revisions.

@@ -183,7 +183,7 @@ mlx-quant-fidelity compare weights \
 
 Apple M1 Max, WikiText-2 test, 100 chunks of 512 tokens, peaking at 3.87 GB on the heaviest target. The committed report is [`_artifacts/samples/compare/weight-qwen3-0.6b-ladder.md`](_artifacts/samples/compare/weight-qwen3-0.6b-ladder.md).
 
-The plain `-4bit` repo and the `-4bit-DWQ` repo are the same size to within 36 bytes, and they disagree about which of them is better. The `-4bit-DWQ` repo has the higher mean KL, 0.3539 against 0.2538, and the lower flip rate, p99 tail and perplexity delta: 0.2289, 1.4570 and +3.59, against 0.2586, 1.5364 and +4.51. Ranking scores quality on mean KL alone, so on that axis DWQ is the worse of the two, and neither row is dominated, because each is ahead of the other on one axis. Of the three 4-bit repos, `-4bit-AWQ` is the best on every quality column and on perplexity delta (+3.23), and it stores 4.63 bits per weight rather than 4.50 to get there, its embedding quantized at group 32 where the rest of the model uses 64. Above 4 bits the drift falls away quickly: 6-bit is marginal and 8-bit good on this model and this corpus. The report does not know which of these repos was produced with learned scales or activation-aware scaling — mlx-lm records only the geometry — so the rows are labeled by repo, not by method.
+The plain `-4bit` repo and the `-4bit-DWQ` repo are the same size to within 36 bytes, and the metrics disagree about which of them is better. The `-4bit-DWQ` repo has the higher mean KL, 0.3539 against 0.2538, and the lower flip rate and p99 tail, with a smaller perplexity delta: +3.59 against +4.51. Ranking scores quality on mean KL alone, so on that axis the `-4bit-DWQ` repo is the worse of the two, and neither row is dominated: the `-4bit-DWQ` row stays on the frontier only on its 36-byte cost edge. Of the three 4-bit repos, `-4bit-AWQ` is the best on every quality column and on perplexity delta (+3.23), and it stores 4.63 bits per weight rather than 4.50, one module at group 32 where the rest of the model uses 64. Above 4 bits the drift falls away quickly: 6-bit is marginal and 8-bit good on this model and this corpus. The report does not know which of these repos was produced with learned scales or activation-aware scaling — mlx-lm records only the geometry — so the rows are labeled by repo, not by method.
 
 ## Comparing quantizations
 
@@ -310,7 +310,7 @@ print(report.kl.mean, report.flip_rate, report.verdict)
 
 ## Status
 
-0.8.0, released on PyPI as `mlx-quant-fidelity`. A weight report now carries the quantization geometry measured on the model it loaded — per-module bits and group sizes, and the effective bits per weight — so a ladder of repos published at the same nominal bit width can be ranked against one reference and read against each other. Threshold validation and wider attention coverage are on the [roadmap](ROADMAP.md).
+0.8.0, released on PyPI as `mlx-quant-fidelity`. A weight report now carries the quantization geometry measured on the model it loaded — per-module bits and group sizes, and the effective bits per weight — so repos published at the same nominal bit width can be ranked against one reference and read against each other. Threshold validation and wider attention coverage are on the [roadmap](ROADMAP.md).
 
 ## License
 
