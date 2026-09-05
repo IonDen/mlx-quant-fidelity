@@ -286,6 +286,10 @@ def _patch_loads(monkeypatch, ref_peak, quant_peak, *, calls, ref_quantized=Fals
 
     monkeypatch.setattr(w, "install_memory_caps", lambda: calls.append("caps") or (0, 0))
     monkeypatch.setattr(w, "_resolve_weight_bytes", lambda *a, **k: None)  # skip pre-flight
+    # The fake models are plain objects, not nn.Modules — keep the real geometry/bpw helpers
+    # from ever touching them; individual tests override these where they need to.
+    monkeypatch.setattr(w, "measured_geometry", lambda model: (((4, 64, 3),), 0))
+    monkeypatch.setattr(w, "bits_per_weight", lambda model: 4.5)
     ref_cfg = {"model_type": "llama", "vocab_size": 3}
     if ref_quantized:
         ref_cfg = {**ref_cfg, "quantization": {"bits": 8, "group_size": 64}}
@@ -307,6 +311,42 @@ def _patch_loads(monkeypatch, ref_peak, quant_peak, *, calls, ref_quantized=Fals
         return _FakeWeightModel(quant_peak), toks, cfgs["quant"]
 
     monkeypatch.setattr(mlx_lm, "load", fake_load)
+
+
+def test_measure_weight_fills_measured_geometry_fields(monkeypatch):
+    """Reds if the report still carries only the nominal bits (the four fields stay None)."""
+    calls: list[str] = []
+    _patch_loads(monkeypatch, 0, 1, calls=calls)
+    report = measure_weight_fidelity("quant", "ref", corpus=_corpus(2))
+    assert report.quant_geometry == ((4, 64, 3),)
+    assert report.quant_n_full_precision == 0
+    assert report.quant_bits_per_weight == 4.5
+    assert report.quant_precision == "uniform"
+
+
+def test_measure_weight_marks_mixed_precision_from_geometry(monkeypatch):
+    """Reds if precision is derived from the config's nominal 4-bit instead of the measured
+    geometry (this fake config says 4-bit; the measured geometry says 4/5)."""
+    calls: list[str] = []
+    _patch_loads(monkeypatch, 0, 1, calls=calls)
+    from mlx_quant_fidelity.probes import weights as w
+
+    monkeypatch.setattr(w, "measured_geometry", lambda model: (((4, 64, 2), (5, 64, 1)), 1))
+    report = measure_weight_fidelity("quant", "ref", corpus=_corpus(2))
+    assert report.quant_precision == "mixed"
+    assert report.quant_n_full_precision == 1
+
+
+def test_measure_weight_warnings_are_ordered_tokenizer_method_reference(monkeypatch):
+    """Reds if the standing method note is missing or the order drifts (Markdown determinism)."""
+    from mlx_quant_fidelity.probes.weights import METHOD_NOT_RECORDED_WARNING
+
+    calls: list[str] = []
+    _patch_loads(monkeypatch, 0, 1, calls=calls, ref_quantized=True)
+    report = measure_weight_fidelity("quant", "ref", corpus=_corpus(2))
+    assert report.warnings[0] == TOKENIZER_ASSUMPTION_WARNING
+    assert report.warnings[1] == METHOD_NOT_RECORDED_WARNING
+    assert report.warnings[-1].startswith("reference is itself 8-bit")
 
 
 def test_measure_weight_caps_before_both_loads(monkeypatch):

@@ -319,7 +319,10 @@ def measure_weight_fidelity(
     quant_meta, reference_bits = _gate_configs(
         quant_config=quant_config, reference_config=reference_config
     )
-    warnings = [*_tokenizer_warnings(tokenizer, quant_tok)]
+    geometry, n_full_precision = measured_geometry(cast("Module", quant_model))
+    bpw = bits_per_weight(cast("Module", quant_model))
+    precision = "mixed" if len({b for b, _, _ in geometry}) > 1 else "uniform"
+    warnings = [*_tokenizer_warnings(tokenizer, quant_tok), METHOD_NOT_RECORDED_WARNING]
     if reference_bits is not None:
         warnings.append(
             f"reference is itself {reference_bits}-bit, not full precision; drift is relative to it."
@@ -389,4 +392,8 @@ def measure_weight_fidelity(
         ),
         warnings=tuple(warnings),
         device=device_string(),
+        quant_geometry=geometry,
+        quant_n_full_precision=n_full_precision,
+        quant_bits_per_weight=bpw,
+        quant_precision=precision,
     )
