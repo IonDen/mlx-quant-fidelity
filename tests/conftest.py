@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import atexit
+import importlib.metadata
 import os
 import sys
 
 import pytest
+from tests._hide_port import flag_conflict, hiding_distribution, mask_port
 
 from mlx_quant_fidelity._memory_caps import install_memory_caps
 
@@ -17,6 +19,8 @@ GATED_MARKERS: tuple[tuple[str, str, str], ...] = (
 
 # Install caps at import, before collection imports any MLX-heavy worker module.
 INSTALLED_CAPS_GB = install_memory_caps()
+
+_FINAL_EXIT_CODE = 0
 
 
 def _markers_to_skip(enabled_flags: set[str]) -> list[tuple[str, str]]:
@@ -35,6 +39,25 @@ def pytest_addoption(parser: pytest.Parser) -> None:
             default=False,
             help=f"run `{marker}` tests ({description}); skipped by default",
         )
+    parser.addoption(
+        "--hide-port",
+        action="store_true",
+        default=False,
+        help="run the default suite with turboquant_mlx masked (import + distribution metadata), "
+        "mirroring CI; default-lane only, not combinable with --run-slow",
+    )
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    if not config.getoption("--hide-port"):
+        return
+    conflict = flag_conflict(hide_port=True, run_slow=bool(config.getoption("--run-slow")))
+    if conflict is not None:
+        global _FINAL_EXIT_CODE
+        _FINAL_EXIT_CODE = int(pytest.ExitCode.USAGE_ERROR)
+        raise pytest.UsageError(conflict)
+    mask_port(sys.modules)
+    importlib.metadata.distribution = hiding_distribution(importlib.metadata.distribution)  # type: ignore[assignment]
 
 
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
@@ -44,9 +67,6 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
         for item in items:
             if marker in item.keywords:
                 item.add_marker(skip)
-
-
-_FINAL_EXIT_CODE = 0
 
 
 def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
