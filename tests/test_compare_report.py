@@ -1,10 +1,13 @@
 import dataclasses
 import json
 
+import pytest
+
 from mlx_quant_fidelity.corpora.provenance import CorpusProvenance
 from mlx_quant_fidelity.metrics import ScalarSummary
 from mlx_quant_fidelity.ranking import RankPoint
 from mlx_quant_fidelity.report import (
+    METHOD_NOT_RECORDED_WARNING,
     ComparisonReport,
     ComparisonTargetResult,
     FidelityReport,
@@ -900,6 +903,29 @@ def test_weight_table_has_bits_per_weight_before_verdict_and_dash_for_legacy_row
     assert q4[5] == "4.50"
     assert q8[5] == "—"
     assert q4[2] == "0.0500"  # KL mean stays at index 2
+
+
+@pytest.mark.parametrize(
+    "row_warnings",
+    [("tok",), ("tok", METHOD_NOT_RECORDED_WARNING)],
+    ids=["rows-without-the-note", "rows-carrying-the-note"],
+)
+def test_weight_table_renders_the_standing_method_note_exactly_once(row_warnings):
+    """Reds if a comparison resumed from pre-0.8.0 partials loses the standing caveat / or
+    prints it twice. Placement is pinned too: after the per-row notes, before the reload footer."""
+    a = dataclasses.replace(_wreport("q4", 0.05, 3000), warnings=row_warnings)
+    b = dataclasses.replace(_wreport("q8", 0.01, 6000), warnings=row_warnings)
+    md = render_comparison_markdown(_weight_comparison(_ok("q4", a), _ok("q8", b)))
+    note = f"> Note: {METHOD_NOT_RECORDED_WARNING}"
+    assert md.count(note) == 1
+    assert md.index("> Note: tok") < md.index(note) < md.index("> Weight compare reloads")
+
+
+def test_kv_table_does_not_carry_the_weight_only_method_note():
+    """Reds if the weight-only fallback leaks into a kv comparison, whose reports never carry
+    the weight probe's method caveat."""
+    md = render_comparison_markdown(_kv_comparison_report(quantize_start=0, quantize_mode="stress"))
+    assert METHOD_NOT_RECORDED_WARNING not in md
 
 
 def test_weight_table_prints_each_distinct_warning_once_and_keeps_the_full_footer():

@@ -19,7 +19,10 @@ from mlx_quant_fidelity.errors import (
 )
 from mlx_quant_fidelity.policy import _WEIGHT_TIERS_v0_2_0, verdict_for
 from mlx_quant_fidelity.probes._paired import _aggregate_chunks, _check_exact_zero, _reduce_pair
-from mlx_quant_fidelity.report import WeightFidelityReport
+from mlx_quant_fidelity.report import (
+    METHOD_NOT_RECORDED_WARNING,  # re-exported: the standing caveat lives with the renderer
+    WeightFidelityReport,
+)
 
 if TYPE_CHECKING:
     from mlx.nn.layers.base import Module
@@ -88,13 +91,6 @@ def extract_quant_meta(config: dict[str, object]) -> QuantMeta | None:
 
 Geometry = tuple[tuple[int, int, int], ...]
 """Measured quantization geometry: sorted (bits, group_size, module_count) triples."""
-
-METHOD_NOT_RECORDED_WARNING = (
-    "Quantization method is not recorded in the repo config — mlx-lm's DWQ, AWQ and dynamic "
-    "quantizers write a quantization block that records only geometry (bits, group sizes, "
-    "per-module overrides), never the recipe. This report describes the geometry of the loaded "
-    "model, not the method that produced it."
-)
 
 
 def _is_module(obj: object) -> bool:

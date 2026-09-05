@@ -15,6 +15,17 @@ if TYPE_CHECKING:
     from mlx_quant_fidelity.ranking import RankPoint
 
 
+METHOD_NOT_RECORDED_WARNING = (
+    "Quantization method is not recorded in the repo config — mlx-lm's DWQ, AWQ and dynamic "
+    "quantizers write a quantization block that records only geometry (bits, group sizes, "
+    "per-module overrides), never the recipe. This report describes the geometry of the loaded "
+    "model, not the method that produced it."
+)
+"""The standing caveat every weight report carries. Lives here, not in ``probes.weights``, so
+the renderer can re-add it to a comparison assembled from partials written before 0.8.0 without
+``report.py`` importing the probe (and with it mlx-lm)."""
+
+
 @dataclass(frozen=True, slots=True)
 class FidelityReport:
     """The complete result of a KV-fidelity measurement. Frozen; stable to diff."""
@@ -490,6 +501,10 @@ def render_comparison_markdown(report: ComparisonReport) -> str:
             "drift alongside._"
         )
     if report.mode == "weight":
+        # A comparison resumed from partials written before 0.8.0 has rows with no method
+        # caveat of their own; the caveat is a property of the weight probe, not of a row.
+        if METHOD_NOT_RECORDED_WARNING not in seen_warnings:
+            lines.append(f"\n> Note: {METHOD_NOT_RECORDED_WARNING}")
         lines += [
             "",
             "> Weight compare reloads the reference once per target — N targets ≈ Nx a "
