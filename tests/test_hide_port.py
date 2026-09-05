@@ -3,7 +3,13 @@
 import importlib.metadata
 
 import pytest
-from tests._hide_port import HIDDEN_DISTRIBUTIONS, flag_conflict, hiding_distribution, mask_port
+from tests._hide_port import (
+    HIDDEN_DISTRIBUTIONS,
+    apply_hide_port,
+    flag_conflict,
+    hiding_distribution,
+    mask_port,
+)
 
 
 def test_mask_port_sets_none_and_evicts_only_the_port_tree():
@@ -45,6 +51,31 @@ def test_flag_conflict_names_run_slow():
     assert "--run-slow" in (flag_conflict(hide_port=True, run_slow=True) or "")
     assert flag_conflict(hide_port=True, run_slow=False) is None
     assert flag_conflict(hide_port=False, run_slow=True) is None
+
+
+def test_apply_hide_port_records_usage_error_exit_code_before_raising():
+    """Reds if the exit code is set after the raise (or not at all): the atexit hard-exit
+    would then report 0 for a usage error."""
+    events: list[object] = []
+    with pytest.raises(pytest.UsageError):
+        apply_hide_port(
+            hide_port=True, run_slow=True, modules={}, set_exit_code=lambda c: events.append(c)
+        )
+    assert events == [int(pytest.ExitCode.USAGE_ERROR)]
+
+
+def test_apply_hide_port_is_a_no_op_without_the_flag():
+    """Reds if the mask fires (or the exit code is touched) when --hide-port is absent."""
+    modules: dict[str, object] = {"turboquant_mlx": object()}
+    events: list[object] = []
+    assert (
+        apply_hide_port(
+            hide_port=False, run_slow=True, modules=modules, set_exit_code=events.append
+        )
+        is False
+    )
+    assert modules["turboquant_mlx"] is not None
+    assert events == []
 
 
 def _lane_only(request):

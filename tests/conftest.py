@@ -3,12 +3,11 @@
 from __future__ import annotations
 
 import atexit
-import importlib.metadata
 import os
 import sys
 
 import pytest
-from tests._hide_port import flag_conflict, hiding_distribution, mask_port
+from tests._hide_port import apply_hide_port
 
 from mlx_quant_fidelity._memory_caps import install_memory_caps
 
@@ -49,15 +48,16 @@ def pytest_addoption(parser: pytest.Parser) -> None:
 
 
 def pytest_configure(config: pytest.Config) -> None:
-    if not config.getoption("--hide-port"):
-        return
-    conflict = flag_conflict(hide_port=True, run_slow=bool(config.getoption("--run-slow")))
-    if conflict is not None:
+    def _set_exit_code(code: int) -> None:
         global _FINAL_EXIT_CODE
-        _FINAL_EXIT_CODE = int(pytest.ExitCode.USAGE_ERROR)
-        raise pytest.UsageError(conflict)
-    mask_port(sys.modules)
-    importlib.metadata.distribution = hiding_distribution(importlib.metadata.distribution)  # type: ignore[assignment]
+        _FINAL_EXIT_CODE = code
+
+    apply_hide_port(
+        hide_port=bool(config.getoption("--hide-port")),
+        run_slow=bool(config.getoption("--run-slow")),
+        modules=sys.modules,
+        set_exit_code=_set_exit_code,
+    )
 
 
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
