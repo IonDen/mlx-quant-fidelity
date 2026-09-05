@@ -17,13 +17,15 @@ class _Quant(nn.Module):
     """A 4-bit, group-32 quantized [8 out x 64 in] linear: weight uint32[8, 8] (256 B),
     scales fp16[8, 2] (32 B), biases fp16[8, 2] (32 B) = 320 B = 2560 bits over 512 params."""
 
-    def __init__(self, bits: int = 4, group_size: int = 32) -> None:
+    def __init__(self, bits: int = 4, group_size: int = 32, bias: bool = False) -> None:
         super().__init__()
         self.bits = bits
         self.group_size = group_size
         self.weight = mx.zeros((8, 64 * bits // 32), dtype=mx.uint32)
         self.scales = mx.zeros((8, 64 // group_size), dtype=mx.float16)
         self.biases = mx.zeros((8, 64 // group_size), dtype=mx.float16)
+        if bias:
+            self.bias = mx.zeros((8,), dtype=mx.float16)
 
 
 class _Dense(nn.Module):
@@ -56,6 +58,15 @@ def test_bits_per_weight_single_quantized_module_is_exactly_5():
     """Reds if scale/bias bytes are dropped (-> 4.0) or packed uint32 words are counted as one
     param each (-> 40.0)."""
     assert bits_per_weight(_Tree(q=_Quant())) == 5.0
+
+
+def test_bits_per_weight_covers_the_quantized_layer_bias_term():
+    """A quantized linear layer's own fp16 bias (as distinct from its per-group `biases`) adds
+    bytes to the numerator and params to the denominator. Bytes: 320 B (weight 256 + scales 32
+    + biases 32) + bias 8 x 2 B = 16 B -> 336 B = 2688 bits. Params: 512 + 8 (the bias) = 520.
+    Reds if a quantized layer's linear bias is dropped from the denominator (-> 2688/512) or its
+    bytes from the numerator (-> 2560/520)."""
+    assert math.isclose(bits_per_weight(_Tree(q=_Quant(bias=True))), 2688 / 520, rel_tol=1e-9)
 
 
 def test_bits_per_weight_counts_unquantized_params_in_the_denominator():
