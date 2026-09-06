@@ -61,6 +61,14 @@ class FidelityReport:
     control_kl: ScalarSummary | None = None
     control_flip_rate: float | None = None
     working_set_bytes_per_token: int | None = None
+    # Per-layer partial coverage: set for a hybrid model whose full-attention layers are
+    # quantized while sliding-window / SSM layers stay full-precision. All at their full-coverage
+    # defaults (partial=False, counts None) on a fully-quantizable model and on pre-0.9.0 dicts,
+    # which keeps every committed sample's headline byte-identical.
+    kv_partial: bool = False
+    kv_layers_total: int | None = None
+    kv_layers_quantized: int | None = None
+    kv_layers_skipped: dict[str, int] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -219,6 +227,16 @@ def fidelity_report_from_dict(d: dict[str, object]) -> FidelityReport:
             if not isinstance(control_kl, dict):
                 raise ReportSchemaError("persisted 'control_kl' must be a dict or null")
             fields["control_kl"] = ScalarSummary(**control_kl)
+        for count_key in ("kv_layers_total", "kv_layers_quantized"):
+            count = d.get(count_key)
+            if count is not None and (isinstance(count, bool) or not isinstance(count, int)):
+                raise ReportSchemaError(f"persisted '{count_key}' must be an int or null")
+        skipped = d.get("kv_layers_skipped")
+        if skipped is not None and not isinstance(skipped, dict):
+            raise ReportSchemaError("persisted 'kv_layers_skipped' must be a dict or null")
+        partial = d.get("kv_partial")
+        if partial is not None and not isinstance(partial, bool):
+            raise ReportSchemaError("persisted 'kv_partial' must be a bool")
         if "drift_footing" not in d:
             fields["drift_footing"] = (
                 "bundled" if d.get("kv_method", "stock") == "stock" else "quantizer_only"

@@ -10,7 +10,7 @@ import json
 from collections.abc import Iterator
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
 import mlx.core as mx
 
@@ -141,6 +141,61 @@ def _packed_width_belt(kv_bits: int) -> Iterator[None]:
         raise
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
+class LayerCoverage:
+    """Which per-layer caches a method can quantize, and why the rest were skipped.
+
+    Built by :meth:`StockKVMethod.layer_coverage`; drives the partial-coverage report
+    fields and the honesty note. ``skip_reasons`` keeps the full per-layer message
+    for the zero-quantizable refusal; ``skipped_types`` is the type -> count tally the
+    report renders.
+    """
+
+    total: int
+    quantized_indices: tuple[int, ...]
+    skipped_types: dict[str, int]
+    skip_reasons: tuple[tuple[str, str], ...]
+
+    @property
+    def is_partial(self) -> bool:
+        """True when some — but not all — layers are quantizable."""
+        return 0 < len(self.quantized_indices) < self.total
+
+    def note(self) -> str:
+        """The report caveat for a partial measurement.
+
+        States the coverage fraction, names the skipped layer types, and that mlx-lm does not
+        generate with this mixed cache — so the number is a hypothetical partial, not a
+        shipping configuration.
+        """
+        skipped = ", ".join(f"{count} {name}" for name, count in sorted(self.skipped_types.items()))
+        return (
+            f"Partial coverage: {len(self.quantized_indices)} of {self.total} KV layers "
+            f"quantized; {skipped} left full-precision (no quantized cache path in mlx-lm). "
+            "The metric reflects only the quantized layers; mlx-lm does not generate with this "
+            "mixed cache, so it is a hypothetical partial measurement, not a shipping "
+            "configuration."
+        )
+
+
+@runtime_checkable
+class PartialCoverageMethod(Protocol):
+    """Optional capability: measure a hybrid model on its quantizable layers only.
+
+    Stock mlx-lm supports it; quantizer-only third-party methods do not. ``probes/kv.py``
+    branches on ``isinstance(method, PartialCoverageMethod)`` so the seam stays agnostic to
+    the concrete method class.
+    """
+
+    def layer_coverage(self, empty_cache: list[object]) -> LayerCoverage:
+        """Partition per-layer caches into quantizable vs skipped."""
+        ...
+
+    def make_partial_cache(self, fp_cache: list[object], coverage: LayerCoverage) -> list[object]:
+        """A stress cache that quantizes only the supported layers."""
+        ...
+
+
 @dataclass(frozen=True, slots=True)
 class StockKVMethod:
     """mlx-lm's ``QuantizedKVCache`` at (bits, group_size) — the reference implementation."""
@@ -196,26 +251,67 @@ class StockKVMethod:
             )
         return warnings
 
-    def probe_capability(self, empty_cache: list[object]) -> None:
-        """Call ``to_quantized`` on every (empty) layer; name the type if it is absent or NYI."""
-        for layer in empty_cache:
+    def layer_coverage(self, empty_cache: list[object]) -> LayerCoverage:
+        """Partition the (empty) per-layer caches into quantizable vs skipped.
+
+        A layer is quantizable iff it has a ``to_quantized`` that does not raise at this
+        ``(group_size, bits)``. Records the per-layer skip reason (for the zero-quantizable
+        refusal message) and a type -> count tally (for the report / note).
+        """
+        quantized: list[int] = []
+        skip_reasons: list[tuple[str, str]] = []
+        for i, layer in enumerate(empty_cache):
+            name = type(layer).__name__
             to_q = getattr(layer, "to_quantized", None)
             if to_q is None:
-                raise CacheNotQuantizableError(
-                    f"cache layer {type(layer).__name__} has no to_quantized; "
-                    "this model's KV cache cannot be quantized (e.g. sliding-window / MLA)."
+                skip_reasons.append(
+                    (
+                        name,
+                        f"cache layer {name} has no to_quantized; this layer type's KV "
+                        "cannot be quantized (e.g. sliding-window / MLA).",
+                    )
                 )
+                continue
             try:
                 to_q(group_size=self.group_size, bits=self.bits)
             except NotImplementedError as exc:
-                raise CacheNotQuantizableError(
-                    f"cache layer {type(layer).__name__} declares to_quantized but it is NYI: {exc}"
-                ) from exc
+                skip_reasons.append(
+                    (name, f"cache layer {name} declares to_quantized but it is NYI: {exc}")
+                )
+                continue
             except (ValueError, RuntimeError) as exc:
-                raise CacheNotQuantizableError(
-                    f"cache layer {type(layer).__name__} cannot quantize at "
-                    f"group_size={self.group_size}, bits={self.bits}: {exc}"
-                ) from exc
+                skip_reasons.append(
+                    (
+                        name,
+                        f"cache layer {name} cannot quantize at "
+                        f"group_size={self.group_size}, bits={self.bits}: {exc}",
+                    )
+                )
+                continue
+            quantized.append(i)
+        skipped_types: dict[str, int] = {}
+        for name, _reason in skip_reasons:
+            skipped_types[name] = skipped_types.get(name, 0) + 1
+        return LayerCoverage(
+            total=len(empty_cache),
+            quantized_indices=tuple(quantized),
+            skipped_types=skipped_types,
+            skip_reasons=tuple(skip_reasons),
+        )
+
+    def probe_capability(self, empty_cache: list[object]) -> None:
+        """Refuse only when NO layer is quantizable; a partial cache is allowed.
+
+        Per-layer partial coverage means a hybrid model (full-attention + sliding-window /
+        SSM layers) is still measured on the layers that can be quantized, so the whole
+        model is refused only when nothing can be.
+        """
+        cov = self.layer_coverage(empty_cache)
+        if not cov.quantized_indices:
+            reasons = "; ".join(reason for _name, reason in cov.skip_reasons)
+            raise CacheNotQuantizableError(
+                f"no KV layer can be quantized (0 of {cov.total}): {reasons}"
+            )
 
     def make_cache(self, *, n_layers: int) -> list[object]:
         """``QuantizedKVCache(group_size, bits)`` per layer."""
@@ -223,6 +319,23 @@ class StockKVMethod:
 
         return [
             QuantizedKVCache(group_size=self.group_size, bits=self.bits) for _ in range(n_layers)
+        ]
+
+    def make_partial_cache(self, fp_cache: list[object], coverage: LayerCoverage) -> list[object]:
+        """Selective stress cache for a partial (hybrid) model.
+
+        Quantize the supported layers from token 0, pass the rest through full-precision so
+        the mixed forward still runs. ``fp_cache`` is a fresh ``make_prompt_cache(model)``
+        (empty); ``coverage`` names the quantizable indices (same model => same per-index
+        layer types). No ``mx.eval`` is needed — the caches are empty at token 0 (unlike
+        ``convert_prefix``, which releases a filled prefix).
+        """
+        quant = set(coverage.quantized_indices)
+        return [
+            layer.to_quantized(group_size=self.group_size, bits=self.bits)  # type: ignore[attr-defined]
+            if i in quant
+            else layer
+            for i, layer in enumerate(fp_cache)
         ]
 
     def convert_prefix(self, fp_cache: list[object]) -> list[object]:

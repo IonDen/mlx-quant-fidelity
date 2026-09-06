@@ -174,19 +174,102 @@ def test_probe_capability_accepts_non_raising_to_quantized():
     StockKVMethod(bits=4, group_size=64).probe_capability([_OkCache(), _OkCache()])
 
 
-def test_probe_capability_flags_missing_to_quantized():
-    with pytest.raises(CacheNotQuantizableError, match="_NoQuantCache has no to_quantized"):
-        StockKVMethod(bits=4, group_size=64).probe_capability([_OkCache(), _NoQuantCache()])
+def test_probe_capability_allows_partial_coverage():
+    # RED if probe_capability still refuses a model with >=1 quantizable layer (0053):
+    # a mixed cache (one quantizable, one not) must NOT raise — it is a partial measurement.
+    StockKVMethod(bits=4, group_size=64).probe_capability([_OkCache(), _NoQuantCache()])
+
+
+def test_probe_capability_raises_when_zero_layers_quantizable():
+    # RED if a fully-unsupported cache stops refusing: with no quantizable layer there is
+    # nothing to measure, so it must still refuse.
+    with pytest.raises(CacheNotQuantizableError, match="0 of 2"):
+        StockKVMethod(bits=4, group_size=64).probe_capability(
+            [_NoQuantCache(), _RaisingQuantCache()]
+        )
 
 
 def test_probe_capability_flags_not_implemented():
+    # RED if the zero-quantizable refusal drops the per-layer reason (single sliding-window layer).
     with pytest.raises(CacheNotQuantizableError, match="NYI: sliding window"):
         StockKVMethod(bits=4, group_size=64).probe_capability([_RaisingQuantCache()])
 
 
 def test_probe_capability_flags_value_error():
+    # RED if the zero-quantizable refusal drops the group/bits reason (single bad-geometry layer).
     with pytest.raises(CacheNotQuantizableError, match="cannot quantize at group_size=64, bits=4"):
         StockKVMethod(bits=4, group_size=64).probe_capability([_ValueErrorCache()])
+
+
+def test_layer_coverage_partitions_mixed_layers():
+    # RED until layer_coverage exists: it must report which layer indices are quantizable and
+    # tally the skipped layer types (the data the partial report and its note are built from).
+    cov = StockKVMethod(bits=4, group_size=64).layer_coverage(
+        [_OkCache(), _NoQuantCache(), _RaisingQuantCache(), _OkCache()]
+    )
+    assert cov.total == 4
+    assert cov.quantized_indices == (0, 3)
+    assert cov.skipped_types == {"_NoQuantCache": 1, "_RaisingQuantCache": 1}
+    assert cov.is_partial is True
+
+
+def test_layer_coverage_all_quantizable_is_not_partial():
+    # RED if a fully-quantizable model is ever flagged partial (would wrongly stamp the note /
+    # change the committed headline).
+    cov = StockKVMethod(bits=4, group_size=64).layer_coverage([_OkCache(), _OkCache()])
+    assert cov.total == 2
+    assert cov.quantized_indices == (0, 1)
+    assert cov.skipped_types == {}
+    assert cov.is_partial is False
+
+
+class _QuantizableCache:
+    """A layer whose to_quantized returns a distinct object (so we can tell it was replaced)."""
+
+    def __init__(self):
+        self.result = object()
+
+    def to_quantized(self, **_kwargs):
+        return self.result
+
+
+def test_make_partial_cache_quantizes_only_supported_layers():
+    # RED until make_partial_cache exists: supported layers are replaced by their quantized form;
+    # skipped layers (e.g. sliding-window) pass through unchanged so the mixed forward still runs.
+    sm = StockKVMethod(bits=4, group_size=64)
+    q0, sliding, q2 = _QuantizableCache(), _RaisingQuantCache(), _QuantizableCache()
+    fp = [q0, sliding, q2]
+    cov = sm.layer_coverage(fp)
+    assert cov.quantized_indices == (0, 2)
+    out = sm.make_partial_cache(fp, cov)
+    assert out[0] is q0.result  # quantized
+    assert out[1] is sliding  # untouched
+    assert out[2] is q2.result  # quantized
+
+
+def test_layer_coverage_note_states_partial_and_hypothetical():
+    # RED until note() exists: the report caveat must state the coverage fraction, name the
+    # skipped layer type(s), and that this is NOT a config mlx-lm ships (the honesty catch).
+    cov = StockKVMethod(bits=4, group_size=64).layer_coverage(
+        [_OkCache(), _RaisingQuantCache(), _RaisingQuantCache()]
+    )
+    note = cov.note()
+    assert "1 of 3" in note
+    assert "2 _RaisingQuantCache" in note
+    assert "hypothetical" in note
+    assert "not a shipping configuration" in note
+
+
+def test_layer_coverage_note_lists_multiple_skip_types_in_stable_order():
+    # RED if note() loses its sorted() over skipped_types: dict-iteration order would make the
+    # rendered caveat non-deterministic across runs.
+    cov = StockKVMethod(bits=4, group_size=64).layer_coverage(
+        [_OkCache(), _RaisingQuantCache(), _NoQuantCache()]
+    )
+    note = cov.note()
+    assert "1 _NoQuantCache" in note
+    assert "1 _RaisingQuantCache" in note
+    assert note.index("_NoQuantCache") < note.index("_RaisingQuantCache")  # sorted, deterministic
 
 
 # --- stored_state_bytes -----------------------------------------------------------
