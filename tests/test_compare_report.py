@@ -1,10 +1,13 @@
 import dataclasses
 import json
 
+import pytest
+
 from mlx_quant_fidelity.corpora.provenance import CorpusProvenance
 from mlx_quant_fidelity.metrics import ScalarSummary
 from mlx_quant_fidelity.ranking import RankPoint
 from mlx_quant_fidelity.report import (
+    METHOD_NOT_RECORDED_WARNING,
     ComparisonReport,
     ComparisonTargetResult,
     FidelityReport,
@@ -211,7 +214,7 @@ def test_comparison_markdown_renders_distinct_kl_mean_and_p99_columns() -> None:
     )
     md = render_comparison_markdown(report)
     row = next(line for line in md.splitlines() if "| `q4` |" in line)
-    # columns: target | cost | KL mean | KL p99 | flip | verdict | frontier
+    # columns: target | cost | KL mean | KL p99 | flip | bits/wt | verdict | frontier
     cells = [c.strip() for c in row.strip().strip("|").split("|")]
     assert cells[2] == "0.0500"  # KL mean column
     assert cells[3] == "0.3000"  # KL p99 column — distinct from mean, pins the column order
@@ -836,3 +839,109 @@ def test_comparison_markdown_weight_mode_has_no_kv_footing_line() -> None:
     """The kv-only footing note must not leak into a weight-mode comparison."""
     md = render_comparison_markdown(_report())
     assert "ranked on quantizer-only drift" not in md
+
+
+def _weight_comparison(*results):
+    return ComparisonReport(
+        mode="weight",
+        reference="ref",
+        model=None,
+        corpus=None,
+        quantize_start=None,
+        quantize_mode=None,
+        budget=None,
+        results=tuple(results),
+        frontier=tuple(r.label for r in results),
+        dominated=(),
+        budget_pick=None,
+        mlx_version="0.21",
+        mlx_lm_version="0.31.3",
+    )
+
+
+def _ok(label, report):
+    return ComparisonTargetResult(
+        label=label,
+        status="ok",
+        report=report,
+        point=RankPoint(label, report.kl.mean, report.quant_model_bytes or 0),
+        excluded_reason=None,
+        error_type=None,
+        message=None,
+    )
+
+
+def test_weight_table_has_bits_per_weight_before_verdict_and_dash_for_legacy_rows():
+    """Reds if the column is missing, placed before KL (shifting cells[2]/[3]), or a legacy row
+    renders `None` instead of a dash. Also reds if the separator row and the header drift apart
+    — GitHub renders a table whose separator has the wrong column count as literal text."""
+    measured = dataclasses.replace(
+        _wreport("q4", 0.05, 3000),
+        quant_geometry=((4, 64, 3),),
+        quant_n_full_precision=0,
+        quant_bits_per_weight=4.501,
+        quant_precision="uniform",
+    )
+    md = render_comparison_markdown(
+        _weight_comparison(_ok("q4", measured), _ok("q8", _wreport("q8", 0.01, 6000)))
+    )
+    lines = md.splitlines()
+    header_i = next(i for i, line in enumerate(lines) if line.startswith("| target"))
+    assert lines[header_i] == (
+        "| target | cost | KL mean | KL p99 | flip | bits/wt | verdict | frontier |"
+    )
+    assert lines[header_i + 1] == "|---|---|---|---|---|---|---|---|"
+    q4 = [
+        c.strip()
+        for c in next(ln for ln in md.splitlines() if "| `q4` |" in ln)
+        .strip()
+        .strip("|")
+        .split("|")
+    ]
+    q8 = [
+        c.strip()
+        for c in next(ln for ln in md.splitlines() if "| `q8` |" in ln)
+        .strip()
+        .strip("|")
+        .split("|")
+    ]
+    assert q4[5] == "4.50"
+    assert q8[5] == "—"
+    assert q4[2] == "0.0500"  # KL mean stays at index 2
+
+
+@pytest.mark.parametrize(
+    "row_warnings",
+    [("tok",), ("tok", METHOD_NOT_RECORDED_WARNING)],
+    ids=["rows-without-the-note", "rows-carrying-the-note"],
+)
+def test_weight_table_renders_the_standing_method_note_exactly_once(row_warnings):
+    """Reds if a comparison resumed from pre-0.8.0 partials loses the standing caveat / or
+    prints it twice. Placement is pinned too: after the per-row notes, before the reload footer."""
+    a = dataclasses.replace(_wreport("q4", 0.05, 3000), warnings=row_warnings)
+    b = dataclasses.replace(_wreport("q8", 0.01, 6000), warnings=row_warnings)
+    md = render_comparison_markdown(_weight_comparison(_ok("q4", a), _ok("q8", b)))
+    note = f"> Note: {METHOD_NOT_RECORDED_WARNING}"
+    assert md.count(note) == 1
+    assert md.index("> Note: tok") < md.index(note) < md.index("> Weight compare reloads")
+
+
+def test_kv_table_does_not_carry_the_weight_only_method_note():
+    """Reds if the weight-only fallback leaks into a kv comparison, whose reports never carry
+    the weight probe's method caveat."""
+    md = render_comparison_markdown(_kv_comparison_report(quantize_start=0, quantize_mode="stress"))
+    assert METHOD_NOT_RECORDED_WARNING not in md
+
+
+def test_weight_table_prints_each_distinct_warning_once_and_keeps_the_full_footer():
+    """Reds if weight mode still skips the per-row warning loop (the method caveat would be
+    absent from the ladder table), prints a shared warning twice, or truncates the footer."""
+    a = dataclasses.replace(_wreport("q4", 0.05, 3000), warnings=("shared note", "only-a"))
+    b = dataclasses.replace(_wreport("q8", 0.01, 6000), warnings=("shared note",))
+    md = render_comparison_markdown(_weight_comparison(_ok("q4", a), _ok("q8", b)))
+    assert md.count("> Note: shared note") == 1
+    assert md.count("> Note: only-a") == 1
+    assert (
+        "> Weight compare reloads the reference once per target — N targets ≈ Nx a "
+        "single `weights` run. Fidelity is corpus- and context-length-specific."
+    ) in md

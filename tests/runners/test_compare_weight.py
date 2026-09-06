@@ -401,6 +401,31 @@ def test_weight_collect_isolates_malformed_cached_partial(monkeypatch, tmp_path)
     assert "q8" in report.frontier  # the good target still ranks; no abort
 
 
+def test_weight_collect_isolates_a_partial_with_a_non_numeric_bits_per_weight(
+    monkeypatch, tmp_path
+):
+    """Reds if a corrupt `quant_bits_per_weight` escapes CorruptPartial isolation: the string
+    reaches the comparison renderer's `bits/wt` column, whose `:.2f` raises ValueError and takes
+    the whole run's output down with it."""
+    from mlx_quant_fidelity.report import render_comparison_markdown
+
+    good = _weight_ok_envelope_with_identity("q8", 0.01, 8000)
+    bad = _weight_ok_envelope_with_identity("q6", 0.04, 6200)
+    bad["report"]["quant_bits_per_weight"] = "not-a-number"  # run_identity stays valid → no re-run
+    (tmp_path / "q8.json").write_text(json.dumps(good))
+    (tmp_path / "q6.json").write_text(json.dumps(bad))
+
+    def _boom(*a, **k):
+        raise AssertionError("worker must not run for cached partials")
+
+    monkeypatch.setattr(cmp, "_run_weight_target", _boom)
+    report = cmp.compare_weight_fidelity(["q8", "q6"], "ref", artifacts_dir=tmp_path)
+    q6 = next(r for r in report.results if r.label == "q6")
+    assert (q6.status, q6.error_type) == ("failed", "CorruptPartial")
+    assert "q8" in report.frontier  # the good target still ranks; no abort
+    assert "`q8`" in render_comparison_markdown(report)  # and the run still renders
+
+
 def test_weight_envelope_with_invalid_verdict_is_corrupt_partial():
     from mlx_quant_fidelity.runners.compare import _envelope_to_result
 
@@ -627,3 +652,104 @@ def test_run_weight_target_passes_revisions_to_worker_cmd_only_when_set(monkeypa
     assert "--quant-revision" in cmd
     assert cmd[cmd.index("--quant-revision") + 1] == "rev-q"
     assert "--reference-revision" not in cmd
+
+
+# ── repo[@revision] target grammar (Task 5) ──────────────────────────────────
+
+
+def test_split_target_grammar(tmp_path):
+    """Reds on: splitting at the last `@`, splitting an existing local path, accepting an empty
+    or whitespace revision."""
+    assert cmp.split_target("org/m-4bit") == ("org/m-4bit", None)
+    assert cmp.split_target("org/m-4bit@abc123") == ("org/m-4bit", "abc123")
+    assert cmp.split_target("org/m@refs/pr/3") == ("org/m", "refs/pr/3")
+    assert cmp.split_target("org/m@x@y") == ("org/m", "x@y")
+    local = tmp_path / "model@2026"
+    local.mkdir()
+    assert cmp.split_target(str(local)) == (str(local), None)
+    for bad in ("org/m@", "@abc", "org/m@re v", "org/m@a\x00b"):
+        with pytest.raises(CompareConfigError):
+            cmp.split_target(bad)
+
+
+def test_split_target_survives_a_filesystem_error_from_the_local_path_probe():
+    """Reds if a filesystem error from the local-path probe escapes as a raw OSError. A first
+    path component over 255 bytes makes `Path.exists()` raise ENAMETOOLONG rather than return
+    False, and `cli.main` catches only QuantFidelityError — the user would see an internal error
+    instead of the repo-id refusal the downstream filename rule gives."""
+    long_name = "a" * 300
+    assert cmp.split_target(f"{long_name}@rev") == (long_name, "rev")
+
+
+def test_compare_weight_rejects_same_repo_at_two_revisions(tmp_path):
+    """Reds if the refusal stops explaining itself: `org/m` and `org/m@abc` are one label
+    because the label and the partial filename are the repo id, and the message has to say so
+    or the user reads it as a bug."""
+    with pytest.raises(CompareConfigError, match="duplicate") as excinfo:
+        cmp.compare_weight_fidelity(["org/m", "org/m@abc"], "ref", artifacts_dir=tmp_path)
+    assert "two revisions" in str(excinfo.value)
+
+
+def test_compare_weight_inline_revisions_win_over_flags_and_reach_worker_label_and_filename(
+    monkeypatch, tmp_path
+):
+    """Reds if the raw `repo@rev` string leaks into the label, the partial filename, or the
+    worker's --quant argument, or if a flag overrides an inline pin on either side."""
+    seen = []
+
+    def _fake_run(
+        quant, reference, partial_path, max_chunks, quant_revision=None, reference_revision=None
+    ):
+        seen.append((quant, quant_revision, reference, reference_revision, partial_path.name))
+        env = _weight_ok_envelope_with_identity(
+            quant,
+            0.04,
+            6200,
+            quant_revision=quant_revision,
+            reference_revision=reference_revision,
+            reference=reference,
+        )
+        partial_path.write_text(json.dumps(env))
+        return env
+
+    monkeypatch.setattr(cmp, "_run_weight_target", _fake_run)
+    report = cmp.compare_weight_fidelity(
+        ["org/q4@rev-4", "org/q8"],
+        "org/ref@rev-R",
+        quant_revision="fallback",
+        reference_revision="ref-fallback",
+        artifacts_dir=tmp_path,
+    )
+    assert seen == [
+        ("org/q4", "rev-4", "org/ref", "rev-R", "org_q4.json"),
+        ("org/q8", "fallback", "org/ref", "rev-R", "org_q8.json"),
+    ]
+    assert {r.label for r in report.results} == {"org/q4", "org/q8"}
+    assert report.reference == "org/ref"
+
+
+def test_compare_weight_inline_revision_resumes_on_the_second_call(monkeypatch, tmp_path):
+    """The resume-identity bug: if the orchestrator expects the call-level quant_revision (None)
+    while the worker stored the inline one, every `@`-pinned target re-runs forever."""
+    calls = []
+
+    def _fake_run(
+        quant, reference, partial_path, max_chunks, quant_revision=None, reference_revision=None
+    ):
+        calls.append(quant)
+        env = _weight_ok_envelope_with_identity(
+            quant,
+            0.04,
+            6200,
+            quant_revision=quant_revision,
+            reference_revision=reference_revision,
+            reference=reference,
+        )
+        partial_path.write_text(json.dumps(env))
+        return env
+
+    monkeypatch.setattr(cmp, "_run_weight_target", _fake_run)
+    targets = ["org/q4@rev-4", "org/q8@rev-8"]
+    cmp.compare_weight_fidelity(targets, "org/ref@rev-R", artifacts_dir=tmp_path)
+    cmp.compare_weight_fidelity(targets, "org/ref@rev-R", artifacts_dir=tmp_path)
+    assert calls == ["org/q4", "org/q8"], "second call must resume every pinned target"

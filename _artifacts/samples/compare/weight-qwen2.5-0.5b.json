@@ -35,6 +35,9 @@
         "label": "mlx-community/Qwen2.5-0.5B-Instruct-4bit",
         "quality": 0.2235788778462747
       },
+      "ranked_footing": null,
+      "ranked_kl": null,
+      "ranked_verdict": null,
       "report": {
         "corpus": {
           "bos_policy": "none",
@@ -59,24 +62,35 @@
         "mlx_version": "0.31.2",
         "n_chunks": 100,
         "n_positions": 51100,
-        "peak_memory_bytes": 3288753929,
+        "peak_memory_bytes": 3443639803,
         "per_layer": false,
         "perplexity_delta": 4.220176537605344,
         "perplexity_quant": 23.142338831329344,
         "perplexity_ref": 18.922162293724,
         "quant_bits": 4,
+        "quant_bits_per_weight": 4.501665573729716,
+        "quant_geometry": [
+          [
+            4,
+            64,
+            169
+          ]
+        ],
         "quant_group_size": 64,
         "quant_mode": "affine",
         "quant_model_bytes": 278064920,
         "quant_model_id": "mlx-community/Qwen2.5-0.5B-Instruct-4bit",
-        "quant_revision": null,
+        "quant_n_full_precision": 0,
+        "quant_precision": "uniform",
+        "quant_revision": "a5339a4131f135d0fdc6a5c8b5bbed2753bbe0f3",
         "reference_bits": null,
         "reference_model_bytes": 988097734,
         "reference_model_id": "mlx-community/Qwen2.5-0.5B-Instruct-bf16",
-        "reference_revision": null,
+        "reference_revision": "56d07e766edd7159fbe12ed12d9cf114bf38bf1e",
         "verdict": "bad",
         "warnings": [
-          "Assumes both repos share a tokenizer; only vocab_size (and bos/eos ids) were checked \u2014 a divergent token map would be measured as quant drift."
+          "Assumes both repos share a tokenizer; only vocab_size (and bos/eos ids) were checked \u2014 a divergent token map would be measured as quant drift.",
+          "Quantization method is not recorded in the repo config \u2014 mlx-lm's DWQ, AWQ and dynamic quantizers write a quantization block that records only geometry (bits, group sizes, per-module overrides), never the recipe. This report describes the geometry of the loaded model, not the method that produced it."
         ]
       },
       "status": "ok"
@@ -91,6 +105,9 @@
         "label": "mlx-community/Qwen2.5-0.5B-Instruct-8bit",
         "quality": 0.0020822147853932936
       },
+      "ranked_footing": null,
+      "ranked_kl": null,
+      "ranked_verdict": null,
       "report": {
         "corpus": {
           "bos_policy": "none",
@@ -115,24 +132,35 @@
         "mlx_version": "0.31.2",
         "n_chunks": 100,
         "n_positions": 51100,
-        "peak_memory_bytes": 3534939921,
+        "peak_memory_bytes": 3534939913,
         "per_layer": false,
         "perplexity_delta": -0.030022049187419242,
         "perplexity_quant": 18.89214024453658,
         "perplexity_ref": 18.922162293724,
         "quant_bits": 8,
+        "quant_bits_per_weight": 8.501086243736772,
+        "quant_geometry": [
+          [
+            8,
+            64,
+            169
+          ]
+        ],
         "quant_group_size": 64,
         "quant_mode": "affine",
         "quant_model_bytes": 525045902,
         "quant_model_id": "mlx-community/Qwen2.5-0.5B-Instruct-8bit",
-        "quant_revision": null,
+        "quant_n_full_precision": 0,
+        "quant_precision": "uniform",
+        "quant_revision": "6474d4c1a05bd7bd634a9c993560e4e7272eda3d",
         "reference_bits": null,
         "reference_model_bytes": 988097734,
         "reference_model_id": "mlx-community/Qwen2.5-0.5B-Instruct-bf16",
-        "reference_revision": null,
+        "reference_revision": "56d07e766edd7159fbe12ed12d9cf114bf38bf1e",
         "verdict": "good",
         "warnings": [
-          "Assumes both repos share a tokenizer; only vocab_size (and bos/eos ids) were checked \u2014 a divergent token map would be measured as quant drift."
+          "Assumes both repos share a tokenizer; only vocab_size (and bos/eos ids) were checked \u2014 a divergent token map would be measured as quant drift.",
+          "Quantization method is not recorded in the repo config \u2014 mlx-lm's DWQ, AWQ and dynamic quantizers write a quantization block that records only geometry (bits, group sizes, per-module overrides), never the recipe. This report describes the geometry of the loaded model, not the method that produced it."
         ]
       },
       "status": "ok"

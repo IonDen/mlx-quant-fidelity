@@ -279,13 +279,32 @@ def _corpus(n_chunks: int, chunk_len: int = 4) -> Corpus:
 
 
 def _patch_loads(monkeypatch, ref_peak, quant_peak, *, calls, ref_quantized=False):
-    """Patch weights.* so two fake models load with known configs; record call order."""
+    """Patch weights.* so two fake models load with known configs; record call order.
+
+    Returns ``(quant_fake, handed)``: the fake quantized-model instance, and a list that
+    records which model instance ``measured_geometry``/``bits_per_weight`` were each called
+    with (as ``("geometry", model)`` / ``("bpw", model)`` tuples) — separate from ``calls``
+    so tests asserting ``calls == [...]`` against plain strings are unaffected.
+    """
     import mlx_lm
 
     from mlx_quant_fidelity.probes import weights as w
 
     monkeypatch.setattr(w, "install_memory_caps", lambda: calls.append("caps") or (0, 0))
     monkeypatch.setattr(w, "_resolve_weight_bytes", lambda *a, **k: None)  # skip pre-flight
+    ref_fake = _FakeWeightModel(ref_peak)
+    quant_fake = _FakeWeightModel(quant_peak)
+    # The fake models are plain objects, not nn.Modules — keep the real geometry/bpw helpers
+    # from ever touching them; individual tests override these where they need to. Record the
+    # model instance each helper receives so a test can pin it's the quantized model, not the
+    # reference.
+    handed: list[tuple[str, object]] = []
+    monkeypatch.setattr(
+        w,
+        "measured_geometry",
+        lambda model: handed.append(("geometry", model)) or (((4, 64, 3),), 0),
+    )
+    monkeypatch.setattr(w, "bits_per_weight", lambda model: handed.append(("bpw", model)) or 4.5)
     ref_cfg = {"model_type": "llama", "vocab_size": 3}
     if ref_quantized:
         ref_cfg = {**ref_cfg, "quantization": {"bits": 8, "group_size": 64}}
@@ -302,11 +321,57 @@ def _patch_loads(monkeypatch, ref_peak, quant_peak, *, calls, ref_quantized=Fals
     def fake_load(repo, **kw):
         if repo == "ref":
             calls.append("load_ref")
-            return _FakeWeightModel(ref_peak), toks, cfgs["ref"]
+            return ref_fake, toks, cfgs["ref"]
         calls.append("load_quant")
-        return _FakeWeightModel(quant_peak), toks, cfgs["quant"]
+        return quant_fake, toks, cfgs["quant"]
 
     monkeypatch.setattr(mlx_lm, "load", fake_load)
+    return quant_fake, handed
+
+
+def test_measure_weight_fills_measured_geometry_fields(monkeypatch):
+    """Reds if the report still carries only the nominal bits (the four fields stay None)."""
+    calls: list[str] = []
+    _patch_loads(monkeypatch, 0, 1, calls=calls)
+    report = measure_weight_fidelity("quant", "ref", corpus=_corpus(2))
+    assert report.quant_geometry == ((4, 64, 3),)
+    assert report.quant_n_full_precision == 0
+    assert report.quant_bits_per_weight == 4.5
+    assert report.quant_precision == "uniform"
+
+
+def test_measure_weight_marks_mixed_precision_from_geometry(monkeypatch):
+    """Reds if precision is derived from the config's nominal 4-bit instead of the measured
+    geometry (this fake config says 4-bit; the measured geometry says 4/5)."""
+    calls: list[str] = []
+    _patch_loads(monkeypatch, 0, 1, calls=calls)
+    from mlx_quant_fidelity.probes import weights as w
+
+    monkeypatch.setattr(w, "measured_geometry", lambda model: (((4, 64, 2), (5, 64, 1)), 1))
+    report = measure_weight_fidelity("quant", "ref", corpus=_corpus(2))
+    assert report.quant_precision == "mixed"
+    assert report.quant_n_full_precision == 1
+
+
+def test_measure_weight_warnings_are_ordered_tokenizer_method_reference(monkeypatch):
+    """Reds if the standing method note is missing or the order drifts (Markdown determinism)."""
+    from mlx_quant_fidelity.probes.weights import METHOD_NOT_RECORDED_WARNING
+
+    calls: list[str] = []
+    _patch_loads(monkeypatch, 0, 1, calls=calls, ref_quantized=True)
+    report = measure_weight_fidelity("quant", "ref", corpus=_corpus(2))
+    assert report.warnings[0] == TOKENIZER_ASSUMPTION_WARNING
+    assert report.warnings[1] == METHOD_NOT_RECORDED_WARNING
+    assert report.warnings[-1].startswith("reference is itself 8-bit")
+
+
+def test_measure_weight_measures_the_quant_model_not_the_reference(monkeypatch):
+    """Reds if either helper is handed the reference model — the report would describe the
+    wrong model's geometry while every other assertion stayed green."""
+    calls: list[str] = []
+    quant_fake, handed = _patch_loads(monkeypatch, 0, 1, calls=calls)
+    measure_weight_fidelity("quant", "ref", corpus=_corpus(2))
+    assert handed == [("geometry", quant_fake), ("bpw", quant_fake)]
 
 
 def test_measure_weight_caps_before_both_loads(monkeypatch):

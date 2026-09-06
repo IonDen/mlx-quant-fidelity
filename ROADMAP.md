@@ -4,6 +4,7 @@
 
 ## Released
 
+- **0.8.0** — Weight reports carry the quantization geometry measured on the loaded model (per-module bits and group sizes, quantizable modules left at full precision, effective bits per weight), `compare weights` shows that effective precision as a `bits/wt` column, and both weight commands accept a `repo@revision` pin. Adds a committed Qwen3-0.6B ladder ranking five repos, two of them published as DWQ and AWQ quantizations, against one bf16 reference.
 - **0.7.0** — `compare kv` ranks every method on the same footing: quantizer error alone, with stock's own deployed-path number shown alongside rather than used for ranking. Adds `affine` (an independent per-side K/V bit width) and `turboquant-vonly` (TurboQuant-MLX's V-only cache) to the ranked set, a `kv --control` quantizer-only lane for stock, and `--model-revision` pinning on `kv`/`compare kv`.
 - **0.6.0** — The KV probe measures any per-layer cache implementation, and the first third-party cache — TurboQuant-MLX — is ranked against mlx-lm's stock cache on one memory-normalized yardstick.
 - **0.5.1** — Documentation release. Rewritten README built around the three questions the tool answers, diagrams for the coverage map, the two measurement modes, and Pareto domination, and a fidelity chart rendered from the committed sample reports. No change to measurement behavior.

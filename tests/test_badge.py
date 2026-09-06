@@ -72,3 +72,18 @@ def test_badge_message_uses_method_bits_text_for_adapter_methods():
     msg = badge_for_report(tagged)["message"]
     assert "None" not in msg
     assert "v3-bit" in msg
+
+
+def test_weight_badge_uses_mixed_label_for_mixed_reports():
+    """Reds if the badge still interpolates the nominal quant_bits."""
+    from mlx_quant_fidelity.badge import badge_for_report
+
+    mixed = dataclasses.replace(
+        _weight_report(),
+        quant_geometry=((4, 64, 53), (5, 64, 144)),
+        quant_n_full_precision=0,
+        quant_bits_per_weight=5.02,
+        quant_precision="mixed",
+    )
+    assert badge_for_report(mixed)["message"].split(" · ")[1] == "mixed 4/5-bit"
+    assert badge_for_report(_weight_report())["message"].split(" · ")[1] == "4-bit"

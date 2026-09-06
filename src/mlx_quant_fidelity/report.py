@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import math
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, cast
 
@@ -13,6 +14,17 @@ from mlx_quant_fidelity.metrics import DepthBucketSummary, ScalarSummary
 
 if TYPE_CHECKING:
     from mlx_quant_fidelity.ranking import RankPoint
+
+
+METHOD_NOT_RECORDED_WARNING = (
+    "Quantization method is not recorded in the repo config — mlx-lm's DWQ, AWQ and dynamic "
+    "quantizers write a quantization block that records only geometry (bits, group sizes, "
+    "per-module overrides), never the recipe. This report describes the geometry of the loaded "
+    "model, not the method that produced it."
+)
+"""The standing caveat every weight report carries. Lives here, not in ``probes.weights``, so
+the renderer can re-add it to a comparison assembled from partials written before 0.8.0 without
+``report.py`` importing the probe (and with it mlx-lm)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,6 +92,57 @@ class WeightFidelityReport:
     verdict: str
     warnings: tuple[str, ...]
     device: str | None = None
+    quant_geometry: tuple[tuple[int, int, int], ...] | None = None
+    quant_n_full_precision: int | None = None
+    quant_bits_per_weight: float | None = None
+    quant_precision: str | None = None  # "uniform" | "mixed"
+
+
+def weight_bits_text(report: WeightFidelityReport) -> str:
+    """`4-bit`, `mixed 4/5-bit`, or `?-bit` — the short precision label for badges.
+
+    Legacy is decided by one rule, shared with `weight_precision_text`: a report is legacy iff it
+    carries no `quant_bits_per_weight`. A legacy report reads its declared nominal `quant_bits`
+    whatever geometry it happens to carry, so the badge and the headline never disagree.
+    """
+    if report.quant_bits_per_weight is not None and report.quant_geometry:
+        bits = sorted({b for b, _, _ in report.quant_geometry})
+        if len(bits) > 1:
+            return "mixed " + "/".join(str(b) for b in bits) + "-bit"
+        return f"{bits[0]}-bit"
+    return f"{report.quant_bits}-bit" if report.quant_bits is not None else "?-bit"
+
+
+def weight_precision_text(report: WeightFidelityReport) -> str | None:
+    """Headline precision text for a measured report; None for a legacy (pre-0.8.0) report."""
+    bpw = report.quant_bits_per_weight
+    if bpw is None:
+        return None
+    geometry = report.quant_geometry or ()
+    groups = sorted({g for _, g, _ in geometry}) or (
+        [report.quant_group_size] if report.quant_group_size is not None else []
+    )
+    parts = [
+        "group " + ("/".join(str(g) for g in groups) if groups else "?"),
+        f"{bpw:.2f} bits/weight",
+    ]
+    extras: list[str] = []
+    bits = sorted({b for b, _, _ in geometry})
+    if len(bits) > 1:
+        per_bits = {b: sum(n for bb, _, n in geometry if bb == b) for b in bits}
+        lowest = per_bits[bits[0]]
+        extras.append(
+            f"{lowest} {'module' if lowest == 1 else 'modules'} at {bits[0]}-bit, "
+            + ", ".join(f"{per_bits[b]} at {b}-bit" for b in bits[1:])
+        )
+    if not geometry:
+        extras.append("0 quantized modules")
+    n_full = report.quant_n_full_precision or 0
+    if n_full:
+        noun = "module" if n_full == 1 else "modules"
+        extras.append(f"{n_full} quantizable {noun} left at full precision")
+    tail = "; " + "; ".join(extras) if extras else ""
+    return f"{weight_bits_text(report)} ({', '.join(parts)}{tail})"
 
 
 def render_json(report: FidelityReport | WeightFidelityReport) -> str:
@@ -89,11 +152,13 @@ def render_json(report: FidelityReport | WeightFidelityReport) -> str:
 
 def render_weight_markdown(report: WeightFidelityReport) -> str:
     """Human-readable weight-fidelity report. Always qualifies by corpus + context length."""
-    bits = report.quant_bits if report.quant_bits is not None else "unknown"
+    precision = weight_precision_text(report)
+    if precision is None:  # legacy report: the pre-0.8.0 headline, byte-for-byte
+        bits = report.quant_bits if report.quant_bits is not None else "unknown"
+        precision = f"{bits}-bit (group {report.quant_group_size})"
     c = report.corpus
     lines = [
-        f"# Weight-fidelity: `{report.quant_model_id}` @ {bits}-bit "
-        f"(group {report.quant_group_size}) vs `{report.reference_model_id}`",
+        f"# Weight-fidelity: `{report.quant_model_id}` @ {precision} vs `{report.reference_model_id}`",
         "",
         f"**Verdict:** {report.verdict} (provisional tiers — WikiText-2, "
         "not validated against downstream accuracy)",
@@ -298,6 +363,33 @@ class ComparisonReport:
     mlx_lm_version: str
 
 
+def _validate_measured_precision_fields(d: dict[str, object], fields: dict[str, object]) -> None:
+    """Validate the three measured-precision siblings of `quant_geometry`, in place on `fields`.
+
+    A frozen dataclass checks nothing, so an unvalidated field reaches the renderers — where
+    `quant_bits_per_weight` is formatted with `:.2f` and `quant_n_full_precision` is pluralized.
+    Raising `ReportSchemaError` here is what lets `_envelope_to_result` isolate one corrupt
+    partial as a failed row instead of crashing the whole comparison.
+    """
+    bpw = d.get("quant_bits_per_weight")
+    if bpw is not None:
+        if isinstance(bpw, bool) or not isinstance(bpw, (int, float)) or not math.isfinite(bpw):
+            raise ReportSchemaError(
+                "persisted 'quant_bits_per_weight' must be a finite number or null"
+            )
+        fields["quant_bits_per_weight"] = float(bpw)
+    n_full = d.get("quant_n_full_precision")
+    if n_full is not None and (
+        isinstance(n_full, bool) or not isinstance(n_full, int) or n_full < 0
+    ):
+        raise ReportSchemaError(
+            "persisted 'quant_n_full_precision' must be a non-negative integer or null"
+        )
+    precision = d.get("quant_precision")
+    if precision is not None and precision not in ("uniform", "mixed"):
+        raise ReportSchemaError("persisted 'quant_precision' must be 'uniform', 'mixed' or null")
+
+
 def weight_report_from_dict(d: dict[str, object]) -> WeightFidelityReport:
     """Rehydrate a WeightFidelityReport from `dataclasses.asdict` output (subprocess partials)."""
     try:
@@ -307,6 +399,22 @@ def weight_report_from_dict(d: dict[str, object]) -> WeightFidelityReport:
             raise ReportSchemaError("persisted report 'kl'/'corpus' must be dicts")
         fields = {**d, "kl": ScalarSummary(**kl), "corpus": CorpusProvenance(**corpus)}
         fields["warnings"] = tuple(cast("list[str]", fields.get("warnings") or []))
+        geometry = d.get("quant_geometry")
+        if geometry is not None:
+            ok = isinstance(geometry, (list, tuple)) and all(
+                isinstance(t, (list, tuple))
+                and len(t) == 3
+                and all(isinstance(x, int) and not isinstance(x, bool) for x in t)
+                for t in geometry
+            )
+            if not ok:
+                raise ReportSchemaError(
+                    "persisted 'quant_geometry' must be a list of [bits, group_size, n_modules] int triples"
+                )
+            fields["quant_geometry"] = tuple(
+                (int(t[0]), int(t[1]), int(t[2])) for t in cast("list[list[int]]", geometry)
+            )
+        _validate_measured_precision_fields(d, fields)
         return WeightFidelityReport(**fields)  # type: ignore[arg-type]
     except ReportSchemaError:
         raise
@@ -371,8 +479,8 @@ def render_comparison_markdown(report: ComparisonReport) -> str:
         ]
     else:
         lines += [
-            "| target | cost | KL mean | KL p99 | flip | verdict | frontier |",
-            "|---|---|---|---|---|---|---|",
+            "| target | cost | KL mean | KL p99 | flip | bits/wt | verdict | frontier |",
+            "|---|---|---|---|---|---|---|---|",
         ]
     dominated_by: dict[str, str] = dict(report.dominated)
     ranked = [r for r in report.results if r.point is not None]
@@ -398,9 +506,11 @@ def render_comparison_markdown(report: ComparisonReport) -> str:
                 f"{kl_p99:.4f} | {flip:.4f} | {bundled} | {resident} | {verdict} | {mark} |"
             )
         else:
+            bpw_value = getattr(r.report, "quant_bits_per_weight", None)
+            bpw = f"{bpw_value:.2f}" if bpw_value is not None else "—"
             lines.append(
                 f"| `{r.label}` | {_human_bytes(r.point.cost_bytes)} | {r.report.kl.mean:.4f} | "
-                f"{r.report.kl.p99:.4f} | {r.report.flip_rate:.4f} | {r.report.verdict} | {mark} |"
+                f"{r.report.kl.p99:.4f} | {r.report.flip_rate:.4f} | {bpw} | {r.report.verdict} | {mark} |"
             )
     excluded = [r for r in report.results if r.point is None]
     if excluded:
@@ -415,20 +525,24 @@ def render_comparison_markdown(report: ComparisonReport) -> str:
         )
     elif report.budget is not None:
         lines.append(f"No target clears the budget ({report.budget}).")
+    seen_warnings: set[str] = set()
+    for r in report.results:
+        if r.report is None:
+            continue
+        for w in r.report.warnings:
+            if w not in seen_warnings:
+                seen_warnings.add(w)
+                lines.append(f"\n> Note: {w}")
     if is_kv:
-        seen_warnings: set[str] = set()
-        for r in report.results:
-            if r.report is None:
-                continue
-            for w in r.report.warnings:
-                if w not in seen_warnings:
-                    seen_warnings.add(w)
-                    lines.append(f"\n> Note: {w}")
         lines.append(
             "\n_ranked on quantizer-only drift; stock rows carry their bundled deployment "
             "drift alongside._"
         )
     if report.mode == "weight":
+        # A comparison resumed from partials written before 0.8.0 has rows with no method
+        # caveat of their own; the caveat is a property of the weight probe, not of a row.
+        if METHOD_NOT_RECORDED_WARNING not in seen_warnings:
+            lines.append(f"\n> Note: {METHOD_NOT_RECORDED_WARNING}")
         lines += [
             "",
             "> Weight compare reloads the reference once per target — N targets ≈ Nx a "

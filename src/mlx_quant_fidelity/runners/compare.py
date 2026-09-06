@@ -159,6 +159,34 @@ def _partial_filename(repo: str) -> str:
     return repo.replace("/", "_") + ".json"
 
 
+def split_target(target: str) -> tuple[str, str | None]:
+    """Split `repo[@revision]`. An existing local path is never split (paths may contain `@`).
+
+    Splits at the first `@`; the revision must be non-empty and free of whitespace and NUL
+    (`/` is allowed — `refs/pr/3` is a valid Hub revision). Raises CompareConfigError otherwise.
+
+    A target the filesystem refuses to stat at all (a first component over 255 bytes raises
+    ENAMETOOLONG rather than returning False) is not a local path — treat it as a repo id and
+    let the repo-id rules refuse it, rather than letting a raw OSError escape as an internal
+    error.
+    """
+    if "@" not in target:
+        return target, None
+    try:
+        is_local_path = Path(target).exists()
+    except OSError:
+        is_local_path = False
+    if is_local_path:
+        return target, None
+    repo, _, revision = target.partition("@")
+    if not repo or not revision or "\x00" in revision or any(c.isspace() for c in revision):
+        raise CompareConfigError(
+            f"malformed target {target!r}: expected repo[@revision] with a non-empty, "
+            "whitespace-free revision"
+        )
+    return repo, revision
+
+
 def _validate_compare_weights_args(quant_model_ids: list[str]) -> None:
     """Validate weight-compare arguments. Raise CompareConfigError on bad input."""
     if len(quant_model_ids) < 2:
@@ -169,7 +197,9 @@ def _validate_compare_weights_args(quant_model_ids: list[str]) -> None:
     if len(set(labels)) != len(labels):
         duplicates = [lbl for lbl in labels if labels.count(lbl) > 1]
         raise CompareConfigError(
-            f"duplicate quant_model_ids produce the same label: {set(duplicates)}"
+            f"duplicate quant_model_ids produce the same label: {set(duplicates)} (two revisions "
+            "of the same repo cannot be compared in one run — the label and the partial filename "
+            "are the repo id)"
         )
     for repo in quant_model_ids:
         if "\x00" in repo:
@@ -322,25 +352,34 @@ def compare_weight_fidelity(
     partial JSON already exists. Mismatched/unrankable targets are isolated, not aborted.
 
     Args:
-        quant_model_ids: HuggingFace repo ids (or local paths) of the quantized targets.
-        reference_model_id: Repo id (or local path) of the shared full-precision reference.
+        quant_model_ids: HuggingFace repo ids (or local paths) of the quantized targets; each
+            may be `repo@revision`. An inline revision wins over `quant_revision`.
+        reference_model_id: Repo id (or local path) of the shared full-precision reference; may
+            be `repo@revision` — an inline revision wins over `reference_revision`.
         max_chunks: Score at most this many corpus chunks per target.
         max_kld: Optional KLD budget for the recommended pick.
         min_tier: Optional minimum tier for the recommended pick.
         artifacts_dir: Directory for partial JSON files (default: _artifacts/compare/weight).
-        quant_revision: Optional git revision applied to every quant target's fetch.
-        reference_revision: Optional git revision for the one shared reference repo.
+        quant_revision: Optional git revision applied to every quant target's fetch, unless
+            overridden by an inline `@revision` on that target.
+        reference_revision: Optional git revision for the one shared reference repo, unless
+            overridden by an inline `@revision` on `reference_model_id`.
 
     Raises:
         CompareConfigError: If fewer than 2 targets, duplicate ids, malformed repo ids, or
             filename collisions. Subclasses ValueError for backward compatibility.
     """
-    _validate_compare_weights_args(quant_model_ids)
+    targets = [split_target(t) for t in quant_model_ids]
+    _validate_compare_weights_args([repo for repo, _ in targets])
+    reference_model_id, reference_inline = split_target(reference_model_id)
+    if reference_inline is not None:
+        reference_revision = reference_inline
     out_dir = artifacts_dir or Path("_artifacts/compare/weight")
     out_dir.mkdir(parents=True, exist_ok=True)
     results: list[ComparisonTargetResult] = []
     corpus = None
-    for repo in quant_model_ids:
+    for repo, inline_revision in targets:
+        target_revision = inline_revision if inline_revision is not None else quant_revision
         label = _label_for_repo(repo)
         partial = out_dir / _partial_filename(repo)
         # fix 1: treat a corrupt/truncated partial as absent — fall through and re-run
@@ -361,7 +400,7 @@ def compare_weight_fidelity(
                 "reference": reference_model_id,
                 "max_chunks": max_chunks,
                 "schema_version": _WEIGHT_PARTIAL_SCHEMA_VERSION,
-                "quant_revision": quant_revision,
+                "quant_revision": target_revision,
                 "reference_revision": reference_revision,
             }
             if env.get("run_identity") != expected_identity:
@@ -372,7 +411,7 @@ def compare_weight_fidelity(
                 reference=reference_model_id,
                 partial_path=partial,
                 max_chunks=max_chunks,
-                quant_revision=quant_revision,
+                quant_revision=target_revision,
                 reference_revision=reference_revision,
             )
         result = _envelope_to_result(label, env)
