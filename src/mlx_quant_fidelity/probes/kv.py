@@ -359,7 +359,7 @@ def score_kv_config(
     probe_cache = make_prompt_cache(model)
     n_layers = len(probe_cache)
     method.probe_capability(probe_cache)
-    # Per-layer partial coverage (0053): a hybrid model passes probe_capability as long as ONE
+    # Per-layer partial coverage: a hybrid model passes probe_capability as long as ONE
     # layer is quantizable, so record which layers to quantize (stock only; quantizer-only methods
     # do not implement the capability).
     partial_coverage: LayerCoverage | None = None
@@ -369,18 +369,34 @@ def score_kv_config(
             partial_coverage = cov
     del probe_cache
 
-    if partial_coverage is not None:
+    if partial_coverage is not None and isinstance(method, PartialCoverageMethod):
         if quantize_start > 0:
             raise CacheNotQuantizableError(
-                "partial KV coverage (some layers cannot be quantized, e.g. sliding-window) "
-                "is measured only in stress mode; run without --quantize-start on this model."
+                "partial KV coverage (a hybrid model with layers that cannot be quantized, "
+                "e.g. sliding-window) is measured only in stress mode; measure it with the "
+                "`kv` command without --quantize-start."
             )
         if control_m is not None:
             raise CacheNotQuantizableError(
-                "partial KV coverage is not supported with --control yet; "
-                "run without --control on this model."
+                "partial KV coverage (a hybrid model with sliding-window or state-space layers) "
+                "is measured only by the `kv` command without a control lane; it is not available "
+                "in `compare kv` or with `kv --control`."
             )
         probe_warnings.append(partial_coverage.note())
+        # Fail fast on an architecture whose forward cannot consume a mixed quantized /
+        # full-precision cache: probe_capability only proves each layer quantizes in isolation,
+        # not that the model runs over the heterogeneous list. A one-token forward here turns a
+        # mid-loop crash into a clean, package-rooted error before any chunk is scored.
+        smoke_cache = method.make_partial_cache(make_prompt_cache(model), partial_coverage)
+        try:
+            mx.eval(model(mx.array([[0]]), cache=smoke_cache))  # type: ignore[operator]
+        except Exception as exc:
+            raise CacheNotQuantizableError(
+                "this model's forward does not run on a mixed quantized/full-precision KV cache "
+                f"(partial coverage): {exc}"
+            ) from exc
+        del smoke_cache
+        mx.clear_cache()
 
     mode = "stress" if quantize_start == 0 else "deployment"
     chunks = corpus.chunks[:max_chunks] if max_chunks is not None else corpus.chunks
@@ -517,7 +533,16 @@ def score_kv_config(
             )
 
     n_kv = getattr(args, "num_key_value_heads", None) or getattr(args, "num_attention_heads", None)
-    if measured_bpt is not None and head_dim is not None and isinstance(n_kv, int):
+    # Skip this sanity check for a partial report: the analytic figure assumes every layer is
+    # quantized, while measured_bpt is the real mixed cache (a few packed layers + many
+    # full-precision ones), so the two never match and the dtype attribution would be wrong.
+    # partial_coverage.note() already explains the mixed footprint.
+    if (
+        partial_coverage is None
+        and measured_bpt is not None
+        and head_dim is not None
+        and isinstance(n_kv, int)
+    ):
         analytic = method.bytes_per_token(n_layers=n_layers, n_kv_heads=n_kv, head_dim=head_dim)
         if analytic != measured_bpt:
             probe_warnings.append(

@@ -21,6 +21,7 @@ The `kv` probe measures hybrid attention models — full-attention layers interl
 
 - Confirmed on `mlx-community/gemma-3-1b-it-4bit` (full attention interleaved with sliding-window layers): 4 of its 26 layers quantized at 4-bit, the rest measured full-precision.
 - True sliding-window quantization is still not possible: `RotatingKVCache` has no quantized form in mlx-lm, so those layers are measured at full precision rather than quantized. MLA models are already measured through the standard cache path. See `docs/measurement-principles.md`.
+- Partial coverage is a `kv`-command measurement. `compare kv` does not rank a partial (hybrid) model, since a partial cache's cost is not comparable to a fully-quantized one. A hybrid whose forward cannot run a mixed cache is flagged with a clear error rather than crashing mid-run.
 
 ## [0.8.0] - 2026-09-05
 

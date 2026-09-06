@@ -51,5 +51,8 @@ def test_partial_coverage_on_real_hybrid(loaded_hybrid):
     assert report.kv_layers_total == 26
     assert report.kv_layers_quantized == 4
     assert report.kv_layers_skipped == {"RotatingKVCache": 22}
-    assert report.kl.mean > 0  # the quantized full-attention layers engaged
+    # engaged well above float noise (recorded 0.0553; matches test_stress_quantization_engages's floor)
+    assert report.kl.mean > 0.01
     assert any("hypothetical partial" in w for w in report.warnings)
+    # the misattributed "measured vs analytic bytes/token" warning must not fire on a partial report
+    assert not any("differs from the analytic" in w for w in report.warnings)

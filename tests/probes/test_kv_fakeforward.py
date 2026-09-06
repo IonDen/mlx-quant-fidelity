@@ -391,17 +391,77 @@ def _patch_kv_caches_partial(monkeypatch):
 
 
 def test_score_kv_config_partial_coverage_reports_and_measures(monkeypatch):
-    # RED until the probe wires per-layer partial (0053): a hybrid model (1 quantizable layer +
-    # 1 sliding) must (a) NOT refuse, (b) report kv_partial with the right counts + skipped types,
-    # (c) carry the hypothetical-partial note, (d) still produce non-zero drift.
+    # A hybrid model (1 quantizable layer + 1 sliding) must (a) NOT refuse, (b) report kv_partial
+    # with the right counts + skipped types, (c) carry the hypothetical-partial note, (d) produce
+    # non-zero drift, and (e) route through make_partial_cache — NEVER make_cache, which would
+    # uniformly quantize every layer including the sliding one. The make_cache spy is the wiring
+    # guard: it stays [] here and goes red the instant the loop falls back to make_cache.
     _patch_kv_caches_partial(monkeypatch)
+    make_cache_calls: list[int] = []
+    partial_calls: list[tuple[int, ...]] = []
+    real_make = StockKVMethod.make_cache
+    real_partial = StockKVMethod.make_partial_cache
+
+    def _spy_make_cache(self, *, n_layers):
+        make_cache_calls.append(n_layers)
+        return real_make(self, n_layers=n_layers)
+
+    def _spy_partial(self, fp_cache, coverage):
+        partial_calls.append(coverage.quantized_indices)
+        return real_partial(self, fp_cache, coverage)
+
+    monkeypatch.setattr(StockKVMethod, "make_cache", _spy_make_cache)
+    monkeypatch.setattr(StockKVMethod, "make_partial_cache", _spy_partial)
+
     report = score_kv_config(_FakeDivergentModel(), _kv_corpus(2), model_id="org/m")
+
+    assert make_cache_calls == []  # a hybrid never builds a uniform all-quantized cache
+    assert partial_calls  # make_partial_cache was actually invoked (smoke + each chunk)
+    assert all(
+        idx == (0,) for idx in partial_calls
+    )  # only layer 0 is quantized, never the sliding one
     assert report.kv_partial is True
     assert report.kv_layers_total == 2
     assert report.kv_layers_quantized == 1
     assert report.kv_layers_skipped == {"_FakeSlidingCache": 1}
     assert report.kl.mean > 0  # the quantizable layer engaged
     assert any("hypothetical partial" in w for w in report.warnings)
+
+
+def test_score_kv_config_partial_smoke_rejects_a_forward_that_cannot_run_the_mixed_cache(
+    monkeypatch,
+):
+    # The fail-fast smoke: if the model's forward cannot consume a mixed quantized/full-precision
+    # cache, score_kv_config must raise a package-rooted CacheNotQuantizableError up front, not
+    # crash mid chunk-loop. RED if the one-token smoke forward is removed.
+    _patch_kv_caches_partial(monkeypatch)
+
+    class _ForwardBreaksOnMixedCache(_FakeDivergentModel):
+        def __call__(self, inp, cache=None):
+            if cache is not None and not getattr(cache[-1], "bits", False):
+                raise RuntimeError("this attention layer requires a plain KVCache")
+            return super().__call__(inp, cache=cache)
+
+    with pytest.raises(CacheNotQuantizableError, match="mixed quantized/full-precision"):
+        score_kv_config(_ForwardBreaksOnMixedCache(), _kv_corpus(2), model_id="org/m")
+
+
+def test_score_kv_config_partial_refuses_control_pointing_at_kv_command(monkeypatch):
+    # compare kv forces control=True for stock; a partial model must refuse with a message that
+    # points at the `kv` command, NOT a dead-end "run without --control" (compare kv exposes no
+    # such flag). RED if the refusal message regresses to blaming --control.
+    _patch_kv_caches_partial(monkeypatch)
+    with pytest.raises(CacheNotQuantizableError) as excinfo:
+        score_kv_config(
+            _FakeDivergentModel(),
+            _kv_corpus(2),
+            model_id="org/m",
+            method=StockKVMethod(bits=4, group_size=64),
+            control=True,
+        )
+    msg = str(excinfo.value)
+    assert "`kv`" in msg  # points at the kv command
+    assert "run without --control" not in msg  # no dead-end hint
 
 
 def test_score_kv_config_partial_refused_in_deployment_mode(monkeypatch):

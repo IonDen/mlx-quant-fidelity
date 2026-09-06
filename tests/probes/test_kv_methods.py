@@ -260,6 +260,18 @@ def test_layer_coverage_note_states_partial_and_hypothetical():
     assert "not a shipping configuration" in note
 
 
+def test_layer_coverage_note_lists_multiple_skip_types_in_stable_order():
+    # RED if note() loses its sorted() over skipped_types: dict-iteration order would make the
+    # rendered caveat non-deterministic across runs.
+    cov = StockKVMethod(bits=4, group_size=64).layer_coverage(
+        [_OkCache(), _RaisingQuantCache(), _NoQuantCache()]
+    )
+    note = cov.note()
+    assert "1 _NoQuantCache" in note
+    assert "1 _RaisingQuantCache" in note
+    assert note.index("_NoQuantCache") < note.index("_RaisingQuantCache")  # sorted, deterministic
+
+
 # --- stored_state_bytes -----------------------------------------------------------
 
 

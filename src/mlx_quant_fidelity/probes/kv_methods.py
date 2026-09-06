@@ -146,7 +146,7 @@ class LayerCoverage:
     """Which per-layer caches a method can quantize, and why the rest were skipped.
 
     Built by :meth:`StockKVMethod.layer_coverage`; drives the partial-coverage report
-    fields and the honesty note (0053). ``skip_reasons`` keeps the full per-layer message
+    fields and the honesty note. ``skip_reasons`` keeps the full per-layer message
     for the zero-quantizable refusal; ``skipped_types`` is the type -> count tally the
     report renders.
     """
@@ -162,7 +162,7 @@ class LayerCoverage:
         return 0 < len(self.quantized_indices) < self.total
 
     def note(self) -> str:
-        """The report caveat for a partial measurement (0053).
+        """The report caveat for a partial measurement.
 
         States the coverage fraction, names the skipped layer types, and that mlx-lm does not
         generate with this mixed cache — so the number is a hypothetical partial, not a
@@ -180,7 +180,7 @@ class LayerCoverage:
 
 @runtime_checkable
 class PartialCoverageMethod(Protocol):
-    """Optional capability (0053): measure a hybrid model on its quantizable layers only.
+    """Optional capability: measure a hybrid model on its quantizable layers only.
 
     Stock mlx-lm supports it; quantizer-only third-party methods do not. ``probes/kv.py``
     branches on ``isinstance(method, PartialCoverageMethod)`` so the seam stays agnostic to
@@ -300,7 +300,7 @@ class StockKVMethod:
         )
 
     def probe_capability(self, empty_cache: list[object]) -> None:
-        """Refuse only when NO layer is quantizable; a partial cache is allowed (0053).
+        """Refuse only when NO layer is quantizable; a partial cache is allowed.
 
         Per-layer partial coverage means a hybrid model (full-attention + sliding-window /
         SSM layers) is still measured on the layers that can be quantized, so the whole

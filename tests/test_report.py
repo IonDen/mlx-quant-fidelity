@@ -82,6 +82,25 @@ def test_from_dict_defaults_partial_fields_for_legacy_dict():
     assert back.kv_layers_total is None
 
 
+@pytest.mark.parametrize(
+    ("field", "bad"),
+    [
+        ("kv_layers_skipped", "boom"),
+        ("kv_layers_total", "not-an-int"),
+        ("kv_layers_quantized", []),
+        ("kv_partial", "yes"),
+    ],
+)
+def test_from_dict_rejects_malformed_partial_fields(field, bad):
+    # RED until fidelity_report_from_dict type-guards the partial fields: a corrupted persisted
+    # partial must be isolated as a schema error, not rehydrated into a broken report (mirrors
+    # the control_kl isolation the surrounding compare machinery relies on).
+    d = dataclasses.asdict(_report())
+    d[field] = bad
+    with pytest.raises(ReportSchemaError):
+        fidelity_report_from_dict(d)
+
+
 def test_render_json_is_stable_and_complete():
     data = json.loads(render_json(_report()))
     assert data["kl"]["p99"] == 0.2
