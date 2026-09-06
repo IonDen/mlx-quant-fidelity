@@ -1,4 +1,5 @@
-"""The stock method reproduces the committed 0.5.x samples: Markdown byte-identical, JSON +4 keys."""
+"""The stock method reproduces the committed 0.5.x samples: Markdown byte-identical, JSON gains
+exactly the additive schema keys (see NEW_KEYS), each at a backward-compatible default."""
 
 import json
 from pathlib import Path
@@ -25,6 +26,11 @@ NEW_KEYS = {
     "control_kl",
     "control_flip_rate",
     "working_set_bytes_per_token",
+    # 0.9.0 per-layer partial coverage — default to full-coverage on these pre-0.9.0 samples.
+    "kv_partial",
+    "kv_layers_total",
+    "kv_layers_quantized",
+    "kv_layers_skipped",
 }
 
 
@@ -47,6 +53,12 @@ def test_json_rerender_adds_exactly_the_method_and_footing_keys(path):
     assert now["kv_method"] == "stock"
     assert now["drift_footing"] == "bundled"
     assert now["control_kl"] is None
+    # 0.9.0: these full-quantizable samples are never partial, so the new keys take their
+    # full-coverage defaults and the committed headline is unchanged.
+    assert now["kv_partial"] is False
+    assert now["kv_layers_total"] is None
+    assert now["kv_layers_quantized"] is None
+    assert now["kv_layers_skipped"] is None
     for key in legacy:
         assert now[key] == legacy[key], key
 

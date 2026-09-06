@@ -313,7 +313,7 @@ print(report.kl.mean, report.flip_rate, report.verdict)
 
 ## Status
 
-0.8.0, released on PyPI as `mlx-quant-fidelity`. A weight report now carries the quantization geometry measured on the model it loaded — per-module bits and group sizes, and the effective bits per weight — so repos published at the same nominal bit width can be ranked against one reference and read against each other. Threshold validation and wider attention coverage are on the [roadmap](ROADMAP.md).
+0.9.0, released on PyPI as `mlx-quant-fidelity`. The `kv` probe now measures hybrid attention models — full-attention layers interleaved with sliding-window or state-space layers — on the layers whose cache can be quantized, instead of refusing the whole model; the report records how many layers were measured and which were skipped. Threshold validation and MLA coverage are on the [roadmap](ROADMAP.md).
 
 ## License
 

@@ -362,6 +362,64 @@ def test_score_kv_config_caps_provided_corpus(monkeypatch):
     assert report.n_positions == 6
 
 
+class _FakeSlidingCache:
+    """A sliding-window-like layer: to_quantized raises NYI, so partial coverage skips it."""
+
+    state = property(lambda self: ())
+
+    def to_quantized(self, group_size, bits):
+        raise NotImplementedError("RotatingKVCache Quantization NYI")
+
+
+class _FakeQuantizableLayerCache:
+    """Full-attention layer: to_quantized returns a _FakeQuantCache (has .bits) so the fake model
+    treats it as the quantized path in the partial run."""
+
+    state = property(lambda self: ())
+
+    def to_quantized(self, group_size, bits):
+        return _FakeQuantCache()
+
+
+def _patch_kv_caches_partial(monkeypatch):
+    monkeypatch.setattr(
+        kvmod,
+        "make_prompt_cache",
+        lambda model: [_FakeQuantizableLayerCache(), _FakeSlidingCache()],
+        raising=False,
+    )
+
+
+def test_score_kv_config_partial_coverage_reports_and_measures(monkeypatch):
+    # RED until the probe wires per-layer partial (0053): a hybrid model (1 quantizable layer +
+    # 1 sliding) must (a) NOT refuse, (b) report kv_partial with the right counts + skipped types,
+    # (c) carry the hypothetical-partial note, (d) still produce non-zero drift.
+    _patch_kv_caches_partial(monkeypatch)
+    report = score_kv_config(_FakeDivergentModel(), _kv_corpus(2), model_id="org/m")
+    assert report.kv_partial is True
+    assert report.kv_layers_total == 2
+    assert report.kv_layers_quantized == 1
+    assert report.kv_layers_skipped == {"_FakeSlidingCache": 1}
+    assert report.kl.mean > 0  # the quantizable layer engaged
+    assert any("hypothetical partial" in w for w in report.warnings)
+
+
+def test_score_kv_config_partial_refused_in_deployment_mode(monkeypatch):
+    # RED until the stress-only guard exists: deployment mode would reach convert_prefix and
+    # crash on the sliding layer, so a partial model must be refused up front (MVP is stress-only).
+    _patch_kv_caches_partial(monkeypatch)
+    with pytest.raises(CacheNotQuantizableError, match="stress mode"):
+        score_kv_config(_FakeDivergentModel(), _kv_corpus(2), model_id="org/m", quantize_start=1)
+
+
+def test_score_kv_config_full_coverage_is_not_partial(monkeypatch):
+    # a fully-quantizable model is never flagged partial (keeps its committed headline).
+    _patch_kv_caches_divergent(monkeypatch)
+    report = score_kv_config(_FakeDivergentModel(), _kv_corpus(2), model_id="org/m")
+    assert report.kv_partial is False
+    assert report.kv_layers_total is None
+
+
 def test_score_kv_config_emits_warning_when_head_dim_unknown(monkeypatch):
     """score_kv_config appends a warning when head_dim is not derivable.
 

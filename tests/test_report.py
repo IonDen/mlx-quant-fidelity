@@ -47,6 +47,41 @@ def _mk_report(**overrides: object) -> FidelityReport:
     return dataclasses.replace(_report(), **overrides)  # type: ignore[arg-type]
 
 
+def test_fidelity_report_defaults_not_partial():
+    # RED until the partial-coverage fields exist: a normal (full-coverage) report is not partial
+    # and carries no layer-coverage counts, so its committed headline stays unchanged.
+    r = _report()
+    assert r.kv_partial is False
+    assert r.kv_layers_total is None
+    assert r.kv_layers_quantized is None
+    assert r.kv_layers_skipped is None
+
+
+def test_from_dict_roundtrips_partial_fields():
+    # RED until the fields exist + round-trip: a partial report survives asdict -> from_dict.
+    partial = _mk_report(
+        kv_partial=True,
+        kv_layers_total=28,
+        kv_layers_quantized=20,
+        kv_layers_skipped={"RotatingKVCache": 8},
+    )
+    back = fidelity_report_from_dict(json.loads(render_json(partial)))
+    assert back.kv_partial is True
+    assert back.kv_layers_total == 28
+    assert back.kv_layers_quantized == 20
+    assert back.kv_layers_skipped == {"RotatingKVCache": 8}
+
+
+def test_from_dict_defaults_partial_fields_for_legacy_dict():
+    # backward-compat: a pre-0.9.0 dict (no partial keys) rehydrates as full-coverage.
+    d = dataclasses.asdict(_report())
+    for k in ("kv_partial", "kv_layers_total", "kv_layers_quantized", "kv_layers_skipped"):
+        d.pop(k, None)
+    back = fidelity_report_from_dict(d)
+    assert back.kv_partial is False
+    assert back.kv_layers_total is None
+
+
 def test_render_json_is_stable_and_complete():
     data = json.loads(render_json(_report()))
     assert data["kl"]["p99"] == 0.2

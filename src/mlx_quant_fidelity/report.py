@@ -61,6 +61,14 @@ class FidelityReport:
     control_kl: ScalarSummary | None = None
     control_flip_rate: float | None = None
     working_set_bytes_per_token: int | None = None
+    # Per-layer partial coverage (0053): set for a hybrid model whose full-attention layers are
+    # quantized while sliding-window / SSM layers stay full-precision. All at their full-coverage
+    # defaults (partial=False, counts None) on a fully-quantizable model and on pre-0.9.0 dicts,
+    # which keeps every committed sample's headline byte-identical.
+    kv_partial: bool = False
+    kv_layers_total: int | None = None
+    kv_layers_quantized: int | None = None
+    kv_layers_skipped: dict[str, int] | None = None
 
 
 @dataclass(frozen=True, slots=True)

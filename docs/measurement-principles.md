@@ -97,6 +97,18 @@ For the stock cache, deployment mode exercises the `to_quantized` conversion pat
 
 What these numbers do not cover: the probe's 512-token chunk window is not a long document. mlx-lm's own generate command delays conversion until token 5000, but it then quantizes those stored prefix entries too. The probe measures post-boundary cost one chunk at a time. Deployment numbers are a per-chunk proxy, not a real-deployment average over long-form generation.
 
+## Partial coverage of hybrid models
+
+Some models do not use one cache type for every layer. Gemma-3 interleaves full-attention layers with sliding-window layers; several recent models interleave attention layers with state-space (Mamba-style) layers. mlx-lm builds a per-layer cache list to match: a `KVCache` for a full-attention layer, a `RotatingKVCache` for a sliding-window layer, a state array for an SSM layer. Only the `KVCache` layers have a quantized form.
+
+The `kv` probe quantizes the layers it can and leaves the rest at full precision. The reported drift is the cost of quantizing that subset. The report records the split — how many layers were quantized, and the type and count of the ones skipped — and refuses the model only when no layer can be quantized at all (a pure state-space model has no KV cache to measure).
+
+This is a partial measurement, and it describes a configuration mlx-lm does not produce. When you pass `kv_bits` to a hybrid model, mlx-lm cannot quantize the sliding-window layers, since `RotatingKVCache` has no quantized form, so in practice it leaves the whole cache full-precision. The probe's partial number answers a narrower question: if only the quantizable layers were quantized, this is what it would cost. Read it as the quantizer's effect on the layers it reaches, not as the model's deployed KV-quant cost.
+
+Partial coverage runs in stress mode only. Deployment mode converts the whole stored prefix at the boundary, which fails on a sliding-window layer, so a partial model is refused there rather than measured. The quantizer-only control lane is refused for the same reason.
+
+MLA models (DeepSeek and similar) are not partial: they store their compressed latent in a plain `KVCache`, so the probe measures them through the standard path. Whether a drift number on that compressed latent means the same thing as one on raw keys and values is a separate question, still open.
+
 ## Measuring a third-party cache
 
 The KV probe scores any cache implementation that satisfies its method protocol, not only mlx-lm's `QuantizedKVCache`. What differs between methods is the attention path each one rides, and that difference is exactly what the drift number bundles:

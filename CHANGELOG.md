@@ -3,6 +3,25 @@
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.0] - 2026-09-06
+
+The `kv` probe measures hybrid attention models — full-attention layers interleaved with sliding-window or state-space layers — on the layers whose cache can be quantized, instead of refusing the whole model.
+
+### Added
+
+- Per-layer partial coverage for the `kv` command. A model whose cache mixes quantizable layers (full attention) with layers that have no quantized form (sliding-window `RotatingKVCache`, state-space caches) is now measured on the layers that can be quantized. The report gains four fields: `kv_partial`, `kv_layers_total`, `kv_layers_quantized`, and `kv_layers_skipped` (the skipped cache types and how many of each). A model with no quantizable KV layer at all is still refused.
+- A note on every partial report naming how many layers were quantized, which types were left full-precision, and that mlx-lm does not generate with this mixed cache, so the number is a partial measurement rather than a configuration mlx-lm ships.
+
+### Changed
+
+- `kv` no longer refuses a hybrid model on the first layer it cannot quantize. It refuses only when none of the model's KV layers can be quantized. Partial coverage runs in stress mode; deployment mode (`--quantize-start`) and `--control` reject a partial model with a clear message rather than measure it.
+- A fully-quantizable model is unaffected: its report is not flagged partial, and its headline and JSON are unchanged from earlier versions.
+
+### Notes
+
+- Confirmed on `mlx-community/gemma-3-1b-it-4bit` (full attention interleaved with sliding-window layers): 4 of its 26 layers quantized at 4-bit, the rest measured full-precision.
+- True sliding-window quantization is still not possible: `RotatingKVCache` has no quantized form in mlx-lm, so those layers are measured at full precision rather than quantized. MLA models are already measured through the standard cache path. See `docs/measurement-principles.md`.
+
 ## [0.8.0] - 2026-09-05
 
 The weights probe reports the quantization geometry it measured on the loaded model, and repos published as DWQ and AWQ quantizations are ranked on one yardstick.

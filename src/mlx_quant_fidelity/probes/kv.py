@@ -15,6 +15,7 @@ from mlx_quant_fidelity._memory_caps import (
     install_memory_caps,
 )
 from mlx_quant_fidelity.errors import (
+    CacheNotQuantizableError,
     CompareConfigError,
     CorpusError,
     LogitsBudgetError,
@@ -23,12 +24,12 @@ from mlx_quant_fidelity.errors import (
 from mlx_quant_fidelity.metrics import bucket_by_depth, kl_divergence, summarize, top_token_flips
 from mlx_quant_fidelity.policy import verdict_for
 from mlx_quant_fidelity.probes._paired import _aggregate_chunks, _check_exact_zero, _reduce_pair
-from mlx_quant_fidelity.probes.kv_methods import StockKVMethod
+from mlx_quant_fidelity.probes.kv_methods import PartialCoverageMethod, StockKVMethod
 from mlx_quant_fidelity.report import FidelityReport
 
 if TYPE_CHECKING:
     from mlx_quant_fidelity.corpora.provenance import Corpus
-    from mlx_quant_fidelity.probes.kv_methods import KVCacheMethod
+    from mlx_quant_fidelity.probes.kv_methods import KVCacheMethod, LayerCoverage
 
 
 # Hard ceiling on chunk_length (kernel-panic safety surface — paired fp32 logits scale with
@@ -358,7 +359,28 @@ def score_kv_config(
     probe_cache = make_prompt_cache(model)
     n_layers = len(probe_cache)
     method.probe_capability(probe_cache)
+    # Per-layer partial coverage (0053): a hybrid model passes probe_capability as long as ONE
+    # layer is quantizable, so record which layers to quantize (stock only; quantizer-only methods
+    # do not implement the capability).
+    partial_coverage: LayerCoverage | None = None
+    if isinstance(method, PartialCoverageMethod):
+        cov = method.layer_coverage(probe_cache)
+        if cov.is_partial:
+            partial_coverage = cov
     del probe_cache
+
+    if partial_coverage is not None:
+        if quantize_start > 0:
+            raise CacheNotQuantizableError(
+                "partial KV coverage (some layers cannot be quantized, e.g. sliding-window) "
+                "is measured only in stress mode; run without --quantize-start on this model."
+            )
+        if control_m is not None:
+            raise CacheNotQuantizableError(
+                "partial KV coverage is not supported with --control yet; "
+                "run without --control on this model."
+            )
+        probe_warnings.append(partial_coverage.note())
 
     mode = "stress" if quantize_start == 0 else "deployment"
     chunks = corpus.chunks[:max_chunks] if max_chunks is not None else corpus.chunks
@@ -387,7 +409,13 @@ def score_kv_config(
         flip_c: mx.array | None = None
         with method.guard():
             if quantize_start == 0:
-                quant_cache: list[object] = method.make_cache(n_layers=n_layers)
+                quant_cache: list[object]
+                if partial_coverage is not None and isinstance(method, PartialCoverageMethod):
+                    quant_cache = method.make_partial_cache(
+                        make_prompt_cache(model), partial_coverage
+                    )
+                else:
+                    quant_cache = method.make_cache(n_layers=n_layers)
                 if control_m is None:
                     kl, flip, ref_nll, quant_nll = _score_chunk(model, ids, ref_cache, quant_cache)
                 else:
@@ -542,6 +570,14 @@ def score_kv_config(
         control_kl=control_summary,
         control_flip_rate=control_flip_rate,
         working_set_bytes_per_token=working_set_bytes_per_token,
+        kv_partial=partial_coverage is not None,
+        kv_layers_total=partial_coverage.total if partial_coverage is not None else None,
+        kv_layers_quantized=(
+            len(partial_coverage.quantized_indices) if partial_coverage is not None else None
+        ),
+        kv_layers_skipped=(
+            dict(partial_coverage.skipped_types) if partial_coverage is not None else None
+        ),
     )
 
 
