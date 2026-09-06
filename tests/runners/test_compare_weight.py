@@ -672,9 +672,22 @@ def test_split_target_grammar(tmp_path):
             cmp.split_target(bad)
 
 
+def test_split_target_survives_a_filesystem_error_from_the_local_path_probe():
+    """Reds if a filesystem error from the local-path probe escapes as a raw OSError. A first
+    path component over 255 bytes makes `Path.exists()` raise ENAMETOOLONG rather than return
+    False, and `cli.main` catches only QuantFidelityError — the user would see an internal error
+    instead of the repo-id refusal the downstream filename rule gives."""
+    long_name = "a" * 300
+    assert cmp.split_target(f"{long_name}@rev") == (long_name, "rev")
+
+
 def test_compare_weight_rejects_same_repo_at_two_revisions(tmp_path):
-    with pytest.raises(CompareConfigError, match="duplicate"):
+    """Reds if the refusal stops explaining itself: `org/m` and `org/m@abc` are one label
+    because the label and the partial filename are the repo id, and the message has to say so
+    or the user reads it as a bug."""
+    with pytest.raises(CompareConfigError, match="duplicate") as excinfo:
         cmp.compare_weight_fidelity(["org/m", "org/m@abc"], "ref", artifacts_dir=tmp_path)
+    assert "two revisions" in str(excinfo.value)
 
 
 def test_compare_weight_inline_revisions_win_over_flags_and_reach_worker_label_and_filename(

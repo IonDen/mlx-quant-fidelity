@@ -2,8 +2,10 @@
 
 import importlib
 import importlib.metadata
+import importlib.util
 import sys
 
+import conftest  # pytest prepend mode adds tests/ to sys.path; this is the loaded module
 import pytest
 from tests._hide_port import (
     HIDDEN_DISTRIBUTIONS,
@@ -32,11 +34,13 @@ def test_mask_port_sets_none_and_evicts_only_the_port_tree():
     assert modules["mlx"] == 2
 
 
-def test_none_sentinel_makes_the_real_import_raise(monkeypatch):
-    """Pins the CPython contract the lane relies on: `None` in sys.modules halts the import.
-    A future `mask_port` that parked a stub module instead would leave every other test green
-    while `import turboquant_mlx` quietly succeeded."""
-    monkeypatch.setitem(sys.modules, "turboquant_mlx", None)
+def test_what_mask_port_parks_makes_the_real_import_raise(monkeypatch):
+    """Pins the whole chain, not just CPython's contract: whatever `mask_port` parks in
+    sys.modules must halt a real `import turboquant_mlx`. A future `mask_port` that parked a
+    stub module instead would leave every other test green while the import quietly succeeded."""
+    modules: dict[str, object] = {"turboquant_mlx": object()}
+    mask_port(modules)
+    monkeypatch.setitem(sys.modules, "turboquant_mlx", modules["turboquant_mlx"])
     with pytest.raises(ModuleNotFoundError):
         importlib.import_module("turboquant_mlx")
 
@@ -125,9 +129,31 @@ def test_apply_hide_port_is_a_no_op_without_the_flag():
     assert events == []
 
 
+def test_pytest_configure_records_the_usage_error_in_the_module_global(monkeypatch):
+    """Reds if the closure stops writing the module global — the atexit hard-exit would then
+    report 0 for a usage error. The helper-level test above only proves the callback is called;
+    this proves conftest's callback is the one that moves `_FINAL_EXIT_CODE`."""
+    monkeypatch.setattr(conftest, "_FINAL_EXIT_CODE", 0)
+
+    class _StubConfig:
+        def getoption(self, name):
+            return name in ("--hide-port", "--run-slow")
+
+    # The conflict branch raises before masking, so sys.modules is never touched here.
+    with pytest.raises(pytest.UsageError):
+        conftest.pytest_configure(_StubConfig())
+    recorded = conftest._FINAL_EXIT_CODE
+    assert recorded == int(pytest.ExitCode.USAGE_ERROR)
+
+
 def _lane_only(request):
-    if not request.config.getoption("--hide-port"):
-        pytest.skip("meaningful only under --hide-port")
+    """Skip only when the port is installed AND the mask is off — the canaries are meaningful
+    wherever `turboquant_mlx` is genuinely absent, which is how CI runs."""
+    if (
+        not request.config.getoption("--hide-port")
+        and importlib.util.find_spec("turboquant_mlx") is not None
+    ):
+        pytest.skip("port installed and --hide-port not set")
 
 
 def test_lane_reproduces_the_0_7_0_offender(request):

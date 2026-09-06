@@ -164,8 +164,19 @@ def split_target(target: str) -> tuple[str, str | None]:
 
     Splits at the first `@`; the revision must be non-empty and free of whitespace and NUL
     (`/` is allowed — `refs/pr/3` is a valid Hub revision). Raises CompareConfigError otherwise.
+
+    A target the filesystem refuses to stat at all (a first component over 255 bytes raises
+    ENAMETOOLONG rather than returning False) is not a local path — treat it as a repo id and
+    let the repo-id rules refuse it, rather than letting a raw OSError escape as an internal
+    error.
     """
-    if "@" not in target or Path(target).exists():
+    if "@" not in target:
+        return target, None
+    try:
+        is_local_path = Path(target).exists()
+    except OSError:
+        is_local_path = False
+    if is_local_path:
         return target, None
     repo, _, revision = target.partition("@")
     if not repo or not revision or "\x00" in revision or any(c.isspace() for c in revision):
@@ -186,7 +197,9 @@ def _validate_compare_weights_args(quant_model_ids: list[str]) -> None:
     if len(set(labels)) != len(labels):
         duplicates = [lbl for lbl in labels if labels.count(lbl) > 1]
         raise CompareConfigError(
-            f"duplicate quant_model_ids produce the same label: {set(duplicates)}"
+            f"duplicate quant_model_ids produce the same label: {set(duplicates)} (two revisions "
+            "of the same repo cannot be compared in one run — the label and the partial filename "
+            "are the repo id)"
         )
     for repo in quant_model_ids:
         if "\x00" in repo:

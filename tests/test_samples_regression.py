@@ -65,12 +65,13 @@ def test_badge_sample_matches_committed():
     ["compare/kv-llama-3.2-1b-methods.md", "compare/weight-qwen3-0.6b-ladder.md"],
 )
 def test_readme_tables_match_committed_samples(sample):
-    """Reds if a README table drifts from the committed sample it claims to reproduce."""
+    """Reds if a README table drifts from the committed sample it claims to reproduce, and reds
+    if a sample loses its table (the loop would otherwise assert nothing)."""
     readme = (SAMPLES.parents[1] / "README.md").read_text()
-    table = (SAMPLES / sample).read_text()
-    for line in table.splitlines():
-        if line.startswith("|"):
-            assert line in readme, line
+    rows = [line for line in (SAMPLES / sample).read_text().splitlines() if line.startswith("|")]
+    assert len(rows) >= 3  # header, separator, at least one target row
+    for row in rows:
+        assert row in readme, row
 
 
 WEIGHT_JSON = sorted((SAMPLES / "weights").glob("*.json"))
