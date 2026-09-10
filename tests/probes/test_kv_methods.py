@@ -272,6 +272,37 @@ def test_layer_coverage_note_lists_multiple_skip_types_in_stable_order():
     assert note.index("_NoQuantCache") < note.index("_RaisingQuantCache")  # sorted, deterministic
 
 
+def test_layer_coverage_note_for_skip_only_layers_says_mlx_lm_ships_the_mix():
+    # RED until note() branches on the skip reason: a layer with NO to_quantized (state-space,
+    # chunked) is what mlx-lm's own gate skips silently, so the mixed cache IS what mlx-lm ships
+    # once conversion starts. Calling it "not a shipping configuration" there is wrong.
+    cov = StockKVMethod(bits=4, group_size=64).layer_coverage([_OkCache(), _NoQuantCache()])
+    note = cov.note()
+    assert "1 of 2" in note
+    assert "what mlx-lm's own generate path produces" in note
+    assert "not a shipping configuration" not in note
+
+
+def test_layer_coverage_note_raising_layer_wins_over_skip_only_layer():
+    # RED if the branch is any-skip-only instead of any-raising: one sliding-window layer makes
+    # mlx-lm crash at conversion, so the mix is unreachable there even with a state-space layer.
+    cov = StockKVMethod(bits=4, group_size=64).layer_coverage(
+        [_OkCache(), _NoQuantCache(), _RaisingQuantCache()]
+    )
+    assert "not a shipping configuration" in cov.note()
+
+
+def test_layer_coverage_skip_reason_for_missing_to_quantized_names_the_right_layer_types():
+    # RED while the message cites "sliding-window / MLA": sliding-window DOES define to_quantized
+    # (it raises), and MLA stores its latent in a plain KVCache. The no-method case is
+    # state-space / chunked caches.
+    cov = StockKVMethod(bits=4, group_size=64).layer_coverage([_OkCache(), _NoQuantCache()])
+    ((_name, reason),) = cov.skip_reasons
+    assert "state-space" in reason
+    assert "sliding-window" not in reason
+    assert "MLA" not in reason
+
+
 # --- stored_state_bytes -----------------------------------------------------------
 
 

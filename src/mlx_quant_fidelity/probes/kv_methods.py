@@ -164,17 +164,37 @@ class LayerCoverage:
     def note(self) -> str:
         """The report caveat for a partial measurement.
 
-        States the coverage fraction, names the skipped layer types, and that mlx-lm does not
-        generate with this mixed cache — so the number is a hypothetical partial, not a
-        shipping configuration.
+        States the coverage fraction, names the skipped layer types, and what the mix means in
+        mlx-lm. A layer whose ``to_quantized`` raises (sliding-window) makes mlx-lm's own
+        conversion gate crash, so that mix is unreachable there: a hypothetical partial, not a
+        shipping configuration. A layer with no ``to_quantized`` at all (state-space, chunked)
+        is what that gate skips silently, so the mix is exactly what mlx-lm produces once
+        conversion starts. One raising layer is enough to make the whole run unreachable, so
+        it wins over any skip-only layer.
         """
         skipped = ", ".join(f"{count} {name}" for name, count in sorted(self.skipped_types.items()))
-        return (
+        head = (
             f"Partial coverage: {len(self.quantized_indices)} of {self.total} KV layers "
             f"quantized; {skipped} left full-precision (no quantized cache path in mlx-lm). "
-            "The metric reflects only the quantized layers; mlx-lm does not generate with this "
-            "mixed cache, so it is a hypothetical partial measurement, not a shipping "
-            "configuration."
+            "The metric reflects only the quantized layers; "
+        )
+        if self.has_raising_layer:
+            return head + (
+                "mlx-lm's own conversion gate raises on the skipped layers instead of skipping "
+                "them, so it never generates with this mixed cache: a hypothetical partial "
+                "measurement, not a shipping configuration."
+            )
+        return head + (
+            "mlx-lm's own conversion gate skips these layers the same way, so this mixed cache "
+            "is what mlx-lm's own generate path produces once conversion starts, measured on "
+            "the layers it reaches."
+        )
+
+    @property
+    def has_raising_layer(self) -> bool:
+        """True when at least one skipped layer declares ``to_quantized`` but raises on it."""
+        return any(
+            " declares to_quantized but it is NYI" in reason for _n, reason in self.skip_reasons
         )
 
 
@@ -268,7 +288,7 @@ class StockKVMethod:
                     (
                         name,
                         f"cache layer {name} has no to_quantized; this layer type's KV "
-                        "cannot be quantized (e.g. sliding-window / MLA).",
+                        "cannot be quantized (e.g. state-space / chunked caches).",
                     )
                 )
                 continue
