@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 from mlx_quant_fidelity._memory_caps import install_memory_caps
 from mlx_quant_fidelity.badge import render_badge_markdown
 from mlx_quant_fidelity.errors import QuantFidelityError
+from mlx_quant_fidelity.probes._preload import read_model_config
 from mlx_quant_fidelity.probes.kv import measure_kv_fidelity
 from mlx_quant_fidelity.probes.kv_methods import (
     METHODS,
@@ -38,17 +39,7 @@ from mlx_quant_fidelity.runners.compare import (
 
 if TYPE_CHECKING:
     from mlx_quant_fidelity.probes.kv_methods import KVCacheMethod
-
-
-def _fetch_model_config(model_id: str) -> dict[str, object]:  # pragma: no cover - network
-    """Fetch just ``config.json`` from a HuggingFace repo — no weight download."""
-    import json as _json
-    from pathlib import Path
-
-    from huggingface_hub import hf_hub_download
-
-    with Path(hf_hub_download(model_id, "config.json")).open() as f:
-        return _json.load(f)  # type: ignore[no-any-return]
+    from mlx_quant_fidelity.report import ComparisonReport
 
 
 def _parse_kv_configs(raw: str) -> list[KVCacheMethod]:
@@ -107,6 +98,52 @@ def _resolve_kv_method(args: argparse.Namespace) -> KVCacheMethod:
     raise ValueError(f"unknown --kv-method {value!r}; known: {sorted(METHODS)}")
 
 
+def _stderr_progress(message: str) -> None:
+    """CLI progress sink: stderr only, so stdout stays the pure report."""
+    print(message, file=sys.stderr, flush=True)
+
+
+def _user_error_types() -> tuple[type[BaseException], ...]:
+    """Exception types that mean "the model could not be found or read", not a library bug.
+
+    Lazy-imports huggingface_hub / mlx_lm so importing this module stays cheap.
+    """
+    from huggingface_hub import errors as hub_errors
+
+    types: list[type[BaseException]] = [
+        hub_errors.RepositoryNotFoundError,
+        hub_errors.GatedRepoError,
+        hub_errors.RevisionNotFoundError,
+        hub_errors.EntryNotFoundError,
+        hub_errors.LocalEntryNotFoundError,
+        hub_errors.HFValidationError,
+        hub_errors.HfHubHTTPError,
+        FileNotFoundError,
+    ]
+    try:
+        from mlx_lm.utils import ModelNotFoundError  # type: ignore[attr-defined,unused-ignore]
+    except ImportError:
+        pass
+    else:
+        types.append(ModelNotFoundError)
+    return tuple(types)
+
+
+def _first_model_id(args: argparse.Namespace) -> str:
+    """The first positional model id of the chosen command, for error messages."""
+    for name in ("model", "quant_model"):
+        value = getattr(args, name, None)
+        if isinstance(value, str):
+            return value
+    quant_models = getattr(args, "quant_models", None)
+    return str(quant_models[0]) if quant_models else "<model>"
+
+
+def _all_rows_failed(report: ComparisonReport) -> bool:
+    """True when a comparison produced rows and none of them measured successfully."""
+    return bool(report.results) and not any(r.status == "ok" for r in report.results)
+
+
 def main(argv: list[str] | None = None) -> int:
     """Run the CLI and return a process exit code.
 
@@ -115,11 +152,32 @@ def main(argv: list[str] | None = None) -> int:
     """
     install_memory_caps()  # first action, before importing/loading any model
 
+    max_chunks_help = "score at most this many corpus chunks (default: the whole corpus)"
+    chunk_length_help = "tokens per scored chunk (default 512; hard ceiling 4096)"
+    quantize_start_help = (
+        "keep the first N tokens full precision (deployment mode); 0 quantizes from token 0 "
+        "(stress mode, the default)"
+    )
+    model_revision_help = "Hub revision (branch, tag or commit sha) of the model to load"
+    max_kld_help = "KL-divergence budget: the recommended pick must not exceed it"
+    min_tier_help = "minimum verdict tier the recommended pick must reach"
+    format_help = "output format (default md)"
+    quant_revision_help = "Hub revision applied to every quant target without an inline @revision"
+    reference_revision_help = (
+        "Hub revision of the reference repo, unless the reference carries an inline @revision"
+    )
+
     parser = argparse.ArgumentParser(prog="mlx-quant-fidelity")
     sub = parser.add_subparsers(dest="command", required=True)
     kv = sub.add_parser("kv", help="measure KV-cache quantization fidelity")
-    kv.add_argument("model")
-    kv.add_argument("--kv-bits", type=int, default=None)
+    kv.add_argument("model", help="model repo id or local path")
+    kv.add_argument(
+        "--kv-bits",
+        type=int,
+        default=None,
+        help="KV-cache bit width for a named method (stock/turboquant default 4; required "
+        "by turboquant-vonly, where it is the V bit width)",
+    )
     kv.add_argument(
         "--kv-method",
         default="stock",
@@ -131,18 +189,34 @@ def main(argv: list[str] | None = None) -> int:
             "those flags (default stock)"
         ),
     )
-    kv.add_argument("--kv-group-size", type=int, default=None)
-    kv.add_argument("--kv-seed", type=int, default=None)
-    kv.add_argument("--quantize-start", type=int, default=0)
-    kv.add_argument("--max-chunks", type=int, default=None)
-    kv.add_argument("--chunk-length", type=int, default=512)
-    kv.add_argument("--model-revision", default=None)
+    kv.add_argument(
+        "--kv-group-size",
+        type=int,
+        default=None,
+        help="quantization group size, --kv-method stock only (default 64)",
+    )
+    kv.add_argument(
+        "--kv-seed",
+        type=int,
+        default=None,
+        help="rotation seed (>= 1) for the turboquant methods (default: the port's default)",
+    )
+    kv.add_argument("--quantize-start", type=int, default=0, help=quantize_start_help)
+    kv.add_argument("--max-chunks", type=int, default=None, help=max_chunks_help)
+    kv.add_argument("--chunk-length", type=int, default=512, help=chunk_length_help)
+    kv.add_argument("--model-revision", default=None, help=model_revision_help)
     kv.add_argument(
         "--control",
         action="store_true",
         help="also run the stock method's quantizer-only control lane (see --kv-method stock)",
     )
-    kv.add_argument("--format", choices=["json", "md", "badge"], default="md")
+    kv.add_argument("--format", choices=["json", "md", "badge"], default="md", help=format_help)
+
+    allow_code_help = (
+        "allow a repo whose config.json names a model_file to run its own Python code "
+        "(off by default: mlx-lm executes that file on load)"
+    )
+    kv.add_argument("--allow-custom-code", action="store_true", help=allow_code_help)
 
     repo_help = (
         "repo id or local path; repo@revision pins a Hub revision (an inline pin wins "
@@ -152,10 +226,13 @@ def main(argv: list[str] | None = None) -> int:
     weights = sub.add_parser("weights", help="measure weight-quantization fidelity")
     weights.add_argument("quant_model", help=repo_help)
     weights.add_argument("--reference", required=True, help=repo_help)
-    weights.add_argument("--max-chunks", type=int, default=None)
-    weights.add_argument("--quant-revision", default=None)
-    weights.add_argument("--reference-revision", default=None)
-    weights.add_argument("--format", choices=["json", "md", "badge"], default="md")
+    weights.add_argument("--max-chunks", type=int, default=None, help=max_chunks_help)
+    weights.add_argument("--quant-revision", default=None, help=quant_revision_help)
+    weights.add_argument("--reference-revision", default=None, help=reference_revision_help)
+    weights.add_argument("--allow-custom-code", action="store_true", help=allow_code_help)
+    weights.add_argument(
+        "--format", choices=["json", "md", "badge"], default="md", help=format_help
+    )
 
     compare = sub.add_parser("compare", help="rank N quantizations on a memory-normalized Pareto")
     csub = compare.add_subparsers(dest="compare_mode", required=True)
@@ -163,15 +240,26 @@ def main(argv: list[str] | None = None) -> int:
     cw = csub.add_parser("weights", help="rank N weight-quant repos vs a reference")
     cw.add_argument("quant_models", nargs="+", help=repo_help)
     cw.add_argument("--reference", required=True, help=repo_help)
-    cw.add_argument("--max-chunks", type=int, default=None)
-    cw.add_argument("--max-kld", type=float, default=None)
-    cw.add_argument("--min-tier", choices=["good", "marginal", "bad"], default=None)
-    cw.add_argument("--quant-revision", default=None)
-    cw.add_argument("--reference-revision", default=None)
-    cw.add_argument("--format", choices=["json", "md"], default="md")
+    cw.add_argument("--max-chunks", type=int, default=None, help=max_chunks_help)
+    cw.add_argument("--max-kld", type=float, default=None, help=max_kld_help)
+    cw.add_argument(
+        "--min-tier", choices=["good", "marginal", "bad"], default=None, help=min_tier_help
+    )
+    cw.add_argument("--quant-revision", default=None, help=quant_revision_help)
+    cw.add_argument("--reference-revision", default=None, help=reference_revision_help)
+    cw.add_argument("--allow-custom-code", action="store_true", help=allow_code_help)
+    cw.add_argument(
+        "--worker-timeout",
+        type=float,
+        default=7200.0,
+        metavar="SECONDS",
+        help="wall-clock limit per target's worker process; a target over it becomes a failed "
+        "row (default 7200; 0 disables)",
+    )
+    cw.add_argument("--format", choices=["json", "md"], default="md", help=format_help)
 
-    ck = csub.add_parser("kv", help="rank N (bits:group_size) KV configs on one model")
-    ck.add_argument("model")
+    ck = csub.add_parser("kv", help="rank N KV-cache methods/configs on one model")
+    ck.add_argument("model", help="model repo id or local path")
     ck.add_argument(
         "--configs",
         default=None,
@@ -191,15 +279,20 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="--sweep only: drop configs whose KV bytes/token exceed this budget",
     )
-    ck.add_argument("--quantize-start", type=int, default=0)
-    ck.add_argument("--max-chunks", type=int, default=None)
-    ck.add_argument("--chunk-length", type=int, default=512)
-    ck.add_argument("--model-revision", default=None)
-    ck.add_argument("--max-kld", type=float, default=None)
-    ck.add_argument("--min-tier", choices=["good", "marginal", "bad"], default=None)
-    ck.add_argument("--format", choices=["json", "md"], default="md")
+    ck.add_argument("--quantize-start", type=int, default=0, help=quantize_start_help)
+    ck.add_argument("--max-chunks", type=int, default=None, help=max_chunks_help)
+    ck.add_argument("--chunk-length", type=int, default=512, help=chunk_length_help)
+    ck.add_argument("--model-revision", default=None, help=model_revision_help)
+    ck.add_argument("--max-kld", type=float, default=None, help=max_kld_help)
+    ck.add_argument(
+        "--min-tier", choices=["good", "marginal", "bad"], default=None, help=min_tier_help
+    )
+    ck.add_argument("--allow-custom-code", action="store_true", help=allow_code_help)
+    ck.add_argument("--format", choices=["json", "md"], default="md", help=format_help)
 
     args = parser.parse_args(argv)
+    exit_code = 0
+    progress = _stderr_progress
     try:
         if args.command == "kv":
             try:
@@ -215,6 +308,8 @@ def main(argv: list[str] | None = None) -> int:
                 chunk_length=args.chunk_length,
                 model_revision=args.model_revision,
                 control=args.control,
+                allow_custom_code=args.allow_custom_code,
+                progress=progress,
             )
             if args.format == "json":
                 out = render_json(report)
@@ -233,6 +328,8 @@ def main(argv: list[str] | None = None) -> int:
                 reference_revision=(
                     reference_inline if reference_inline is not None else args.reference_revision
                 ),
+                allow_custom_code=args.allow_custom_code,
+                progress=progress,
             )
             if args.format == "json":
                 out = render_json(wreport)
@@ -249,12 +346,17 @@ def main(argv: list[str] | None = None) -> int:
                 min_tier=args.min_tier,
                 quant_revision=args.quant_revision,
                 reference_revision=args.reference_revision,
+                allow_custom_code=args.allow_custom_code,
+                worker_timeout_s=args.worker_timeout if args.worker_timeout > 0 else None,
+                progress=progress,
             )
             out = (
                 render_comparison_json(creport)
                 if args.format == "json"
                 else render_comparison_markdown(creport)
             )
+            if _all_rows_failed(creport):
+                exit_code = 1
         elif args.compare_mode == "kv":
             if bool(args.configs) == bool(args.sweep):
                 print("error: exactly one of --configs or --sweep is required", file=sys.stderr)
@@ -268,7 +370,7 @@ def main(argv: list[str] | None = None) -> int:
             skipped_configs: list[tuple[str, str]] = []
             configs: list[KVCacheMethod]
             if args.sweep:
-                config_json = _fetch_model_config(args.model)
+                config_json = read_model_config(args.model, args.model_revision)
                 n_layers, n_kv_heads, head_dim = kv_geometry_from_config(config_json)
                 if head_dim is None:
                     print(
@@ -319,12 +421,16 @@ def main(argv: list[str] | None = None) -> int:
                 max_kld=args.max_kld,
                 min_tier=args.min_tier,
                 skipped_configs=skipped_configs,
+                allow_custom_code=args.allow_custom_code,
+                progress=progress,
             )
             out = (
                 render_comparison_json(creport)
                 if args.format == "json"
                 else render_comparison_markdown(creport)
             )
+            if _all_rows_failed(creport):
+                exit_code = 1
         else:
             raise AssertionError(  # pragma: no cover
                 f"unhandled compare_mode: {args.compare_mode!r}"
@@ -332,8 +438,16 @@ def main(argv: list[str] | None = None) -> int:
     except QuantFidelityError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
+    except _user_error_types() as exc:
+        first_line = (str(exc).splitlines() or [type(exc).__name__])[0]
+        print(
+            f"error: could not load {_first_model_id(args)!r}: {first_line} "
+            "(typo, gated repo, or offline?)",
+            file=sys.stderr,
+        )
+        return 2
     print(out)
-    return 0
+    return exit_code
 
 
 def _console_entry() -> None:  # pragma: no cover - process-exit wrapper
@@ -345,8 +459,12 @@ def _console_entry() -> None:  # pragma: no cover - process-exit wrapper
     every path — including an unexpected error from ``main`` — so the teardown segfault
     cannot leak through on an error.
     """
+    from mlx_quant_fidelity._watchdog import MemoryWatchdog
+
     code = 1
     try:
+        install_memory_caps()
+        MemoryWatchdog().start()  # console only: never started by main() or the library API
         code = main()
     except SystemExit as exc:  # argparse usage errors, etc.
         code = exc.code if isinstance(exc.code, int) else 1

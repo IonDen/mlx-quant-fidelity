@@ -60,3 +60,16 @@ class LogitsBudgetError(CorpusError):
     pre-flight gate raises this specific type so a caller can tell an over-budget refusal
     apart from other corpus problems.
     """
+
+
+class NonFiniteMetricError(QuantFidelityError):
+    """A measured metric came back NaN (or a perplexity input non-finite).
+
+    A NaN would sail past every threshold comparison and could be ranked or recommended as
+    if it were a real measurement, so the probe refuses it. A +inf KL is different: it is
+    the documented zero-probability policy and stays legal.
+    """
+
+
+class UntrustedModelCodeError(QuantFidelityError):
+    """The repo's config.json names its own model code, which mlx-lm would execute on load."""

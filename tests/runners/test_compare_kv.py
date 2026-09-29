@@ -92,6 +92,7 @@ def _patch_kv_compare(
 ) -> list:
     """Patch all real-model helpers; return the call list for score_kv_config."""
     monkeypatch.setattr(cmp, "install_memory_caps", lambda: (0, 0))
+    monkeypatch.setattr(cmp, "preload_check", lambda model, revision, *, allow_custom_code: {})
     monkeypatch.setattr(cmp, "_load_model", lambda model_id, revision: (object(), object()))
     monkeypatch.setattr(cmp, "_kv_dims", lambda model: dims)
     calls: list[tuple[int, int]] = []
@@ -111,6 +112,21 @@ def _patch_kv_compare(
         lambda tokenizer, model_id, max_chunks, *, chunk_length: object(),
     )
     return calls
+
+
+def test_compare_kv_refuses_custom_code_before_load(monkeypatch, tmp_path):
+    """Bug: compare kv loads (and so executes) a repo's model_file with no opt-in."""
+    from mlx_quant_fidelity.errors import UntrustedModelCodeError
+    from mlx_quant_fidelity.probes import _preload
+
+    monkeypatch.setattr(_preload, "read_model_config", lambda m, r=None: {"model_file": "m.py"})
+
+    def boom(*a, **k):
+        raise AssertionError("must not load")
+
+    monkeypatch.setattr(cmp, "_load_model", boom)
+    with pytest.raises(UntrustedModelCodeError):
+        cmp.compare_kv_fidelity("evil/repo", [(4, 64), (8, 64)], artifacts_dir=tmp_path)
 
 
 def test_compare_kv_ranks_configs(monkeypatch, tmp_path):
@@ -281,6 +297,7 @@ def test_compare_kv_model_loaded_once(monkeypatch, tmp_path):
         return (object(), object())
 
     monkeypatch.setattr(cmp, "install_memory_caps", lambda: (0, 0))
+    monkeypatch.setattr(cmp, "preload_check", lambda model, revision, *, allow_custom_code: {})
     monkeypatch.setattr(cmp, "_load_model", fake_load)
     monkeypatch.setattr(cmp, "_kv_dims", lambda model: (16, 8, 64))
 
@@ -329,6 +346,7 @@ def test_compare_kv_threads_revision_and_tokenizer(monkeypatch, tmp_path):
         return object()
 
     monkeypatch.setattr(cmp, "install_memory_caps", lambda: (0, 0))
+    monkeypatch.setattr(cmp, "preload_check", lambda model, revision, *, allow_custom_code: {})
     monkeypatch.setattr(cmp, "_load_model", fake_load_model)
     monkeypatch.setattr(cmp, "_kv_dims", lambda model: (16, 8, 64))
     monkeypatch.setattr(cmp, "_load_corpus_for_kv", fake_load_corpus)
@@ -396,11 +414,10 @@ def test_kv_dims_falls_back_to_num_attention_heads(monkeypatch):
 
 
 def test_kv_dims_zero_kv_heads_not_silenced(monkeypatch):
-    """_kv_dims does NOT silently fall through when num_key_value_heads=0 (fix 3).
+    """_kv_dims treats a non-positive num_key_value_heads as missing (spec change).
 
-    With the old `or` short-circuit, 0 would have been treated as falsy and the code
-    would have fallen through to num_attention_heads. The fix uses `is not None` so
-    0 is returned as the explicit value, not replaced.
+    A zero geometry field is how some configs say "derive it", so it falls through to
+    num_attention_heads instead of being reported as a literal 0 KV heads.
     """
     model, n_layers = _make_fake_model(num_key_value_heads=0, num_attention_heads=8)
     import mlx_lm.models.cache as cache_mod
@@ -411,8 +428,8 @@ def test_kv_dims_zero_kv_heads_not_silenced(monkeypatch):
     monkeypatch.setattr(compare_mod, "_kv_head_dim", lambda m: 64)
 
     result = compare_mod._kv_dims(model)
-    # Must return 0 for n_kv_heads — NOT fall through to num_attention_heads=8
-    assert result == (n_layers, 0, 64)
+    # 0 is missing -> falls through to num_attention_heads=8
+    assert result == (n_layers, 8, 64)
 
 
 # ── Fix 7b: corrupt-at-collect test ───────────────────────────────────────────
@@ -454,6 +471,7 @@ def test_compare_kv_corrupt_at_collect_yields_failed_result(monkeypatch, tmp_pat
     monkeypatch.setattr(pathlib.Path, "read_text", patched_read_text)
 
     monkeypatch.setattr(cmp, "install_memory_caps", lambda: (0, 0))
+    monkeypatch.setattr(cmp, "preload_check", lambda model, revision, *, allow_custom_code: {})
     monkeypatch.setattr(cmp, "_load_model", lambda model_id, revision: (object(), object()))
     monkeypatch.setattr(cmp, "_kv_dims", lambda model: (16, 8, 64))
     monkeypatch.setattr(cmp, "_load_corpus_for_kv", lambda tok, mid, mc, *, chunk_length: object())
@@ -504,6 +522,7 @@ def test_compare_kv_all_resumed_skips_model_load(monkeypatch, tmp_path):
         raise AssertionError("score_kv_config should not be called when all configs are cached")
 
     monkeypatch.setattr(cmp, "install_memory_caps", lambda: (0, 0))
+    monkeypatch.setattr(cmp, "preload_check", lambda model, revision, *, allow_custom_code: {})
     monkeypatch.setattr(cmp, "_load_model", fail_if_loaded)
     monkeypatch.setattr(cmp, "_kv_dims", lambda model: (16, 8, 64))
     monkeypatch.setattr(cmp, "_load_corpus_for_kv", lambda tok, mid, mc, *, chunk_length: object())
@@ -903,6 +922,7 @@ def test_compare_kv_stress_partial_recomputed_for_deployment(monkeypatch, tmp_pa
         )  # identity mismatch → pending non-empty → load attempted
 
     monkeypatch.setattr(cmp, "install_memory_caps", lambda: (0, 0))
+    monkeypatch.setattr(cmp, "preload_check", lambda model, revision, *, allow_custom_code: {})
     monkeypatch.setattr(cmp, "_load_model", _fake_load)
     with pytest.raises(RuntimeError, match="stop after load"):
         cmp.compare_kv_fidelity(
@@ -1286,6 +1306,7 @@ def test_compare_kv_runs_control_only_for_stock(monkeypatch, tmp_path):
     AttributeErrors on a method lacking the attribute.
     """
     monkeypatch.setattr(cmp, "install_memory_caps", lambda: (0, 0))
+    monkeypatch.setattr(cmp, "preload_check", lambda model, revision, *, allow_custom_code: {})
     monkeypatch.setattr(cmp, "_load_model", lambda model_id, revision: (object(), object()))
     monkeypatch.setattr(cmp, "_kv_dims", lambda model: (16, 8, 64))
     monkeypatch.setattr(
@@ -1319,6 +1340,7 @@ def test_compare_kv_ranks_on_quantizer_only_kl(monkeypatch, tmp_path):
     control-ran stock config; a native quantizer-only config (no control) ranks on its own kl.
     """
     monkeypatch.setattr(cmp, "install_memory_caps", lambda: (0, 0))
+    monkeypatch.setattr(cmp, "preload_check", lambda model, revision, *, allow_custom_code: {})
     monkeypatch.setattr(cmp, "_load_model", lambda model_id, revision: (object(), object()))
     monkeypatch.setattr(cmp, "_kv_dims", lambda model: (16, 8, 64))
     monkeypatch.setattr(
@@ -1469,3 +1491,89 @@ def test_compare_kv_isolates_partial_with_invalid_ranked_verdict(monkeypatch, tm
     good = next(r for r in report.results if r.label == "8:64")
     assert good.status == "ok"
     assert "8:64" in report.frontier
+
+
+def test_kv_geometry_from_config_treats_zero_head_dim_as_missing():
+    from mlx_quant_fidelity.runners.compare import kv_geometry_from_config
+
+    geom = kv_geometry_from_config(
+        {
+            "head_dim": 0,
+            "num_hidden_layers": 2,
+            "num_key_value_heads": 2,
+            "hidden_size": 0,
+            "num_attention_heads": 0,
+        }
+    )
+    assert geom[2] is None
+
+
+def test_kv_geometry_from_config_reads_text_config_fallback():
+    from mlx_quant_fidelity.runners.compare import kv_geometry_from_config
+
+    cfg = {"text_config": {"head_dim": 128, "num_hidden_layers": 4, "num_key_value_heads": 8}}
+    assert kv_geometry_from_config(cfg) == (4, 8, 128)
+
+
+def test_compare_kv_control_gate_skip_names_real_remedy(monkeypatch, tmp_path):
+    """Bug: the gate tells a `compare kv` user to "drop --control", a flag that command lacks.
+
+    Drives a stock config through the REAL score_kv_config gate (nothing scoring-side patched).
+    """
+    import mlx.core as mx
+
+    from mlx_quant_fidelity.corpora.provenance import Corpus, CorpusProvenance
+    from mlx_quant_fidelity.probes import kv as kvmod
+
+    monkeypatch.setattr(kvmod, "compute_safe_caps_gb", lambda: (1, 2))
+    monkeypatch.setattr(kvmod, "_max_working_set_bytes", lambda: 0)
+    args = types.SimpleNamespace(
+        model_type="llama",
+        vocab_size=128_000,
+        num_hidden_layers=2,
+        num_key_value_heads=2,
+        head_dim=64,
+    )
+    prov = CorpusProvenance("x", "test", "m", 4096, 4096, "none", "drop", "raw", 4096)
+    corpus = Corpus(chunks=(mx.arange(8) % 3,), provenance=prov)
+    monkeypatch.setattr(cmp, "install_memory_caps", lambda: (0, 0))
+    monkeypatch.setattr(cmp, "preload_check", lambda model, revision, *, allow_custom_code: {})
+    monkeypatch.setattr(
+        cmp, "_load_model", lambda model_id, revision: (types.SimpleNamespace(args=args), object())
+    )
+    monkeypatch.setattr(cmp, "_kv_dims", lambda model: (2, 2, 64))
+    monkeypatch.setattr(
+        cmp, "_load_corpus_for_kv", lambda tokenizer, model_id, max_chunks, *, chunk_length: corpus
+    )
+    report = cmp.compare_kv_fidelity("m", [(4, 64), (8, 64)], artifacts_dir=tmp_path)
+    row = report.results[0]
+    assert row.status == "skipped"
+    reason = row.excluded_reason or ""
+    assert "--control" not in reason
+    assert "--chunk-length" in reason
+
+
+def test_compare_kv_non_finite_metric_becomes_failed_row(monkeypatch, tmp_path):
+    """Bug: a NaN-metric config aborts the whole compare instead of being isolated as failed."""
+    from mlx_quant_fidelity.errors import NonFiniteMetricError
+
+    reports = {
+        (4, 64): NonFiniteMetricError("per-position KL contains non-finite values"),
+        (8, 64): _fid((8, 64), 0.01),
+    }
+    _patch_kv_compare(monkeypatch, reports)
+    report = cmp.compare_kv_fidelity("m", [(4, 64), (8, 64)], artifacts_dir=tmp_path)
+    failed = next(r for r in report.results if r.label == "4:64")
+    assert failed.status == "failed"
+    assert failed.error_type == "NonFiniteMetricError"
+    assert failed.point is None
+    assert "4:64" not in report.frontier
+
+
+def test_compare_kv_reports_config_progress(monkeypatch, tmp_path):
+    """Reds if a multi-config compare gives no per-config progress line."""
+    reports = {(4, 64): _fid((4, 64), 0.09), (8, 64): _fid((8, 64), 0.01)}
+    _patch_kv_compare(monkeypatch, reports)
+    seen: list[str] = []
+    cmp.compare_kv_fidelity("m", [(4, 64), (8, 64)], artifacts_dir=tmp_path, progress=seen.append)
+    assert seen == ["[1/2] 4:64", "[2/2] 8:64"]

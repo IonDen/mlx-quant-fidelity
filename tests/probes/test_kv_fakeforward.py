@@ -124,6 +124,7 @@ def test_measure_installs_caps_before_model_load(monkeypatch):
         pass
 
     monkeypatch.setattr(kv_mod, "install_memory_caps", lambda: calls.append("caps") or (0, 0))
+    monkeypatch.setattr(kv_mod, "preload_check", lambda m, r, *, allow_custom_code: {})
 
     def _fake_load(*_a, **_k):
         calls.append("load")
@@ -198,6 +199,7 @@ def test_measure_kv_rejects_incompatible_group_size_before_scoring(monkeypatch):
     from mlx_quant_fidelity.probes import kv as kv_mod
 
     monkeypatch.setattr(kv_mod, "install_memory_caps", lambda: (0, 0))
+    monkeypatch.setattr(kv_mod, "preload_check", lambda m, r, *, allow_custom_code: {})
     stub = _ModelWithArgs(_Args(head_dim=48, model_type="llama"))
     monkeypatch.setattr(mlx_lm, "load", lambda *a, **k: (stub, object()))
     cache_calls: list[str] = []
@@ -1002,6 +1004,98 @@ def test_method_ws_bytes_tips_the_gate_without_drop_control_remedy(monkeypatch):
     assert "drop --control" not in str(excinfo.value)
 
 
+def _pin_device(monkeypatch, max_ws_gib=24.96):
+    """Pin the installed working-set read (the kv module's own helper) machine-independently."""
+    monkeypatch.setattr(kvmod, "_max_working_set_bytes", lambda: int(max_ws_gib * 1024**3))
+
+
+def test_preflight_refuses_when_weights_plus_logits_exceed_working_set(monkeypatch):
+    """Bug: the gate ignores resident weights, so a 15 GiB model at window 4096 runs."""
+    monkeypatch.setattr(kvmod, "compute_safe_caps_gb", lambda: (20, 22))
+    _pin_device(monkeypatch)
+    with pytest.raises(kvmod.LogitsBudgetError) as excinfo:
+        kvmod._preflight_logits_budget(4096, 128256, resident_bytes=15 * 1024**3)
+    assert "GiB" in str(excinfo.value)
+    assert "weights" in str(excinfo.value)
+    # Same call without the resident term only warns: the new term is what refuses.
+    assert isinstance(kvmod._preflight_logits_budget(4096, 128256, resident_bytes=0), str)
+
+
+@pytest.mark.parametrize(
+    ("window", "vocab", "resident"),
+    [(4096, 128256, int(0.7e9)), (4096, 128256, int(1.8e9)), (512, 152064, int(4.3e9))],
+)
+def test_committed_sample_geometries_pass_gate(monkeypatch, window, vocab, resident):
+    """Bug: an over-tight gate refuses the committed Llama-1B/3B and Qwen2.5-7B-4bit samples."""
+    monkeypatch.setattr(kvmod, "compute_safe_caps_gb", lambda: (20, 22))
+    _pin_device(monkeypatch)
+    kvmod._preflight_logits_budget(window, vocab, resident_bytes=resident)  # must not raise
+
+
+def test_model_arg_reads_text_config_and_treats_non_positive_as_missing():
+    from types import SimpleNamespace
+
+    wrapper = SimpleNamespace(model_type="qwen3_5", text_config={"vocab_size": 262144})
+    assert kvmod._model_arg(wrapper, "vocab_size") == 262144
+    obj = SimpleNamespace(text_config=SimpleNamespace(vocab_size=99))
+    assert kvmod._model_arg(obj, "vocab_size") == 99
+    assert kvmod._model_arg(SimpleNamespace(head_dim=0), "head_dim") is None
+    assert kvmod._model_arg(SimpleNamespace(), "head_dim") is None
+
+
+def test_gate_applies_to_text_config_wrapper_model(monkeypatch):
+    """Bug: geometry hidden under text_config reads as None, so the gate is skipped."""
+    _pin_caps(monkeypatch)
+    _pin_device(monkeypatch)
+
+    class _Wrapper:
+        def __init__(self):
+            self.args = type(
+                "A",
+                (),
+                {
+                    "model_type": "qwen3_5",
+                    "text_config": {
+                        "vocab_size": 262144,
+                        "num_hidden_layers": 4,
+                        "num_key_value_heads": 2,
+                        "head_dim": 64,
+                    },
+                },
+            )()
+
+    with pytest.raises(kvmod.LogitsBudgetError):
+        score_kv_config(_Wrapper(), _kv_corpus(1, chunk_len=4096), model_id="fake")
+
+
+def test_unknown_vocab_refuses_above_default_window(monkeypatch):
+    """Bug: an underivable vocab at a long window is waved through with a warning."""
+    monkeypatch.setattr(kvmod, "compute_safe_caps_gb", lambda: (20, 22))
+    _pin_device(monkeypatch)
+    with pytest.raises(kvmod.LogitsBudgetError, match="512"):
+        kvmod._preflight_logits_budget(1024, None)
+    warning = kvmod._preflight_logits_budget(512, None)
+    assert warning is not None and "UNCHECKED" in warning  # noqa: PT018
+
+
+def test_model_resident_bytes_sums_parameter_nbytes():
+    class _M:
+        def parameters(self):
+            return {"a": mx.zeros((10,), dtype=mx.float32), "b": [mx.zeros((3, 2), mx.float16)]}
+
+    assert kvmod.model_resident_bytes(_M()) == 10 * 4 + 6 * 2
+    assert kvmod.model_resident_bytes(object()) == 0
+
+
+def test_default_remedy_names_control_only_when_control_bytes(monkeypatch):
+    monkeypatch.setattr(kvmod, "compute_safe_caps_gb", lambda: (20, 22))
+    _pin_device(monkeypatch)
+    with pytest.raises(kvmod.LogitsBudgetError) as excinfo:
+        kvmod._preflight_logits_budget(4096, 128256, control_bytes=10**10, remedy="Use X")
+    assert "Use X" in str(excinfo.value)
+    assert "drop --control" not in str(excinfo.value)
+
+
 class _FakeFullGeometryModel(_FakeDivergentModel):
     """_FakeDivergentModel plus num_hidden_layers/num_key_value_heads on args.
 
@@ -1470,3 +1564,41 @@ def test_control_multi_chunk_stress_aggregation(monkeypatch):
     )
     assert math.isclose(report.control_kl.mean, 4.90, abs_tol=0.02)
     assert report.control_flip_rate == 1.0
+
+
+def test_control_lane_nan_kl_is_refused(monkeypatch):
+    """Bug: NaN control-lane KL skips the finite guard and is reported (and ranked) as a number."""
+    from mlx_quant_fidelity.errors import NonFiniteMetricError
+
+    _patch_prompt_cache(monkeypatch)
+    with pytest.raises(NonFiniteMetricError, match="control"):
+        score_kv_config(
+            FakeMethodModel(control_peak=2, control_gain=float("nan")),
+            _kv_corpus(1, 4),
+            model_id="m",
+            method=FakeKVMethod(stock_like=True),
+            control=True,
+        )
+
+
+def test_score_kv_config_reports_chunk_progress(monkeypatch):
+    """Reds if the chunk loop is silent, or emits every chunk (a 25-chunk run is ~11 lines)."""
+    _patch_kv_caches_divergent(monkeypatch)
+    seen: list[str] = []
+    score_kv_config(_FakeDivergentModel(), _kv_corpus(25), model_id="org/m", progress=seen.append)
+    assert seen == [f"chunk {i}/25" for i in (2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 25)]
+
+
+def test_score_kv_config_progress_every_chunk_when_few(monkeypatch):
+    _patch_kv_caches_divergent(monkeypatch)
+    seen: list[str] = []
+    score_kv_config(_FakeDivergentModel(), _kv_corpus(3), model_id="org/m", progress=seen.append)
+    assert seen == ["chunk 1/3", "chunk 2/3", "chunk 3/3"]
+
+
+def test_score_kv_config_is_silent_without_progress(monkeypatch, capsys):
+    _patch_kv_caches_divergent(monkeypatch)
+    score_kv_config(_FakeDivergentModel(), _kv_corpus(3), model_id="org/m")
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == ""

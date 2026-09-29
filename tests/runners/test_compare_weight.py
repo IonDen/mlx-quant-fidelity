@@ -22,7 +22,7 @@ def test_compare_weight_builds_frontier(monkeypatch, tmp_path):
     monkeypatch.setattr(
         cmp,
         "_run_weight_target",
-        lambda quant, reference, partial_path, max_chunks, quant_revision=None, reference_revision=None: (
+        lambda quant, reference, partial_path, max_chunks, quant_revision=None, reference_revision=None, timeout_s=None: (
             envelopes[quant]
         ),
     )
@@ -40,7 +40,7 @@ def test_compare_weight_unrankable_when_cost_none(monkeypatch, tmp_path):
     monkeypatch.setattr(
         cmp,
         "_run_weight_target",
-        lambda quant, reference, partial_path, max_chunks, quant_revision=None, reference_revision=None: (
+        lambda quant, reference, partial_path, max_chunks, quant_revision=None, reference_revision=None, timeout_s=None: (
             envelopes[quant]
         ),
     )
@@ -58,7 +58,7 @@ def test_compare_weight_failed_target_isolated(monkeypatch, tmp_path):
     monkeypatch.setattr(
         cmp,
         "_run_weight_target",
-        lambda quant, reference, partial_path, max_chunks, quant_revision=None, reference_revision=None: (
+        lambda quant, reference, partial_path, max_chunks, quant_revision=None, reference_revision=None, timeout_s=None: (
             {"status": "failed", "error_type": "ModelMismatchError", "message": "bad"}
             if quant == "q2"
             else _ok_envelope(quant, 0.01, 8000)
@@ -91,7 +91,13 @@ def test_compare_weight_resume_skips_existing_partial(monkeypatch, tmp_path):
     calls = []
 
     def _fake_run(
-        quant, reference, partial_path, max_chunks, quant_revision=None, reference_revision=None
+        quant,
+        reference,
+        partial_path,
+        max_chunks,
+        quant_revision=None,
+        reference_revision=None,
+        timeout_s=None,
     ):
         calls.append(quant)
         env = _weight_ok_envelope_with_identity(quant, 0.04, 6200)
@@ -113,7 +119,13 @@ def test_compare_weight_corrupt_partial_reruns(monkeypatch, tmp_path):
     calls = []
 
     def _fake_run(
-        quant, reference, partial_path, max_chunks, quant_revision=None, reference_revision=None
+        quant,
+        reference,
+        partial_path,
+        max_chunks,
+        quant_revision=None,
+        reference_revision=None,
+        timeout_s=None,
     ):
         calls.append(quant)
         env = _ok_envelope(quant, 0.01, 8000)
@@ -156,7 +168,7 @@ def test_compare_weight_failed_missing_envelope_keys_are_none(monkeypatch, tmp_p
     monkeypatch.setattr(
         cmp,
         "_run_weight_target",
-        lambda quant, reference, partial_path, max_chunks, quant_revision=None, reference_revision=None: {
+        lambda quant, reference, partial_path, max_chunks, quant_revision=None, reference_revision=None, timeout_s=None: {
             "status": "failed"
         },
     )
@@ -185,7 +197,13 @@ def test_compare_weight_failed_partial_is_recomputed(monkeypatch, tmp_path):
     calls = []
 
     def _fake_run(
-        quant, reference, partial_path, max_chunks, quant_revision=None, reference_revision=None
+        quant,
+        reference,
+        partial_path,
+        max_chunks,
+        quant_revision=None,
+        reference_revision=None,
+        timeout_s=None,
     ):
         calls.append(quant)
         env = {"status": "ok", "report": dataclasses.asdict(_wreport(quant, 0.01, 8000))}
@@ -228,18 +246,167 @@ def _weight_ok_envelope_with_identity(
     sv = (
         schema_version if schema_version is not None else compare_mod._WEIGHT_PARTIAL_SCHEMA_VERSION
     )
-    identity: dict[str, object] = {
-        "mode": "weight",
-        "quant": quant if quant is not None else label,
-        "reference": reference,
-        "max_chunks": max_chunks,
-        "schema_version": sv,
-        "quant_revision": quant_revision,
-        "reference_revision": reference_revision,
-    }
+    from mlx_quant_fidelity.runners._identity import weight_run_identity
+
+    identity = weight_run_identity(
+        quant=quant if quant is not None else label,
+        reference=reference,
+        max_chunks=max_chunks,
+        quant_revision=quant_revision,
+        reference_revision=reference_revision,
+    )
+    identity["schema_version"] = sv
     env = _ok_envelope(label, kl_mean, cost)
     env["run_identity"] = identity
     return env
+
+
+def test_failed_partial_with_matching_identity_is_recomputed(monkeypatch, tmp_path):
+    """Bug: a failed partial whose run_identity matches is resumed, so a transient failure
+    (a 503) is served forever instead of being retried."""
+    ident = _weight_ok_envelope_with_identity("q8", 0.01, 8000)["run_identity"]
+    failed = {
+        "status": "failed",
+        "error_type": "HfHubHTTPError",
+        "message": "503",
+        "run_identity": ident,
+    }
+    (tmp_path / "q8.json").write_text(json.dumps(failed))
+    calls = []
+
+    def _fake_run(
+        quant,
+        reference,
+        partial_path,
+        max_chunks,
+        quant_revision=None,
+        reference_revision=None,
+        timeout_s=None,
+    ):
+        calls.append(quant)
+        env = _weight_ok_envelope_with_identity(quant, 0.01, 8000)
+        partial_path.write_text(json.dumps(env))
+        return env
+
+    monkeypatch.setattr(cmp, "_run_weight_target", _fake_run)
+    report = cmp.compare_weight_fidelity(["q8", "q9"], "ref", artifacts_dir=tmp_path)
+    assert "q8" in calls
+    assert next(r for r in report.results if r.label == "q8").status == "ok"
+
+
+def test_weight_partial_from_other_mlx_lm_version_recomputes(monkeypatch, tmp_path):
+    """Bug: the weight identity ignores library versions, so a partial measured under another
+    mlx-lm is resumed and mixed into a ranking with fresh numbers."""
+    env = _weight_ok_envelope_with_identity("q8", 0.01, 8000)
+    env["run_identity"]["mlx_lm_version"] = "0.0.1"
+    (tmp_path / "q8.json").write_text(json.dumps(env))
+    calls = []
+
+    def _fake_run(
+        quant,
+        reference,
+        partial_path,
+        max_chunks,
+        quant_revision=None,
+        reference_revision=None,
+        timeout_s=None,
+    ):
+        calls.append(quant)
+        fresh = _weight_ok_envelope_with_identity(quant, 0.01, 8000)
+        partial_path.write_text(json.dumps(fresh))
+        return fresh
+
+    monkeypatch.setattr(cmp, "_run_weight_target", _fake_run)
+    cmp.compare_weight_fidelity(["q8", "q9"], "ref", artifacts_dir=tmp_path)
+    assert "q8" in calls
+
+
+def test_weight_partial_without_version_fields_recomputes(monkeypatch, tmp_path):
+    """Bug: a partial whose identity carries no library versions (pre-0.10 shape) is resumed."""
+    env = _weight_ok_envelope_with_identity("q8", 0.01, 8000)
+    del env["run_identity"]["mlx_version"]
+    del env["run_identity"]["mlx_lm_version"]
+    (tmp_path / "q8.json").write_text(json.dumps(env))
+    calls = []
+
+    def _fake_run(
+        quant,
+        reference,
+        partial_path,
+        max_chunks,
+        quant_revision=None,
+        reference_revision=None,
+        timeout_s=None,
+    ):
+        calls.append(quant)
+        fresh = _weight_ok_envelope_with_identity(quant, 0.01, 8000)
+        partial_path.write_text(json.dumps(fresh))
+        return fresh
+
+    monkeypatch.setattr(cmp, "_run_weight_target", _fake_run)
+    cmp.compare_weight_fidelity(["q8", "q9"], "ref", artifacts_dir=tmp_path)
+    assert "q8" in calls
+
+
+def test_worker_written_partial_resumes_in_compare_weight(monkeypatch, tmp_path):
+    """Bug: the worker and the orchestrator build the identity separately, so they can drift and
+    a worker-written partial is never resumed (or wrongly resumed)."""
+    from mlx_quant_fidelity.runners import _worker
+
+    monkeypatch.setattr(
+        _worker, "measure_weight_fidelity", lambda *a, **k: _wreport("q8", 0.01, 8000)
+    )
+    monkeypatch.setattr(_worker, "install_memory_caps", lambda: None)
+    rc = _worker.run_weight_worker(
+        ["--quant", "q8", "--reference", "ref", "--out", str(tmp_path / "q8.json")]
+    )
+    assert rc == 0
+    calls = []
+
+    def _fake_run(
+        quant,
+        reference,
+        partial_path,
+        max_chunks,
+        quant_revision=None,
+        reference_revision=None,
+        timeout_s=None,
+    ):
+        calls.append(quant)
+        fresh = _weight_ok_envelope_with_identity(quant, 0.02, 6000)
+        partial_path.write_text(json.dumps(fresh))
+        return fresh
+
+    monkeypatch.setattr(cmp, "_run_weight_target", _fake_run)
+    cmp.compare_weight_fidelity(["q8", "q9"], "ref", artifacts_dir=tmp_path)
+    assert "q8" not in calls
+
+
+def test_write_json_atomic_leaves_no_partial_file_on_failure(monkeypatch, tmp_path):
+    """Bug: a plain write_text leaves a truncated partial when the process dies mid-write."""
+    import os
+
+    from mlx_quant_fidelity.runners._identity import write_json_atomic
+
+    target = tmp_path / "x.json"
+    target.write_text('{"old": true}')
+
+    def boom(src, dst):
+        raise OSError("disk gone")
+
+    monkeypatch.setattr(os, "replace", boom)
+    with pytest.raises(OSError, match="disk gone"):
+        write_json_atomic(target, {"new": True})
+    assert json.loads(target.read_text()) == {"old": True}
+    assert list(tmp_path.glob("*.tmp")) == []
+
+
+def test_write_json_atomic_writes_payload(tmp_path):
+    from mlx_quant_fidelity.runners._identity import write_json_atomic
+
+    write_json_atomic(tmp_path / "y.json", {"a": 1})
+    assert json.loads((tmp_path / "y.json").read_text()) == {"a": 1}
+    assert list(tmp_path.glob("*.tmp")) == []
 
 
 def test_compare_weight_stale_max_chunks_partial_is_recomputed(monkeypatch, tmp_path):
@@ -255,7 +422,13 @@ def test_compare_weight_stale_max_chunks_partial_is_recomputed(monkeypatch, tmp_
     calls = []
 
     def _fake_run(
-        quant, reference, partial_path, max_chunks, quant_revision=None, reference_revision=None
+        quant,
+        reference,
+        partial_path,
+        max_chunks,
+        quant_revision=None,
+        reference_revision=None,
+        timeout_s=None,
     ):
         calls.append(quant)
         env = _weight_ok_envelope_with_identity(quant, 0.01, 8000, max_chunks=max_chunks)
@@ -283,7 +456,13 @@ def test_compare_weight_sanitized_filename_collision_causes_recompute(monkeypatc
     calls = []
 
     def _fake_run(
-        quant, reference, partial_path, max_chunks, quant_revision=None, reference_revision=None
+        quant,
+        reference,
+        partial_path,
+        max_chunks,
+        quant_revision=None,
+        reference_revision=None,
+        timeout_s=None,
     ):
         calls.append(quant)
         env = _weight_ok_envelope_with_identity(quant, 0.01, 8000, quant=quant)
@@ -309,7 +488,13 @@ def test_compare_weight_matching_identity_resumes(monkeypatch, tmp_path):
     calls = []
 
     def _fake_run(
-        quant, reference, partial_path, max_chunks, quant_revision=None, reference_revision=None
+        quant,
+        reference,
+        partial_path,
+        max_chunks,
+        quant_revision=None,
+        reference_revision=None,
+        timeout_s=None,
     ):
         calls.append(quant)
         env = _weight_ok_envelope_with_identity(quant, 0.04, 6200, max_chunks=max_chunks)
@@ -338,7 +523,13 @@ def test_compare_weight_stale_reference_partial_is_recomputed(monkeypatch, tmp_p
     calls = []
 
     def _fake_run(
-        quant, reference, partial_path, max_chunks, quant_revision=None, reference_revision=None
+        quant,
+        reference,
+        partial_path,
+        max_chunks,
+        quant_revision=None,
+        reference_revision=None,
+        timeout_s=None,
     ):
         calls.append((quant, reference))
         env = _weight_ok_envelope_with_identity(quant, 0.01, 8000, reference=reference)
@@ -464,7 +655,13 @@ def test_compare_weight_null_partial_is_recomputed(monkeypatch, tmp_path):
     calls = []
 
     def _fake_run(
-        quant, reference, partial_path, max_chunks, quant_revision=None, reference_revision=None
+        quant,
+        reference,
+        partial_path,
+        max_chunks,
+        quant_revision=None,
+        reference_revision=None,
+        timeout_s=None,
     ):
         calls.append(quant)
         env = _ok_envelope(quant, 0.01, 8000)
@@ -485,15 +682,21 @@ def test_weight_partials_survive_unrelated_schema_bumps(monkeypatch, tmp_path):
     _WEIGHT_PARTIAL_SCHEMA_VERSION constant resumes without a forced recompute — the KV
     partial schema (a separate constant) bumps on its own, independent cadence.
     """
-    assert cmp._WEIGHT_PARTIAL_SCHEMA_VERSION == 2
+    assert cmp._WEIGHT_PARTIAL_SCHEMA_VERSION == 3
 
-    matching_env = _weight_ok_envelope_with_identity("q8", 0.01, 8000, schema_version=2)
+    matching_env = _weight_ok_envelope_with_identity("q8", 0.01, 8000, schema_version=3)
     (tmp_path / "q8.json").write_text(json.dumps(matching_env))
 
     calls = []
 
     def _fake_run(
-        quant, reference, partial_path, max_chunks, quant_revision=None, reference_revision=None
+        quant,
+        reference,
+        partial_path,
+        max_chunks,
+        quant_revision=None,
+        reference_revision=None,
+        timeout_s=None,
     ):
         calls.append(quant)
         env = _weight_ok_envelope_with_identity(quant, 0.04, 6200)
@@ -504,7 +707,7 @@ def test_weight_partials_survive_unrelated_schema_bumps(monkeypatch, tmp_path):
 
     cmp.compare_weight_fidelity(["q8", "q9"], "ref", artifacts_dir=tmp_path)
 
-    assert "q8" not in calls, "q8 must resume: the weight schema version (2) did not change"
+    assert "q8" not in calls, "q8 must resume: the weight schema version (3) did not change"
 
 
 def test_compare_weight_old_schema_version_partial_recomputes(monkeypatch, tmp_path):
@@ -518,7 +721,13 @@ def test_compare_weight_old_schema_version_partial_recomputes(monkeypatch, tmp_p
     calls = []
 
     def _fake_run(
-        quant, reference, partial_path, max_chunks, quant_revision=None, reference_revision=None
+        quant,
+        reference,
+        partial_path,
+        max_chunks,
+        quant_revision=None,
+        reference_revision=None,
+        timeout_s=None,
     ):
         calls.append(quant)
         env = _weight_ok_envelope_with_identity(quant, 0.01, 8000)
@@ -544,7 +753,13 @@ def test_compare_weight_stale_quant_revision_partial_is_recomputed(monkeypatch, 
     calls = []
 
     def _fake_run(
-        quant, reference, partial_path, max_chunks, quant_revision=None, reference_revision=None
+        quant,
+        reference,
+        partial_path,
+        max_chunks,
+        quant_revision=None,
+        reference_revision=None,
+        timeout_s=None,
     ):
         calls.append((quant, quant_revision))
         env = _weight_ok_envelope_with_identity(quant, 0.01, 8000, quant_revision=quant_revision)
@@ -566,7 +781,13 @@ def test_compare_weight_stale_reference_revision_partial_is_recomputed(monkeypat
     calls = []
 
     def _fake_run(
-        quant, reference, partial_path, max_chunks, quant_revision=None, reference_revision=None
+        quant,
+        reference,
+        partial_path,
+        max_chunks,
+        quant_revision=None,
+        reference_revision=None,
+        timeout_s=None,
     ):
         calls.append((quant, reference_revision))
         env = _weight_ok_envelope_with_identity(
@@ -597,7 +818,13 @@ def test_compare_weight_matching_revisions_resume(monkeypatch, tmp_path):
     calls = []
 
     def _fake_run(
-        quant, reference, partial_path, max_chunks, quant_revision=None, reference_revision=None
+        quant,
+        reference,
+        partial_path,
+        max_chunks,
+        quant_revision=None,
+        reference_revision=None,
+        timeout_s=None,
     ):
         calls.append(quant)
         env = _weight_ok_envelope_with_identity(
@@ -632,7 +859,7 @@ def test_run_weight_target_passes_revisions_to_worker_cmd_only_when_set(monkeypa
     captured: dict[str, list[str]] = {}
     out = tmp_path / "out.json"
 
-    def fake_run(cmd, check, capture_output, text):
+    def fake_run(cmd, check, capture_output, text, timeout=None):
         captured["cmd"] = cmd
         out.write_text(json.dumps({"status": "ok", "report": {}}))
         return _FakeCompletedProcess()
@@ -698,7 +925,13 @@ def test_compare_weight_inline_revisions_win_over_flags_and_reach_worker_label_a
     seen = []
 
     def _fake_run(
-        quant, reference, partial_path, max_chunks, quant_revision=None, reference_revision=None
+        quant,
+        reference,
+        partial_path,
+        max_chunks,
+        quant_revision=None,
+        reference_revision=None,
+        timeout_s=None,
     ):
         seen.append((quant, quant_revision, reference, reference_revision, partial_path.name))
         env = _weight_ok_envelope_with_identity(
@@ -734,7 +967,13 @@ def test_compare_weight_inline_revision_resumes_on_the_second_call(monkeypatch, 
     calls = []
 
     def _fake_run(
-        quant, reference, partial_path, max_chunks, quant_revision=None, reference_revision=None
+        quant,
+        reference,
+        partial_path,
+        max_chunks,
+        quant_revision=None,
+        reference_revision=None,
+        timeout_s=None,
     ):
         calls.append(quant)
         env = _weight_ok_envelope_with_identity(
@@ -753,3 +992,105 @@ def test_compare_weight_inline_revision_resumes_on_the_second_call(monkeypatch, 
     cmp.compare_weight_fidelity(targets, "org/ref@rev-R", artifacts_dir=tmp_path)
     cmp.compare_weight_fidelity(targets, "org/ref@rev-R", artifacts_dir=tmp_path)
     assert calls == ["org/q4", "org/q8"], "second call must resume every pinned target"
+
+
+def test_compare_weights_threads_allow_custom_code_to_worker(monkeypatch, tmp_path):
+    """Bug: the opt-in is dropped between the orchestrator and the worker subprocess, so an
+    opted-in run still refuses (or, worse, the flag is not part of the resume identity)."""
+    argvs = []
+
+    class _Done:
+        stderr = ""
+
+    def fake_run(cmd, **kw):
+        argvs.append(cmd)
+        return _Done()
+
+    monkeypatch.setattr(cmp.subprocess, "run", fake_run)
+    cmp.compare_weight_fidelity(["q8", "q6"], "ref", artifacts_dir=tmp_path, allow_custom_code=True)
+    assert argvs
+    assert all("--allow-custom-code" in c for c in argvs)
+    argvs.clear()
+    cmp.compare_weight_fidelity(["q8", "q6"], "ref", artifacts_dir=tmp_path)
+    assert argvs
+    assert all("--allow-custom-code" not in c for c in argvs)
+
+
+def test_weight_partial_written_without_opt_in_does_not_resume_when_opted_in(monkeypatch, tmp_path):
+    """Bug: allow_custom_code is not in the identity, so a refusal recorded without the opt-in
+    would be served forever after the user opts in (and vice versa)."""
+    env = _weight_ok_envelope_with_identity("q8", 0.01, 8000)
+    (tmp_path / "q8.json").write_text(json.dumps(env))
+    calls = []
+
+    def _fake_run(quant, reference, partial_path, max_chunks, **kw):
+        calls.append(quant)
+        fresh = _weight_ok_envelope_with_identity(quant, 0.01, 8000)
+        fresh["run_identity"]["allow_custom_code"] = True
+        partial_path.write_text(json.dumps(fresh))
+        return fresh
+
+    monkeypatch.setattr(cmp, "_run_weight_target", _fake_run)
+    cmp.compare_weight_fidelity(["q8", "q9"], "ref", artifacts_dir=tmp_path, allow_custom_code=True)
+    assert "q8" in calls
+
+
+def test_run_weight_target_timeout_is_a_failed_row(monkeypatch, tmp_path):
+    """Reds if a hung worker blocks forever (no timeout) or the timeout escapes as an exception."""
+    import subprocess
+
+    seen: dict[str, object] = {}
+
+    def fake_run(cmd, **kwargs):
+        seen.update(kwargs)
+        raise subprocess.TimeoutExpired(cmd, kwargs["timeout"])
+
+    monkeypatch.setattr(cmp.subprocess, "run", fake_run)
+    env = cmp._run_weight_target("q/r", "ref/r", tmp_path / "o.json", None, timeout_s=90.0)
+    assert seen["timeout"] == 90.0
+    assert env == {
+        "status": "failed",
+        "error_type": "WorkerTimeout",
+        "message": "worker exceeded 90s",
+    }
+
+
+def test_compare_weight_forwards_worker_timeout_only_when_set(monkeypatch, tmp_path):
+    calls: list[dict[str, object]] = []
+
+    def _fake_run(repo, **kwargs):
+        calls.append(kwargs)
+        return _ok_envelope(repo, 0.01, 1000)
+
+    monkeypatch.setattr(cmp, "_run_weight_target", _fake_run)
+    cmp.compare_weight_fidelity(["a", "b"], "ref", artifacts_dir=tmp_path)
+    assert calls[0]["timeout_s"] == 7200.0
+    calls.clear()
+    cmp.compare_weight_fidelity(
+        ["a", "b"], "ref", artifacts_dir=tmp_path / "x", worker_timeout_s=None
+    )
+    assert "timeout_s" not in calls[0]
+
+
+@pytest.mark.parametrize("bad", [0, -3])
+def test_compare_weights_rejects_max_chunks_zero(monkeypatch, tmp_path, bad):
+    """Reds if a non-positive max_chunks only surfaces inside N spawned workers."""
+
+    def _never(*_a, **_k):
+        raise AssertionError("worker spawned despite invalid max_chunks")
+
+    monkeypatch.setattr(cmp, "_run_weight_target", _never)
+    with pytest.raises(CompareConfigError, match="max_chunks must be >= 1"):
+        cmp.compare_weight_fidelity(["a", "b"], "ref", max_chunks=bad, artifacts_dir=tmp_path)
+
+
+def test_compare_weight_reports_target_progress(monkeypatch, tmp_path):
+    """Reds if a five-target ladder is a blank terminal until the end."""
+
+    def _fake_run(repo, **kw):
+        return _ok_envelope(repo, 0.01, 1000)
+
+    monkeypatch.setattr(cmp, "_run_weight_target", _fake_run)
+    seen: list[str] = []
+    cmp.compare_weight_fidelity(["a", "b"], "ref", artifacts_dir=tmp_path, progress=seen.append)
+    assert seen == ["[1/2] a", "[2/2] b"]

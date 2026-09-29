@@ -4,8 +4,12 @@ The heart of method ranking. It knows nothing about KLD, models, or bytes-as-dis
 map domain metrics onto `RankPoint` where lower is better on each axis. The single comparison
 rule lives in `dominates`; everything else defers to it (DRY). Generalizing to vector quality
 later changes only `dominates` (Open/Closed). See docs/ranking-principles.md.
+
+A point whose quality is NaN is unrankable: NaN compares False against everything, so it would
+never be dominated and would land on the frontier. Every function here ignores such points.
 """
 
+import math
 from dataclasses import dataclass
 
 
@@ -37,8 +41,13 @@ def _sort_key(p: RankPoint) -> tuple[int, float, str]:
     return (p.cost_bytes, p.quality, p.label)
 
 
+def _rankable(points: list[RankPoint]) -> list[RankPoint]:
+    return [p for p in points if not math.isnan(p.quality)]
+
+
 def pareto_frontier(points: list[RankPoint]) -> list[str]:
     """Labels of the non-dominated points, deterministically ordered by cost, quality, label."""
+    points = _rankable(points)
     ordered = sorted(points, key=_sort_key)
     return [p.label for p in ordered if not any(dominates(o, p) for o in points)]
 
@@ -46,6 +55,7 @@ def pareto_frontier(points: list[RankPoint]) -> list[str]:
 def dominated_by(points: list[RankPoint]) -> dict[str, str]:
     """Map each dominated label -> a dominator's label (the cheapest/best, deterministically)."""
     result: dict[str, str] = {}
+    points = _rankable(points)
     for p in points:
         dominators = sorted((o for o in points if dominates(o, p)), key=_sort_key)
         if dominators:

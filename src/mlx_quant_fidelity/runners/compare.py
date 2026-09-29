@@ -7,7 +7,7 @@ import subprocess
 import sys
 from collections.abc import Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import mlx.core as mx
 
@@ -22,9 +22,12 @@ from mlx_quant_fidelity.errors import (
     ReportSchemaError,
 )
 from mlx_quant_fidelity.policy import VALID_VERDICTS, qualifies, verdict_for
+from mlx_quant_fidelity.probes._paired import ProgressFn
+from mlx_quant_fidelity.probes._preload import preload_check
 from mlx_quant_fidelity.probes.kv import (
     MAX_CHUNK_LENGTH,
     _kv_head_dim,
+    _model_arg,
     packed_width_mismatch,
     score_kv_config,
 )
@@ -37,22 +40,25 @@ from mlx_quant_fidelity.report import (
     fidelity_report_from_dict,
     weight_report_from_dict,
 )
+from mlx_quant_fidelity.runners._identity import (
+    KV_PARTIAL_SCHEMA_VERSION,
+    RANKED_FOOTING,
+    WEIGHT_PARTIAL_SCHEMA_VERSION,
+    kv_run_identity,
+    weight_run_identity,
+    write_json_atomic,
+)
 
 if TYPE_CHECKING:
     from mlx_quant_fidelity.corpora.provenance import CorpusProvenance
 
 _asdict = _dc.asdict
 
-# Bump the relevant constant when that mode's partial format or cost formula changes, so only
-# that mode's old partials are rejected. The two modes' partials are independent — a KV-only
-# change (e.g. adding chunk_length to the identity) must not force weight partials to recompute.
-_KV_PARTIAL_SCHEMA_VERSION = 4
-_WEIGHT_PARTIAL_SCHEMA_VERSION = 2
-
-# The footing every `compare kv` row is ranked on, regardless of a method's native footing
-# (see `_ranked_kl_and_verdict`). Recorded in the run identity too, so a future change to what
-# ranking footing means invalidates old partials without another schema-version bump.
-_RANKED_FOOTING = "quantizer_only"
+# Schema constants and identity builders live in runners/_identity.py (pure, shared with the
+# worker); re-exported here because tests and callers read them from this module.
+_KV_PARTIAL_SCHEMA_VERSION = KV_PARTIAL_SCHEMA_VERSION
+_WEIGHT_PARTIAL_SCHEMA_VERSION = WEIGHT_PARTIAL_SCHEMA_VERSION
+_RANKED_FOOTING = RANKED_FOOTING
 
 
 def _identity_provenance(method: KVCacheMethod) -> dict[str, str]:
@@ -187,8 +193,12 @@ def split_target(target: str) -> tuple[str, str | None]:
     return repo, revision
 
 
-def _validate_compare_weights_args(quant_model_ids: list[str]) -> None:
+def _validate_compare_weights_args(
+    quant_model_ids: list[str], max_chunks: int | None = None
+) -> None:
     """Validate weight-compare arguments. Raise CompareConfigError on bad input."""
+    if max_chunks is not None and max_chunks < 1:
+        raise CompareConfigError(f"max_chunks must be >= 1 (got {max_chunks}).")
     if len(quant_model_ids) < 2:
         raise CompareConfigError(
             "compare needs at least 2 quant targets; use the `weights` probe for one."
@@ -226,6 +236,8 @@ def _run_weight_target(
     *,
     quant_revision: str | None = None,
     reference_revision: str | None = None,
+    allow_custom_code: bool = False,
+    timeout_s: float | None = None,
 ) -> dict[str, object]:  # pragma: no cover - spawns a subprocess; covered by --run-slow
     """Spawn the weight worker for one target and return its parsed JSON envelope.
 
@@ -251,9 +263,17 @@ def _run_weight_target(
         cmd += ["--quant-revision", quant_revision]
     if reference_revision is not None:
         cmd += ["--reference-revision", reference_revision]
+    if allow_custom_code:
+        cmd += ["--allow-custom-code"]
     try:
-        result = subprocess.run(cmd, check=True, capture_output=True, text=True)
+        result = subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=timeout_s)
         stderr_hint = result.stderr.strip()
+    except subprocess.TimeoutExpired:
+        return {
+            "status": "failed",
+            "error_type": "WorkerTimeout",
+            "message": f"worker exceeded {timeout_s or 0:.0f}s",
+        }
     except subprocess.CalledProcessError as exc:
         stderr_hint = (exc.stderr or "").strip()
         return {
@@ -345,6 +365,9 @@ def compare_weight_fidelity(
     artifacts_dir: Path | None = None,
     quant_revision: str | None = None,
     reference_revision: str | None = None,
+    allow_custom_code: bool = False,
+    worker_timeout_s: float | None = 7200.0,
+    progress: ProgressFn | None = None,
 ) -> ComparisonReport:
     """Rank N weight-quant repos vs one reference on quality-per-byte.
 
@@ -364,13 +387,19 @@ def compare_weight_fidelity(
             overridden by an inline `@revision` on that target.
         reference_revision: Optional git revision for the one shared reference repo, unless
             overridden by an inline `@revision` on `reference_model_id`.
+        allow_custom_code: Let a repo whose config.json names a `model_file` run its own
+            Python code on load (off by default; mlx-lm executes that file).
+        worker_timeout_s: Wall-clock limit per target's worker subprocess (default 2 hours);
+            a target that exceeds it becomes a failed row. ``None`` disables the limit.
+        progress: Optional callback receiving ``[i/n] <label>`` as each target starts
+            (silent when ``None``, the default).
 
     Raises:
         CompareConfigError: If fewer than 2 targets, duplicate ids, malformed repo ids, or
             filename collisions. Subclasses ValueError for backward compatibility.
     """
     targets = [split_target(t) for t in quant_model_ids]
-    _validate_compare_weights_args([repo for repo, _ in targets])
+    _validate_compare_weights_args([repo for repo, _ in targets], max_chunks)
     reference_model_id, reference_inline = split_target(reference_model_id)
     if reference_inline is not None:
         reference_revision = reference_inline
@@ -378,7 +407,7 @@ def compare_weight_fidelity(
     out_dir.mkdir(parents=True, exist_ok=True)
     results: list[ComparisonTargetResult] = []
     corpus = None
-    for repo, inline_revision in targets:
+    for target_index, (repo, inline_revision) in enumerate(targets, start=1):
         target_revision = inline_revision if inline_revision is not None else quant_revision
         label = _label_for_repo(repo)
         partial = out_dir / _partial_filename(repo)
@@ -391,21 +420,33 @@ def compare_weight_fidelity(
                 env = None
             if not isinstance(env, dict):
                 env = None  # valid JSON but not an object — treat as absent, recompute
+        # A failed partial is never resumed, even with a matching identity: the failure may be
+        # transient (a network error), so the target is retried on every run.
+        if env is not None and env.get("status") != "ok":
+            env = None
         # Full run-identity guard: recompute if the partial is absent, has a non-ok status,
         # or its stored run_identity doesn't match the current call's full identity.
         if env is not None:
-            expected_identity: dict[str, object] = {
-                "mode": "weight",
-                "quant": repo,
-                "reference": reference_model_id,
-                "max_chunks": max_chunks,
-                "schema_version": _WEIGHT_PARTIAL_SCHEMA_VERSION,
-                "quant_revision": target_revision,
-                "reference_revision": reference_revision,
-            }
+            expected_identity = weight_run_identity(
+                quant=repo,
+                reference=reference_model_id,
+                max_chunks=max_chunks,
+                quant_revision=target_revision,
+                reference_revision=reference_revision,
+                allow_custom_code=allow_custom_code,
+            )
             if env.get("run_identity") != expected_identity:
                 env = None
+        if progress is not None:
+            progress(
+                f"[{target_index}/{len(targets)}] {label}" + ("" if env is None else " (cached)")
+            )
         if env is None:
+            extra: dict[str, Any] = {}
+            if allow_custom_code:
+                extra["allow_custom_code"] = True
+            if worker_timeout_s is not None:
+                extra["timeout_s"] = worker_timeout_s
             env = _run_weight_target(
                 repo,
                 reference=reference_model_id,
@@ -413,6 +454,7 @@ def compare_weight_fidelity(
                 max_chunks=max_chunks,
                 quant_revision=target_revision,
                 reference_revision=reference_revision,
+                **extra,
             )
         result = _envelope_to_result(label, env)
         # fix 4: corpus from the FIRST successful result (don't overwrite once set)
@@ -503,19 +545,24 @@ def kv_geometry_from_config(
     decides what's fatal.
     """
     nested = config.get("text_config")
-    cfg = nested if isinstance(nested, dict) else config
+    nested_cfg = nested if isinstance(nested, dict) else {}
 
     def _int_or_none(v: object) -> int | None:
-        return v if isinstance(v, int) else None
+        return v if isinstance(v, int) and not isinstance(v, bool) and v > 0 else None
 
-    n_layers = _int_or_none(cfg.get("num_hidden_layers"))
-    n_heads = _int_or_none(cfg.get("num_attention_heads"))
-    n_kv_heads = _int_or_none(cfg.get("num_key_value_heads"))
+    def _get(key: str) -> int | None:
+        # Top-level key first, ``text_config`` as the fallback; non-positive counts as missing.
+        top = _int_or_none(config.get(key))
+        return top if top is not None else _int_or_none(nested_cfg.get(key))
+
+    n_layers = _get("num_hidden_layers")
+    n_heads = _get("num_attention_heads")
+    n_kv_heads = _get("num_key_value_heads")
     if n_kv_heads is None:
         n_kv_heads = n_heads
-    head_dim = _int_or_none(cfg.get("head_dim"))
+    head_dim = _get("head_dim")
     if head_dim is None:
-        hidden_size = _int_or_none(cfg.get("hidden_size"))
+        hidden_size = _get("hidden_size")
         if hidden_size is not None and n_heads:
             head_dim = hidden_size // n_heads
     return n_layers, n_kv_heads, head_dim
@@ -635,14 +682,21 @@ def _load_corpus_for_kv(
     )
 
 
+_KV_COMPARE_GATE_REMEDY = (
+    "Lower --chunk-length (every stock row is ranked on its quantizer-only control lane, "
+    "which needs its own cache at this window)"
+)
+
+
 def _kv_dims(model: object) -> tuple[int | None, int | None, int | None]:
     """Return (n_layers, n_kv_heads, head_dim) from a loaded model; any may be None."""
     from mlx_lm.models.cache import make_prompt_cache
 
     args = getattr(model, "args", None)
     n_layers = len(make_prompt_cache(model))
-    _nkv = getattr(args, "num_key_value_heads", None)
-    n_kv_heads = _nkv if _nkv is not None else getattr(args, "num_attention_heads", None)
+    _nkv = _model_arg(args, "num_key_value_heads")
+    _kv = _nkv if _nkv is not None else _model_arg(args, "num_attention_heads")
+    n_kv_heads = _kv if isinstance(_kv, int) else None
     head_dim = _kv_head_dim(model)
     return n_layers, n_kv_heads, head_dim
 
@@ -760,6 +814,8 @@ def compare_kv_fidelity(
     model_revision: str | None = None,
     chunk_length: int = 512,
     skipped_configs: list[tuple[str, str]] | None = None,
+    allow_custom_code: bool = False,
+    progress: ProgressFn | None = None,
 ) -> ComparisonReport:
     """Rank N KV-cache methods/configs on one model, quality-per-KV-byte-per-token.
 
@@ -794,6 +850,10 @@ def compare_kv_fidelity(
         model_revision: HuggingFace model revision.
         chunk_length: Tokens per chunk for the auto-loaded corpus (default 512). Must be in
             ``[2, MAX_CHUNK_LENGTH]``; see :func:`~mlx_quant_fidelity.probes.kv.measure_kv_fidelity`.
+        allow_custom_code: Let a repo whose config.json names a `model_file` run its own
+            Python code on load (off by default; mlx-lm executes that file).
+        progress: Optional callback receiving ``[i/n] <label>`` as each config that needs
+            measuring starts (silent when ``None``, the default).
         skipped_configs: ``(label, reason)`` pairs (e.g. from :func:`generate_sweep_configs` or
             :func:`filter_configs_by_kv_budget`) that were excluded before scoring — from a
             known-broken packed width or a KV-byte budget. Each becomes a ``"skipped"``
@@ -837,21 +897,16 @@ def compare_kv_fidelity(
             return None  # type: ignore[unreachable]  # valid JSON but not an object — recompute
         if raw.get("status") != "ok":
             return None
-        expected_identity: dict[str, object] = {
-            "mode": "kv",
-            "model_id": model_id,
-            "model_revision": model_revision,
-            "method": method.name,
-            "params": dict(method.params),
-            "method_provenance": _identity_provenance(method),
-            "mlx_version": importlib.metadata.version("mlx"),
-            "mlx_lm_version": importlib.metadata.version("mlx-lm"),
-            "quantize_start": quantize_start,
-            "max_chunks": max_chunks,
-            "chunk_length": chunk_length,
-            "schema_version": _KV_PARTIAL_SCHEMA_VERSION,
-            "ranked_footing": _RANKED_FOOTING,
-        }
+        expected_identity = kv_run_identity(
+            model_id=model_id,
+            model_revision=model_revision,
+            method_name=method.name,
+            params=dict(method.params),
+            method_provenance=_identity_provenance(method),
+            quantize_start=quantize_start,
+            max_chunks=max_chunks,
+            chunk_length=chunk_length,
+        )
         if raw.get("run_identity") != expected_identity:
             return None
         return raw
@@ -867,11 +922,14 @@ def compare_kv_fidelity(
     gate_skipped: list[tuple[str, str]] = []
 
     if pending:
+        preload_check(model_id, model_revision, allow_custom_code=allow_custom_code)
         install_memory_caps()
         model, tokenizer = _load_model(model_id, model_revision)
         n_layers, n_kv_heads, head_dim = _kv_dims(model)
         corpus = _load_corpus_for_kv(tokenizer, model_id, max_chunks, chunk_length=chunk_length)
-        for method in pending:
+        for method_index, method in enumerate(pending, start=1):
+            if progress is not None:
+                progress(f"[{method_index}/{len(pending)}] {method.label}")
             mx.reset_peak_memory()
             partial = out_dir / _kv_partial_filename(method)
             # Only a method exposing `control_method` (currently stock) has a bundled path to
@@ -889,6 +947,7 @@ def compare_kv_fidelity(
                     quantize_start=quantize_start,
                     max_chunks=max_chunks,
                     control=run_control,
+                    gate_remedy=_KV_COMPARE_GATE_REMEDY,
                 )
                 cost: int | None
                 if n_layers is not None and n_kv_heads is not None and head_dim is not None:
@@ -901,21 +960,16 @@ def compare_kv_fidelity(
                 else:
                     cost = None
                 ranked_kl, ranked_verdict = _ranked_kl_and_verdict(fid_report)
-                run_identity: dict[str, object] = {
-                    "mode": "kv",
-                    "model_id": model_id,
-                    "model_revision": model_revision,
-                    "method": method.name,
-                    "params": dict(method.params),
-                    "method_provenance": _identity_provenance(method),
-                    "mlx_version": importlib.metadata.version("mlx"),
-                    "mlx_lm_version": importlib.metadata.version("mlx-lm"),
-                    "quantize_start": quantize_start,
-                    "max_chunks": max_chunks,
-                    "chunk_length": chunk_length,
-                    "schema_version": _KV_PARTIAL_SCHEMA_VERSION,
-                    "ranked_footing": _RANKED_FOOTING,
-                }
+                run_identity = kv_run_identity(
+                    model_id=model_id,
+                    model_revision=model_revision,
+                    method_name=method.name,
+                    params=dict(method.params),
+                    method_provenance=_identity_provenance(method),
+                    quantize_start=quantize_start,
+                    max_chunks=max_chunks,
+                    chunk_length=chunk_length,
+                )
                 envelope: dict[str, object] = {
                     "status": "ok",
                     "report": _asdict(fid_report),
@@ -938,7 +992,7 @@ def compare_kv_fidelity(
                     "error_type": type(exc).__name__,
                     "message": str(exc),
                 }
-            partial.write_text(json.dumps(envelope))
+            write_json_atomic(partial, envelope)
             mx.clear_cache()
 
     gate_skipped_labels = {label for label, _ in gate_skipped}

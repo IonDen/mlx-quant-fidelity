@@ -175,3 +175,21 @@ def test_worker_ok_envelope_run_identity_includes_revisions(tmp_path, monkeypatc
     identity = json.loads(out.read_text())["run_identity"]
     assert identity["quant_revision"] == "rev-q"
     assert identity["reference_revision"] is None
+
+
+def test_worker_parses_allow_custom_code_and_records_it(tmp_path, monkeypatch):
+    """Bug: the worker ignores --allow-custom-code, so an opted-in compare still refuses."""
+    seen = {}
+
+    def fake_measure(*a, **k):
+        seen.update(k)
+        return _wreport("q4", 0.09, 4200)
+
+    monkeypatch.setattr(_worker, "measure_weight_fidelity", fake_measure)
+    monkeypatch.setattr(_worker, "install_memory_caps", lambda: None)
+    out = tmp_path / "q4.json"
+    _worker.run_weight_worker(
+        ["--quant", "q4", "--reference", "ref", "--out", str(out), "--allow-custom-code"]
+    )
+    assert seen["allow_custom_code"] is True
+    assert json.loads(out.read_text())["run_identity"]["allow_custom_code"] is True

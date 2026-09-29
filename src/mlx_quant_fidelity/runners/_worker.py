@@ -6,13 +6,12 @@ Isolation per target keeps MLX's lazy allocator from accumulating two models acr
 
 import argparse
 import dataclasses
-import json
 import sys
 from pathlib import Path
 
 from mlx_quant_fidelity._memory_caps import install_memory_caps
 from mlx_quant_fidelity.probes.weights import measure_weight_fidelity
-from mlx_quant_fidelity.runners.compare import _WEIGHT_PARTIAL_SCHEMA_VERSION
+from mlx_quant_fidelity.runners._identity import weight_run_identity, write_json_atomic
 
 
 def run_weight_worker(argv: list[str] | None = None) -> int:
@@ -24,17 +23,17 @@ def run_weight_worker(argv: list[str] | None = None) -> int:
     parser.add_argument("--max-chunks", type=int, default=None)
     parser.add_argument("--quant-revision", default=None)
     parser.add_argument("--reference-revision", default=None)
+    parser.add_argument("--allow-custom-code", action="store_true")
     args = parser.parse_args(argv)
     install_memory_caps()  # after arg validation, before any model load
-    run_identity: dict[str, object] = {
-        "mode": "weight",
-        "quant": args.quant,
-        "reference": args.reference,
-        "max_chunks": args.max_chunks,
-        "schema_version": _WEIGHT_PARTIAL_SCHEMA_VERSION,
-        "quant_revision": args.quant_revision,
-        "reference_revision": args.reference_revision,
-    }
+    run_identity = weight_run_identity(
+        quant=args.quant,
+        reference=args.reference,
+        max_chunks=args.max_chunks,
+        quant_revision=args.quant_revision,
+        reference_revision=args.reference_revision,
+        allow_custom_code=args.allow_custom_code,
+    )
     try:
         report = measure_weight_fidelity(
             args.quant,
@@ -42,6 +41,7 @@ def run_weight_worker(argv: list[str] | None = None) -> int:
             max_chunks=args.max_chunks,
             quant_revision=args.quant_revision,
             reference_revision=args.reference_revision,
+            allow_custom_code=args.allow_custom_code,
         )
         envelope: dict[str, object] = {
             "status": "ok",
@@ -55,15 +55,18 @@ def run_weight_worker(argv: list[str] | None = None) -> int:
             "message": str(exc),
             "run_identity": run_identity,
         }
-    Path(args.out).write_text(json.dumps(envelope))
+    write_json_atomic(Path(args.out), envelope)
     return 0
 
 
 def _console_entry() -> None:  # pragma: no cover - process-exit wrapper
     import os
 
+    from mlx_quant_fidelity._watchdog import MemoryWatchdog
+
     code = 1
     try:
+        MemoryWatchdog().start()  # abort on active+cache ceiling; worker only, never the library API
         code = run_weight_worker()
     except SystemExit as exc:  # argparse usage errors, etc.
         code = exc.code if isinstance(exc.code, int) else 1
