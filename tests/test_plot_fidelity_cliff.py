@@ -172,3 +172,32 @@ def test_committed_chart_carries_no_wall_clock_date():
     # this runs in the default lane without the `docs` group.
     svg = (REPO_ROOT / "docs" / "assets" / "charts" / "fidelity-cliff.svg").read_text()
     assert "<dc:date>" not in svg
+
+
+def test_collect_kv_points_keeps_only_full_coverage_stock_samples(tmp_path):
+    # bug caught: a TurboQuant / affine sample, or a partial-coverage hybrid model, drawn on the
+    # stock "quantized from the first token" chart as if it were a stock 4-bit point. The
+    # legacy fixture has neither key (pre-0.6.0 samples) and must still be kept.
+    module = _load_module()
+
+    def sample(**extra):
+        return {
+            "model_id": "m",
+            "kv_bits": 4,
+            "kl": {"mean": 0.1},
+            "flip_rate": 0.2,
+            "verdict": "bad",
+            "corpus": {"chunk_length": 512},
+            "quantize_mode": "stress",
+            **extra,
+        }
+
+    (tmp_path / "legacy.json").write_text(json.dumps(sample()))
+    (tmp_path / "stock.json").write_text(json.dumps(sample(kv_method="stock", kv_partial=False)))
+    (tmp_path / "turbo.json").write_text(json.dumps(sample(kv_method="turboquant")))
+    (tmp_path / "affine.json").write_text(json.dumps(sample(kv_method="affine")))
+    (tmp_path / "partial.json").write_text(
+        json.dumps(sample(kv_method="stock", kv_partial=True, kv_layers_total=26))
+    )
+
+    assert len(module.collect_kv_points(tmp_path)) == 2

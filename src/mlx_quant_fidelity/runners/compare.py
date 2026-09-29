@@ -5,13 +5,13 @@ import importlib.metadata
 import json
 import subprocess
 import sys
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypeVar
 
 import mlx.core as mx
 
-from mlx_quant_fidelity._memory_caps import install_memory_caps
+from mlx_quant_fidelity._memory_caps import caps_warning, install_memory_caps
 from mlx_quant_fidelity.costs import kv_bytes_per_token
 from mlx_quant_fidelity.errors import (
     CacheNotQuantizableError,
@@ -28,20 +28,22 @@ from mlx_quant_fidelity.probes.kv import (
     MAX_CHUNK_LENGTH,
     _kv_head_dim,
     _model_arg,
-    packed_width_mismatch,
     score_kv_config,
 )
 from mlx_quant_fidelity.probes.kv_methods import (
+    _STOCK_BITS,
     ControlLaneMethod,
     KVCacheMethod,
     StockKVMethod,
     check_before_load,
+    packed_width_mismatch,
 )
 from mlx_quant_fidelity.ranking import RankPoint, budget_pick, dominated_by, pareto_frontier
 from mlx_quant_fidelity.report import (
     ComparisonReport,
     ComparisonTargetResult,
     FidelityReport,
+    WeightFidelityReport,
     fidelity_report_from_dict,
     weight_report_from_dict,
 )
@@ -233,6 +235,10 @@ def _validate_compare_weights_args(
         seen[fname] = repo
 
 
+# Largest accepted worker timeout: macOS subprocess.run(timeout=...) overflows above ~2,147,483 s.
+MAX_WORKER_TIMEOUT_S = 2_000_000.0
+
+
 def _run_weight_target(
     quant: str,
     reference: str,
@@ -243,7 +249,7 @@ def _run_weight_target(
     reference_revision: str | None = None,
     allow_custom_code: bool = False,
     timeout_s: float | None = None,
-) -> dict[str, object]:  # pragma: no cover - spawns a subprocess; covered by --run-slow
+) -> dict[str, object]:
     """Spawn the weight worker for one target and return its parsed JSON envelope.
 
     If the worker exits non-zero or writes no parseable envelope, returns a failed envelope
@@ -253,21 +259,23 @@ def _run_weight_target(
     """
     cmd = [
         sys.executable,
+        # -P: do not prepend the cwd to sys.path, so a `*.py` in the cwd (a downloaded model
+        # folder, say) cannot shadow a stdlib module inside the worker.
+        "-P",
         "-m",
         "mlx_quant_fidelity.runners._worker",
-        "--quant",
-        quant,
-        "--reference",
-        reference,
-        "--out",
-        str(partial_path),
+        # `--flag=value` binds a value that starts with '-' to its flag instead of letting the
+        # worker's argparse read it as an option.
+        f"--quant={quant}",
+        f"--reference={reference}",
+        f"--out={partial_path}",
     ]
     if max_chunks is not None:
         cmd += ["--max-chunks", str(max_chunks)]
     if quant_revision is not None:
-        cmd += ["--quant-revision", quant_revision]
+        cmd += [f"--quant-revision={quant_revision}"]
     if reference_revision is not None:
-        cmd += ["--reference-revision", reference_revision]
+        cmd += [f"--reference-revision={reference_revision}"]
     if allow_custom_code:
         cmd += ["--allow-custom-code"]
     try:
@@ -277,7 +285,10 @@ def _run_weight_target(
         return {
             "status": "failed",
             "error_type": "WorkerTimeout",
-            "message": f"worker exceeded {timeout_s or 0:.0f}s",
+            "message": (
+                f"worker exceeded {timeout_s or 0:.0f}s; raise --worker-timeout (0 disables) "
+                "for long full-corpus runs"
+            ),
         }
     except subprocess.CalledProcessError as exc:
         stderr_hint = (exc.stderr or "").strip()
@@ -303,55 +314,55 @@ def _run_weight_target(
         }
 
 
-def _envelope_to_result(label: str, env: dict[str, object]) -> ComparisonTargetResult:
-    # env is unvalidated json.loads output at the caller; the annotation is a lie mypy
-    # believes but the runtime value may not honor — defend against a non-dict top level.
+_R = TypeVar("_R", FidelityReport, WeightFidelityReport)
+
+
+def _validated_report(
+    label: str,
+    env: dict[str, object],
+    from_dict: Callable[[dict[str, object]], _R],
+) -> tuple[_R, None] | tuple[None, ComparisonTargetResult]:
+    """Shared front half of both envelope converters.
+
+    Returns ``(report, None)`` when the envelope carries a valid report body, else
+    ``(None, row)`` with the failed row to emit (a stored failure, or a CorruptPartial).
+    ``env`` is unvalidated ``json.loads`` output at the caller; the annotation is a lie mypy
+    believes but the runtime value may not honor, so a non-dict top level is defended against.
+    """
     if not isinstance(env, dict):
-        return ComparisonTargetResult(  # type: ignore[unreachable]
-            label,
-            "failed",
-            None,
-            None,
-            None,
-            "CorruptPartial",
-            f"partial for {label!r} is not a JSON object",
+        return None, ComparisonTargetResult.failed(
+            label, "CorruptPartial", f"partial for {label!r} is not a JSON object"
         )
     if env.get("status") == "failed":
-        # fix 3: absent keys yield None, not the string "None"
-        return ComparisonTargetResult(
+        # absent keys yield None, not the string "None"
+        return None, ComparisonTargetResult.failed(
             label,
-            "failed",
-            None,
-            None,
-            None,
             env.get("error_type") or None,  # type: ignore[arg-type]
             env.get("message") or None,  # type: ignore[arg-type]
         )
     report_body = env.get("report")
     if not isinstance(report_body, dict):
-        return ComparisonTargetResult(
-            label,
-            "failed",
-            None,
-            None,
-            None,
-            "CorruptPartial",
-            f"partial for {label!r} has no report body",
+        return None, ComparisonTargetResult.failed(
+            label, "CorruptPartial", f"partial for {label!r} has no report body"
         )
     try:
-        report = weight_report_from_dict(report_body)
+        report = from_dict(report_body)
     except ReportSchemaError as exc:
-        return ComparisonTargetResult(label, "failed", None, None, None, "CorruptPartial", str(exc))
+        return None, ComparisonTargetResult.failed(label, "CorruptPartial", str(exc))
     if report.verdict not in VALID_VERDICTS:
-        return ComparisonTargetResult(
+        return None, ComparisonTargetResult.failed(
             label,
-            "failed",
-            None,
-            None,
-            None,
             "CorruptPartial",
             f"partial for {label!r} has an invalid verdict {report.verdict!r}",
         )
+    return report, None
+
+
+def _envelope_to_result(label: str, env: dict[str, object]) -> ComparisonTargetResult:
+    report, row = _validated_report(label, env, weight_report_from_dict)
+    if report is None:
+        assert row is not None
+        return row
     cost = report.quant_model_bytes
     if cost is None:
         return ComparisonTargetResult(label, "ok", report, None, "cost unavailable", None, None)
@@ -371,7 +382,7 @@ def compare_weight_fidelity(
     quant_revision: str | None = None,
     reference_revision: str | None = None,
     allow_custom_code: bool = False,
-    worker_timeout_s: float | None = 7200.0,
+    worker_timeout_s: float | None = 21600.0,
     progress: ProgressFn | None = None,
 ) -> ComparisonReport:
     """Rank N weight-quant repos vs one reference on quality-per-byte.
@@ -394,7 +405,7 @@ def compare_weight_fidelity(
             overridden by an inline `@revision` on `reference_model_id`.
         allow_custom_code: Let a repo whose config.json names a `model_file` run its own
             Python code on load (off by default; mlx-lm executes that file).
-        worker_timeout_s: Wall-clock limit per target's worker subprocess (default 2 hours);
+        worker_timeout_s: Wall-clock limit per target's worker subprocess (default 6 hours);
             a target that exceeds it becomes a failed row. ``None`` disables the limit.
         progress: Optional callback receiving ``[i/n] <label>`` as each target starts
             (silent when ``None``, the default).
@@ -402,12 +413,25 @@ def compare_weight_fidelity(
     Raises:
         CompareConfigError: If fewer than 2 targets, duplicate ids, malformed repo ids, or
             filename collisions. Subclasses ValueError for backward compatibility.
+        ModelNotAccessibleError: If the shared reference's config.json cannot be read (checked
+            once before any worker starts, even when every target would resume).
+        UntrustedModelCodeError: If the reference names its own model code and
+            ``allow_custom_code`` is False.
     """
+    if worker_timeout_s is not None and worker_timeout_s > MAX_WORKER_TIMEOUT_S:
+        raise CompareConfigError(
+            f"worker_timeout_s={worker_timeout_s:g} exceeds {MAX_WORKER_TIMEOUT_S:,.0f} s "
+            "(subprocess timeouts overflow above that on macOS); use None to disable the limit."
+        )
     targets = [split_target(t) for t in quant_model_ids]
     _validate_compare_weights_args([repo for repo, _ in targets], max_chunks)
     reference_model_id, reference_inline = split_target(reference_model_id)
     if reference_inline is not None:
         reference_revision = reference_inline
+    # The shared reference is read once, up front (config fetch only, no MLX): an unreadable or
+    # custom-code reference is one user error (exit 2), not N identical failed rows. Targets
+    # stay isolated per row.
+    preload_check(reference_model_id, reference_revision, allow_custom_code=allow_custom_code)
     out_dir = artifacts_dir or Path("_artifacts/compare/weight")
     out_dir.mkdir(parents=True, exist_ok=True)
     results: list[ComparisonTargetResult] = []
@@ -497,7 +521,7 @@ def _as_method(config: tuple[int, int] | KVCacheMethod) -> KVCacheMethod:
     return config
 
 
-_SWEEP_BITS: tuple[int, ...] = (2, 3, 4, 6, 8)
+_SWEEP_BITS: tuple[int, ...] = _STOCK_BITS
 _SWEEP_GROUP_SIZES: tuple[int, ...] = (32, 64, 128)
 
 
@@ -544,7 +568,8 @@ def kv_geometry_from_config(
     """Derive ``(n_layers, n_kv_heads, head_dim)`` from a raw HuggingFace ``config.json`` dict.
 
     Honors ``text_config`` nesting (multimodal configs carry the language-model geometry
-    there). ``head_dim`` falls back to ``hidden_size // num_attention_heads`` when absent;
+    there). Each field is read top-level first, ``text_config`` only when the top level lacks a
+    positive integer for it, so a top-level value wins over a nested one. ``head_dim`` falls back to ``hidden_size // num_attention_heads`` when absent;
     ``num_key_value_heads`` falls back to ``num_attention_heads`` (dense attention). A field
     that can't be resolved to an int comes back ``None`` rather than raising — the caller
     decides what's fatal.
@@ -665,7 +690,8 @@ def _load_model(model_id: str, revision: str | None) -> tuple[object, object]:  
     """
     from mlx_lm import load
 
-    loaded = load(model_id, revision=revision)
+    # lazy=True so the resident-size gate sees the weights before they are materialised.
+    loaded = load(model_id, revision=revision, lazy=True)
     return loaded[0], loaded[1]
 
 
@@ -708,68 +734,25 @@ def _kv_dims(model: object) -> tuple[int | None, int | None, int | None]:
 
 def _kv_envelope_to_result(label: str, env: dict[str, object]) -> ComparisonTargetResult:
     """Convert a stored KV partial envelope to a ComparisonTargetResult."""
-    # env is unvalidated json.loads output at the caller; the annotation is a lie mypy
-    # believes but the runtime value may not honor — defend against a non-dict top level.
-    if not isinstance(env, dict):
-        return ComparisonTargetResult(  # type: ignore[unreachable]
-            label,
-            "failed",
-            None,
-            None,
-            None,
-            "CorruptPartial",
-            f"partial for {label!r} is not a JSON object",
-        )
-    if env.get("status") == "failed":
-        return ComparisonTargetResult(
-            label,
-            "failed",
-            None,
-            None,
-            None,
-            env.get("error_type") or None,  # type: ignore[arg-type]
-            env.get("message") or None,  # type: ignore[arg-type]
-        )
-    report_body = env.get("report")
-    if not isinstance(report_body, dict):
-        return ComparisonTargetResult(
-            label,
-            "failed",
-            None,
-            None,
-            None,
-            "CorruptPartial",
-            f"partial for {label!r} has no report body",
-        )
-    try:
-        report = fidelity_report_from_dict(report_body)
-    except ReportSchemaError as exc:
-        return ComparisonTargetResult(label, "failed", None, None, None, "CorruptPartial", str(exc))
-    if report.verdict not in VALID_VERDICTS:
-        return ComparisonTargetResult(
-            label,
-            "failed",
-            None,
-            None,
-            None,
-            "CorruptPartial",
-            f"partial for {label!r} has an invalid verdict {report.verdict!r}",
-        )
+    report, row = _validated_report(label, env, fidelity_report_from_dict)
+    if report is None:
+        assert row is not None
+        return row
     ranked_kl_raw = env.get("ranked_kl")
-    ranked_kl = float(ranked_kl_raw) if isinstance(ranked_kl_raw, (int, float)) else None
+    ranked_kl = (
+        float(ranked_kl_raw)
+        if isinstance(ranked_kl_raw, (int, float)) and not isinstance(ranked_kl_raw, bool)
+        else None
+    )
     ranked_verdict_raw = env.get("ranked_verdict")
     ranked_verdict = ranked_verdict_raw if isinstance(ranked_verdict_raw, str) else None
-    # Validated exactly like `report.verdict` above: a garbage ranked_verdict must isolate
-    # this row, not flow into assemble_comparison_report's qualifies()/tier_rank() and crash
-    # the whole run under --min-tier. No silent fallback to the native verdict either — that
-    # would mask the corruption instead of surfacing it.
+    # Validated exactly like `report.verdict` in _validated_report: a garbage ranked_verdict
+    # must isolate this row, not flow into assemble_comparison_report's qualifies()/tier_rank()
+    # and crash the whole run under --min-tier. No silent fallback to the native verdict either
+    # -- that would mask the corruption instead of surfacing it.
     if ranked_verdict is not None and ranked_verdict not in VALID_VERDICTS:
-        return ComparisonTargetResult(
+        return ComparisonTargetResult.failed(
             label,
-            "failed",
-            None,
-            None,
-            None,
             "CorruptPartial",
             f"partial for {label!r} has an invalid ranked_verdict {ranked_verdict!r}",
         )
@@ -791,8 +774,10 @@ def _kv_envelope_to_result(label: str, env: dict[str, object]) -> ComparisonTarg
             ranked_verdict,
             ranked_footing,
         )
-    if not isinstance(cost, (int, float)):
-        raise ValueError(f"unexpected cost type in partial: {type(cost)!r}")
+    if isinstance(cost, bool) or not isinstance(cost, (int, float)):
+        return ComparisonTargetResult.failed(
+            label, "CorruptPartial", f"partial for {label!r} has an invalid cost {cost!r}"
+        )
     return ComparisonTargetResult(
         label,
         "ok",
@@ -942,9 +927,10 @@ def compare_kv_fidelity(
     gate_skipped: list[tuple[str, str]] = []
 
     if pending:
-        preload_check(model_id, model_revision, allow_custom_code=allow_custom_code)
-        install_memory_caps()
-        model, tokenizer = _load_model(model_id, model_revision)
+        checked = preload_check(model_id, model_revision, allow_custom_code=allow_custom_code)
+        caps_note = caps_warning(install_memory_caps())
+        # Load exactly the commit that was checked, not a re-resolved branch head.
+        model, tokenizer = _load_model(model_id, checked.load_revision(model_revision))
         n_layers, n_kv_heads, head_dim = _kv_dims(model)
         corpus = _load_corpus_for_kv(tokenizer, model_id, max_chunks, chunk_length=chunk_length)
         for method_index, method in enumerate(pending, start=1):
@@ -967,6 +953,8 @@ def compare_kv_fidelity(
                     control=run_control,
                     gate_remedy=_KV_COMPARE_GATE_REMEDY,
                 )
+                if caps_note is not None:
+                    fid_report = _dc.replace(fid_report, warnings=(*fid_report.warnings, caps_note))
                 cost: int | None
                 if n_layers is not None and n_kv_heads is not None and head_dim is not None:
                     try:
@@ -1030,12 +1018,8 @@ def compare_kv_fidelity(
             )
             result = _kv_envelope_to_result(label, env)
         except (json.JSONDecodeError, OSError, ValueError):
-            result = ComparisonTargetResult(
+            result = ComparisonTargetResult.failed(
                 label,
-                "failed",
-                None,
-                None,
-                None,
                 "CorruptPartial",
                 f"partial for config {label!r} was corrupt or unreadable at collect time",
             )
@@ -1044,9 +1028,7 @@ def compare_kv_fidelity(
         results.append(result)
 
     for skip_label, skip_reason in [*gate_skipped, *(skipped_configs or [])]:
-        results.append(
-            ComparisonTargetResult(skip_label, "skipped", None, None, skip_reason, None, None)
-        )
+        results.append(ComparisonTargetResult.skipped(skip_label, skip_reason))
 
     return assemble_comparison_report(
         results,

@@ -1,9 +1,11 @@
 """_AffineCache: affine-quantized storage, dequantize-on-fetch, standard-SDPA routing."""
 
 import mlx.core as mx
-from mlx_lm.models.cache import KVCache
+import pytest
+from mlx_lm.models.cache import KVCache, RotatingKVCache
 
-from mlx_quant_fidelity.probes.kv_methods import _AffineCache
+from mlx_quant_fidelity.errors import CacheNotQuantizableError
+from mlx_quant_fidelity.probes.kv_methods import AffineKVMethod, _AffineCache
 
 
 def _kv(seed: int, s: int = 16):
@@ -75,3 +77,38 @@ def test_trim_drops_from_the_end():
     assert aff.trim(6) == 6
     assert aff.offset == 10
     assert aff.state[0].shape[-2] == 10
+
+
+def test_affine_convert_prefix_uses_offset_sliced_state():
+    """Reds if convert_prefix replays the step-padded keys/values buffer instead of ``state``.
+
+    A real KVCache allocates in steps of 256, so 10 tokens sit in a 256-slot buffer; replaying
+    that buffer gives the affine cache 256 positions (offset 256) of mostly zeros.
+    """
+    k = mx.random.normal((1, 2, 10, 64), key=mx.random.key(0))
+    v = mx.random.normal((1, 2, 10, 64), key=mx.random.key(1))
+    fp = KVCache()
+    fp.update_and_fetch(k, v)
+    out = AffineKVMethod(k_bits=8, v_bits=4).convert_prefix([fp])
+    assert out[0].offset == 10
+    got = mx.dequantize(*out[0].state[:3], group_size=64, bits=8)
+    want = mx.dequantize(*mx.quantize(k, group_size=64, bits=8), group_size=64, bits=8)
+    assert got.shape == (1, 2, 10, 64)
+    # Same quantizer on the same input: agreement to fp16 epsilon (2^-10 relative to the
+    # largest magnitude). A passthrough of the raw keys would miss by up to half an 8-bit
+    # step (~range/510 ~ 0.01 here), which is above this bound.
+    atol = 2**-10 * float(mx.abs(k).max())
+    assert mx.allclose(got, want, atol=atol, rtol=0.0)
+    assert not mx.allclose(got, k, atol=atol, rtol=0.0)
+
+
+def test_affine_probe_capability_accepts_plain_kvcaches():
+    """Reds if the capability probe refuses the plain per-layer caches every model starts with."""
+    AffineKVMethod(k_bits=8, v_bits=4).probe_capability([KVCache(), KVCache()])
+
+
+@pytest.mark.parametrize("layers", [[KVCache(), RotatingKVCache(max_size=8)]])
+def test_affine_probe_capability_rejects_non_plain_kvcache(layers):
+    """Reds if a sliding-window layer slips through and is silently replaced by an affine cache."""
+    with pytest.raises(CacheNotQuantizableError, match="RotatingKVCache"):
+        AffineKVMethod(k_bits=8, v_bits=4).probe_capability(layers)

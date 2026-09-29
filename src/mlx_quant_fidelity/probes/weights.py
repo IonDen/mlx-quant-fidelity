@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any, cast
 import mlx.core as mx
 from mlx.utils import tree_flatten
 
-from mlx_quant_fidelity._memory_caps import device_string, install_memory_caps
+from mlx_quant_fidelity._memory_caps import caps_warning, device_string, install_memory_caps
 from mlx_quant_fidelity.corpora.provenance import scored_provenance
 from mlx_quant_fidelity.errors import (
     CorpusError,
@@ -18,7 +18,7 @@ from mlx_quant_fidelity.errors import (
     InsufficientMemoryError,
     ModelMismatchError,
 )
-from mlx_quant_fidelity.policy import _WEIGHT_TIERS_v0_2_0, verdict_for
+from mlx_quant_fidelity.policy import WEIGHT_TIERS, verdict_for
 from mlx_quant_fidelity.probes._paired import (
     ProgressFn,
     _aggregate_chunks,
@@ -172,10 +172,23 @@ def _top_or_text(config: dict[str, object], key: str) -> object:
     return text.get(key) if isinstance(text, dict) else None
 
 
+# quant_method values mlx-lm's load_model rewrites into a native block with default bits
+# (mlx_lm/utils.py, 0.31.3); only these may lack 'bits' in the raw config.json.
+_REWRITTEN_ON_LOAD = frozenset({"mxfp4", "compressed-tensors", "awq", "gptq"})
+
+
 def _gate_configs(
-    *, quant_config: dict[str, object], reference_config: dict[str, object]
+    *,
+    quant_config: dict[str, object],
+    reference_config: dict[str, object],
+    pre_load: bool = False,
 ) -> tuple[QuantMeta, int | None]:
     """Validate the quant/reference pair is comparable. Returns (quant_meta, reference_bits).
+
+    ``pre_load=True`` checks the RAW config.json pair. A quant block without 'bits' passes only
+    when its ``quant_method`` is one mlx-lm's ``load_model`` rewrites into a native block with
+    default bits (mxfp4, compressed-tensors, awq, gptq); the reference's bit-width check waits
+    for the post-load config.
 
     Raises ModelMismatchError if:
     - the quant repo isn't quantized or carries no 'bits' (bits=None produces a misleading report),
@@ -185,7 +198,8 @@ def _gate_configs(
     quant_meta = extract_quant_meta(quant_config)
     if quant_meta is None:
         raise ModelMismatchError("quant repo declares no quantization — nothing to measure.")
-    if quant_meta.bits is None:
+    rewritten = pre_load and quant_meta.mode in _REWRITTEN_ON_LOAD
+    if quant_meta.bits is None and not rewritten:
         raise ModelMismatchError(
             "quant repo's quantization block carries no 'bits' — cannot determine bit-width."
         )
@@ -196,7 +210,7 @@ def _gate_configs(
     if qv is None or rv is None or qv != rv:
         raise ModelMismatchError(f"vocab_size mismatch: quant={qv} vs reference={rv}.")
     reference_meta = extract_quant_meta(reference_config)
-    if reference_meta is not None and reference_meta.bits is None:
+    if reference_meta is not None and reference_meta.bits is None and not pre_load:
         raise ModelMismatchError(
             "reference repo declares quantization but no readable 'bits'; cannot tell whether "
             "it is full precision."
@@ -243,8 +257,11 @@ def _hub_weight_bytes(repo: str, revision: str | None) -> int | None:
 
     For a repo that is not cached yet, so the memory pre-flight still has sizes before any
     load. Mirrors :func:`_resolve_weight_bytes`'s glob (root `model*.safetensors` only — a
-    duplicate `consolidated.safetensors` is never loaded by mlx-lm). None on any error.
+    duplicate `consolidated.safetensors` is never loaded by mlx-lm). None on any error, and for a
+    local directory (its sizes come from disk; the path is never sent to the Hub).
     """
+    if Path(repo).is_dir():
+        return None
     try:
         from fnmatch import fnmatchcase
 
@@ -356,16 +373,18 @@ def measure_weight_fidelity(
         raise CorpusError(
             "every corpus chunk must have at least 2 tokens (one teacher-forced position)."
         )
-    reference_config = preload_check(
+    reference_checked = preload_check(
         reference_model_id, reference_revision, allow_custom_code=allow_custom_code
     )
-    quant_config_pre = preload_check(
+    quant_checked = preload_check(
         quant_model_id, quant_revision, allow_custom_code=allow_custom_code
     )
-    # Comparability gate on the raw configs BEFORE any load. mlx-lm's `load_config` reads
-    # config.json verbatim, so model_type / vocab_size / quantization agree with the post-load
-    # config; the post-load gate below stays as the authoritative re-check.
-    _gate_configs(quant_config=quant_config_pre, reference_config=reference_config)
+    reference_config = reference_checked.config
+    quant_config_pre = quant_checked.config
+    # Comparability gate on the raw configs BEFORE any load: model_type, vocab_size and that a
+    # quantization block exists. The bit-width checks are post-load only (load_model rewrites
+    # legacy quantization_config blocks); the post-load gate below is the authoritative re-check.
+    _gate_configs(quant_config=quant_config_pre, reference_config=reference_config, pre_load=True)
 
     window = corpus.provenance.chunk_length if corpus is not None else _DEFAULT_WINDOW
     if window > MAX_CHUNK_LENGTH:
@@ -386,13 +405,17 @@ def measure_weight_fidelity(
     pre_warning = _preflight_memory(
         quant_bytes=quant_bytes, reference_bytes=reference_bytes, logits_bytes=logits_bytes
     )
-    install_memory_caps()  # before any model load
+    caps_note = caps_warning(install_memory_caps())  # install before any model load
 
     ref_model, tokenizer, reference_config = load(  # type: ignore[misc]
-        reference_model_id, revision=reference_revision, return_config=True
+        reference_model_id,
+        revision=reference_checked.load_revision(reference_revision),
+        return_config=True,
     )
     quant_model, quant_tok, quant_config = load(  # type: ignore[misc]
-        quant_model_id, revision=quant_revision, return_config=True
+        quant_model_id,
+        revision=quant_checked.load_revision(quant_revision),
+        return_config=True,
     )
     quant_meta, reference_bits = _gate_configs(
         quant_config=quant_config, reference_config=reference_config
@@ -407,6 +430,13 @@ def measure_weight_fidelity(
         )
     if pre_warning is not None:
         warnings.append(pre_warning)
+    if not isinstance(vocab, int):
+        warnings.append(
+            "vocab_size is not derivable from config.json; the per-chunk logits were not "
+            "counted in the memory pre-flight."
+        )
+    if caps_note is not None:
+        warnings.append(caps_note)
     # re-resolve now that snapshots are cached, for the report (pre-flight may have seen None)
     quant_bytes = quant_bytes or _resolve_weight_bytes(quant_model_id, quant_revision)
     reference_bytes = reference_bytes or _resolve_weight_bytes(
@@ -468,9 +498,7 @@ def measure_weight_fidelity(
         peak_memory_bytes=int(mx.get_peak_memory()),
         quant_model_bytes=quant_bytes,
         reference_model_bytes=reference_bytes,
-        verdict=verdict_for(
-            agg.kl.mean, agg.kl.p99, agg.flip_rate, thresholds=_WEIGHT_TIERS_v0_2_0
-        ),
+        verdict=verdict_for(agg.kl.mean, agg.kl.p99, agg.flip_rate, thresholds=WEIGHT_TIERS),
         warnings=tuple(warnings),
         device=device_string(),
         quant_geometry=geometry,

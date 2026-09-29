@@ -34,6 +34,17 @@ SUPPORTED_GROUP_SIZES: tuple[int, ...] = (32, 64, 128)
 _TURBOQUANT_SOURCE_URL = "https://github.com/arozanov/turboquant-mlx"
 
 
+def packed_width_mismatch(head_dim: int, bits: int) -> bool:
+    """True when mlx-lm's QuantizedKVCache pre-allocation disagrees with mx.quantize.
+
+    The cache pre-allocates packed buffers of width ``head_dim // (32 // bits)``
+    (el_per_int truncation, mlx-lm models/cache.py) while ``mx.quantize`` packs to
+    ``head_dim * bits // 32``; a first append with mismatched widths dies in
+    broadcast_shapes. Affects bits=6 at e.g. head_dim=128 on mlx-lm 0.31.x.
+    """
+    return head_dim // (32 // bits) != head_dim * bits // 32
+
+
 class KVCacheMethod(Protocol):
     """One way of quantizing the per-layer KV cache, as the probe consumes it.
 
@@ -337,8 +348,6 @@ class StockKVMethod:
 
     def check(self, *, head_dim: int | None, model_type: str) -> list[str]:
         """Head-dim divisibility / bits / packed-width gates, in 0.5.x order."""
-        from mlx_quant_fidelity.probes.kv import packed_width_mismatch
-
         warnings: list[str] = []
         if head_dim is None:
             warnings.append(
@@ -642,34 +651,49 @@ def _turboquant_direct_url() -> str | None:
         return None
 
 
+def _turboquant_installed() -> bool:
+    """Whether any ``turboquant-mlx`` distribution is installed (right or wrong one)."""
+    try:
+        importlib.metadata.distribution("turboquant-mlx")
+    except importlib.metadata.PackageNotFoundError:
+        return False
+    return True
+
+
 def _canonical_source_url(url: object) -> str:
     return str(url).strip().rstrip("/").removesuffix(".git").lower()
 
 
-def _import_turboquant(*, verify_source: bool = True) -> types.ModuleType:
-    """Import ``turboquant_mlx``, first proving the distribution is the pinned git install.
+def _import_turboquant() -> types.ModuleType:
+    """Import ``turboquant_mlx``, first checking the distribution is a git install of the port.
 
     The PyPI name is an unrelated squatter whose import would run its code, so the install
     record (``direct_url.json``) is read BEFORE importing: it must be a VCS install from
-    arozanov/turboquant-mlx. ``verify_source=False`` skips that gate (provenance reporting only
-    needs the module's facts, never runs the cache).
+    arozanov/turboquant-mlx. Any commit of that repository is accepted here; a commit other
+    than the pinned one is measured with a report note (see ``_pin_mismatch_note``).
     """
-    if verify_source:
-        raw = _turboquant_direct_url()
-        info: object = None
-        if raw:
-            try:
-                info = json.loads(raw)
-            except json.JSONDecodeError:
-                info = None
-        vcs = info.get("vcs_info") if isinstance(info, dict) else None
-        url = info.get("url") if isinstance(info, dict) else None
-        if not (isinstance(vcs, dict) and _canonical_source_url(url) == _TURBOQUANT_SOURCE_URL):
+    raw = _turboquant_direct_url()
+    info: object = None
+    if raw:
+        try:
+            info = json.loads(raw)
+        except json.JSONDecodeError:
+            info = None
+    vcs = info.get("vcs_info") if isinstance(info, dict) else None
+    url = info.get("url") if isinstance(info, dict) else None
+    if not (isinstance(vcs, dict) and _canonical_source_url(url) == _TURBOQUANT_SOURCE_URL):
+        if not _turboquant_installed():
             raise MethodUnavailableError(
-                "turboquant-mlx is not installed from the arozanov/turboquant-mlx git commit "
-                "(the PyPI package of that name is an unrelated squatter, so it was not "
-                f"imported). Install the pinned port: {TURBOQUANT_INSTALL_HINT}"
+                f"turboquant_mlx is not installed. Install the pinned port: {TURBOQUANT_INSTALL_HINT}"
             )
+        raise MethodUnavailableError(
+            "turboquant-mlx is not installed from the arozanov/turboquant-mlx git repository "
+            "(the PyPI package of that name is an unrelated squatter, so it was not "
+            "imported). Only an https git install of github.com/arozanov/turboquant-mlx is "
+            "accepted (a commit other than the pinned one is measured with a report note); "
+            "editable, ssh and fork installs are refused on purpose. Install the pinned "
+            f"port: {TURBOQUANT_INSTALL_HINT}"
+        )
     try:
         import turboquant_mlx
     except ImportError as exc:
@@ -877,7 +901,7 @@ class TurboQuantKVMethod:
 
     def provenance(self) -> dict[str, str]:
         """Package / module versions, installed vs pinned commit, seeds and pinned knobs."""
-        turboquant_mlx = _import_turboquant(verify_source=False)
+        turboquant_mlx = _import_turboquant()
 
         return {
             "package": "turboquant-mlx",
@@ -1105,7 +1129,7 @@ class TurboQuantVOnlyKVMethod:
         port's inner ``TurboQuantKVCache`` seeds its V quantizer at ``seed + 1`` unconditionally,
         the same offset :attr:`TurboQuantKVMethod.provenance` records.
         """
-        turboquant_mlx = _import_turboquant(verify_source=False)
+        turboquant_mlx = _import_turboquant()
 
         return {
             "package": "turboquant-mlx",

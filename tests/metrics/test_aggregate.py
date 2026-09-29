@@ -1,6 +1,7 @@
 import math
 
 import numpy as np
+import pytest
 
 from mlx_quant_fidelity.metrics import ScalarSummary, summarize
 
@@ -45,3 +46,31 @@ def test_summarize_finite_input_is_unchanged_by_inf_handling():
     assert math.isclose(
         s.p99, 3.97, abs_tol=1e-9
     )  # linear interpolation, 0.99 * 3 = 2.97 -> 3 + 0.97*1
+
+
+def test_summarize_p99_ignores_a_single_inf_that_sits_above_the_p99_index():
+    """Bug: a lone +inf in 101 values reports p99=inf although the 99th percentile index lands
+    exactly on the finite value 99.0 (interpolation weight 0 on the inf neighbour)."""
+    import warnings
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        s = summarize(np.append(np.arange(100.0), np.inf))
+    assert s.p99 == 99.0
+    assert s.max == float("inf")
+
+
+def test_summarize_p99_is_inf_when_the_inf_neighbour_carries_weight():
+    """n=100 with the last value inf: index 98.01 interpolates toward inf, so p99 is inf."""
+    values = np.append(np.arange(99.0), np.inf)
+    assert summarize(values).p99 == float("inf")
+
+
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+def test_p99_of_finite_values_is_bit_identical_to_numpy(dtype):
+    """Bug: the hand-rolled interpolation drifts from np.percentile in the last bit on finite
+    data, silently changing every 0.9.0 report's p99."""
+    rng = np.random.default_rng(0)
+    for n in (2, 3, 7, 100, 101, 997, 4095):
+        values = rng.exponential(0.05, size=n).astype(dtype)
+        assert summarize(values).p99 == float(np.percentile(values, 99))

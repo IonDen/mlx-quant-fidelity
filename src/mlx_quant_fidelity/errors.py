@@ -18,7 +18,11 @@ class CorpusError(QuantFidelityError):
 
 
 class MemorySafetyError(QuantFidelityError):
-    """Wired-memory caps could not be installed before a model load."""
+    """Wired-memory caps could not be installed before a model load.
+
+    Reserved: not raised by the current release. When caps cannot be installed on a device
+    that reports a working set, the run continues and the report carries a warning instead.
+    """
 
 
 class ModelMismatchError(QuantFidelityError):
@@ -73,3 +77,11 @@ class NonFiniteMetricError(QuantFidelityError):
 
 class UntrustedModelCodeError(QuantFidelityError):
     """The repo's config.json names its own model code, which mlx-lm would execute on load."""
+
+
+class ModelNotAccessibleError(QuantFidelityError):
+    """A model's config.json could not be fetched or read (typo, gated repo, offline, bad path).
+
+    The message names the model id that was being read, so a two-repo command points at the
+    right repo.
+    """

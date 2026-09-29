@@ -154,7 +154,9 @@ class FakeMethodModel:
         )()
 
     def __call__(self, inp, cache=None):
-        out = mx.zeros((1, inp.shape[1], 3))
+        # width follows args.vocab_size so a test that widens the vocab gets matching logits
+        # (a 3-wide row under vocab 6 would make the NLL gather run out of bounds)
+        out = mx.zeros((1, inp.shape[1], self.args.vocab_size))
         if cache is not None and getattr(cache[0], "control_marker", False):
             if self.control_gain is None:
                 token_ids = inp[0]

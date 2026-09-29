@@ -15,9 +15,10 @@ Recorded values (main-thread run 2026-08-24, M1 Max 32 GB, mlx 0.31.2, port 0.3.
 
 import mlx.core as mx
 import pytest
+from tests.probes.port_skip import port_or_skip
 from tests.probes.test_kv_oracles import MODEL, _tiny_corpus
 
-from mlx_quant_fidelity.errors import ExactZeroError, MethodUnavailableError
+from mlx_quant_fidelity.errors import ExactZeroError
 from mlx_quant_fidelity.probes.kv import score_kv_config
 from mlx_quant_fidelity.probes.kv_methods import (
     AffineKVMethod,
@@ -32,10 +33,7 @@ pytestmark = pytest.mark.slow
 
 
 def _port_or_skip():
-    try:
-        TurboQuantKVMethod(bits=4).probe_capability([])
-    except MethodUnavailableError as exc:
-        pytest.skip(str(exc))
+    port_or_skip(TurboQuantKVMethod(bits=4))
 
 
 @pytest.fixture(scope="module")
@@ -254,7 +252,11 @@ def test_deployment_replay_completes_for_affine_and_stock_control(loaded):
     Measured 2026-08-26: both replays completed at boundary 8 (1 chunk).
     """
     model, tok = loaded
-    corpus = _tiny_corpus(tok, chunk_length=64, n_chunks=1)
+    chunk_length, n_chunks, boundary = 64, 1, 8
+    corpus = _tiny_corpus(tok, chunk_length=chunk_length, n_chunks=n_chunks)
+    # Each chunk scores chunk_length - 1 predictions; deployment counts only those at or
+    # after the boundary.
+    expected_positions = n_chunks * (chunk_length - 1 - boundary)
     affine_report = score_kv_config(
         model,
         corpus,
@@ -264,6 +266,7 @@ def test_deployment_replay_completes_for_affine_and_stock_control(loaded):
     )
     mx.clear_cache()
     assert affine_report.quantize_mode == "deployment"
+    assert affine_report.n_positions == expected_positions
     stock_report = score_kv_config(
         model,
         corpus,
@@ -275,6 +278,7 @@ def test_deployment_replay_completes_for_affine_and_stock_control(loaded):
     mx.clear_cache()
     assert stock_report.quantize_mode == "deployment"
     assert stock_report.control_kl is not None
+    assert stock_report.n_positions == expected_positions
 
 
 def test_affine_consumption_oracle_corruption_raises_kl(loaded, monkeypatch):
@@ -288,6 +292,7 @@ def test_affine_consumption_oracle_corruption_raises_kl(loaded, monkeypatch):
 
     model, tok = loaded
     corpus = _tiny_corpus(tok, chunk_length=64, n_chunks=2)
+    mx.random.seed(0)
     clean = score_kv_config(
         model, corpus, model_id=MODEL, method=AffineKVMethod(k_bits=8, v_bits=4)
     )
@@ -300,6 +305,7 @@ def test_affine_consumption_oracle_corruption_raises_kl(loaded, monkeypatch):
         return k_out, v_out + 0.05 * mx.random.normal(v_out.shape)
 
     monkeypatch.setattr(_AffineCache, "update_and_fetch", _corrupted)
+    mx.random.seed(0)  # the corruption noise is drawn during this run: pin it
     corrupted = score_kv_config(
         model, corpus, model_id=MODEL, method=AffineKVMethod(k_bits=8, v_bits=4)
     )
@@ -321,27 +327,7 @@ def test_affine_consumption_oracle_corruption_raises_kl(loaded, monkeypatch):
 
 
 def _vonly_port_or_skip():
-    """Skip ONLY when the port is absent or not at the pinned commit.
-
-    A MethodUnavailableError while the installed commit equals the pin is a real contract
-    failure (task-6 F2 -- this is what happened with the un-fixed F1 bug: the guard misreported
-    the genuine, correctly-pinned port as unavailable) and must fail the lane loudly, not be
-    swallowed as a routine skip. ``_installed_commit()`` already returns ``"unknown"`` (never
-    raises) when ``turboquant-mlx`` isn't installed or its metadata is unreadable, so comparing
-    it to the pin covers "absent" and "wrong commit" in one check.
-    """
-    from mlx_quant_fidelity.probes.kv_methods import TURBOQUANT_PINNED_COMMIT, _installed_commit
-
-    try:
-        TurboQuantVOnlyKVMethod(v_bits=4).probe_capability([])
-    except MethodUnavailableError:
-        installed = _installed_commit()
-        if installed != TURBOQUANT_PINNED_COMMIT:
-            pytest.skip(
-                f"installed turboquant_mlx commit {installed!r} is not the pinned "
-                f"{TURBOQUANT_PINNED_COMMIT}"
-            )
-        raise  # installed commit IS the pin: a real contract failure, not a routine skip
+    port_or_skip(TurboQuantVOnlyKVMethod(v_bits=4))
 
 
 @pytest.fixture(scope="module")
@@ -379,6 +365,7 @@ def test_vonly_consumption_oracle_corruption_raises_kl(loaded_with_vonly_port, m
 
     model, tok = loaded_with_vonly_port
     corpus = _tiny_corpus(tok, chunk_length=64, n_chunks=2)
+    mx.random.seed(0)
     clean = score_kv_config(model, corpus, model_id=MODEL, method=TurboQuantVOnlyKVMethod(v_bits=3))
     mx.clear_cache()
 
@@ -389,6 +376,7 @@ def test_vonly_consumption_oracle_corruption_raises_kl(loaded_with_vonly_port, m
         return k_out, v_out + 0.05 * mx.random.normal(v_out.shape)
 
     monkeypatch.setattr(vonly_mod.VOnlyTurboQuantCache, "update_and_fetch", _corrupted)
+    mx.random.seed(0)  # the corruption noise is drawn during this run: pin it
     corrupted = score_kv_config(
         model, corpus, model_id=MODEL, method=TurboQuantVOnlyKVMethod(v_bits=3)
     )

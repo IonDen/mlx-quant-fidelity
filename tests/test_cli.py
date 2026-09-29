@@ -557,7 +557,7 @@ def test_repo_not_found_is_a_user_error(monkeypatch, capsys, argv):
     monkeypatch.setattr(cli, "measure_weight_fidelity", _raise)
     assert cli.main(argv) == 2
     err = capsys.readouterr().err
-    assert err.startswith("error: could not load 'no-such/model': 404 Client Error")
+    assert err.startswith("error: 404 Client Error")
     assert "typo, gated repo, or offline?" in err
     assert "internal error" not in err
 
@@ -572,7 +572,7 @@ def test_kv_hub_validation_and_offline_are_user_errors(monkeypatch, capsys, exc_
     monkeypatch.setattr(cli, "measure_kv_fidelity", _raise)
     assert cli.main(["kv", "bad id"]) == 2
     err = capsys.readouterr().err
-    assert "could not load 'bad id': bad id (typo" in err
+    assert err.startswith("error: bad id (typo")
     assert "second line" not in err  # first line only
 
 
@@ -582,7 +582,7 @@ def test_missing_local_path_is_a_user_error(monkeypatch, capsys):
 
     monkeypatch.setattr(cli, "measure_kv_fidelity", _raise)
     assert cli.main(["kv", "/no/such/dir"]) == 2
-    assert "could not load '/no/such/dir'" in capsys.readouterr().err
+    assert capsys.readouterr().err.startswith("error: config.json not found (typo")
 
 
 def test_unrelated_exception_still_propagates(monkeypatch):
@@ -634,24 +634,19 @@ def _all_actions(parser):
                 yield from _all_actions(sub)
 
 
-def test_every_cli_option_has_help():
+def test_every_cli_option_has_help(monkeypatch):
     """Reds if any option or positional lacks help= (a bare `--flag` in --help explains nothing)."""
     import argparse
 
     captured: dict[str, argparse.ArgumentParser] = {}
-    real = argparse.ArgumentParser.parse_args
 
     def spy(self, args=None, namespace=None):
         captured.setdefault("root", self)
         raise SystemExit(0)
 
-    argparse.ArgumentParser.parse_args = spy  # type: ignore[method-assign]
-    try:
+    monkeypatch.setattr(argparse.ArgumentParser, "parse_args", spy)
+    with pytest.raises(SystemExit):
         cli.main(["kv", "m"])
-    except SystemExit:
-        pass
-    finally:
-        argparse.ArgumentParser.parse_args = real  # type: ignore[method-assign]
     missing = [
         a.option_strings or a.dest
         for a in _all_actions(captured["root"])
@@ -680,17 +675,40 @@ def _load_must_not_run(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(mlx_lm, "load", _boom)
 
+    # Nor may the pre-load config fetch or any Hub download: the method parameters are checked
+    # model-free, before either.
+    import huggingface_hub
+
+    from mlx_quant_fidelity.probes import kv as kv_probe
+
+    def _no_fetch(*_a: object, **_k: object) -> None:
+        raise AssertionError("the Hub was contacted for a request that should be refused up front")
+
+    monkeypatch.setattr(kv_probe, "preload_check", _no_fetch)
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", _no_fetch)
+
 
 @pytest.mark.parametrize(
-    "flags", [["--kv-group-size", "0"], ["--kv-group-size", "16"], ["--kv-bits", "5"]]
+    ("flags", "rejected"),
+    [
+        (["--kv-group-size", "0"], "0"),
+        (["--kv-group-size", "16"], "16"),
+        (["--kv-bits", "5"], "5"),
+    ],
 )
 def test_cli_kv_bad_params_exit_2_without_loading(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], flags: list[str]
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    flags: list[str],
+    rejected: str,
 ) -> None:
-    """Reds if bad bits / group size only surface after the model load (or as a traceback)."""
+    """Reds if bad bits / group size only surface after the config fetch or model load (or as a
+    traceback), or the error does not name the rejected value."""
     _load_must_not_run(monkeypatch)
     assert cli.main(["kv", "org/never-fetched", *flags]) == 2
-    assert capsys.readouterr().err.startswith("error:")
+    err = capsys.readouterr().err
+    assert err.startswith("error:")
+    assert rejected in err
 
 
 def test_cli_kv_turboquant_unavailable_exits_2_without_loading(
@@ -721,3 +739,62 @@ def test_compare_configs_error_names_the_configs_flag(
     """Reds if the CLI drops the `--configs entry` prefix the parser no longer supplies."""
     assert cli.main(["compare", "kv", "m", "--configs", "4:64,affine:9:4"]) == 2
     assert "--configs entry" in capsys.readouterr().err
+
+
+_HUB_404 = (
+    "404 Client Error. (Request ID: Root=1-abc)\n\n"
+    "Repository Not Found for url: https://huggingface.co/bad/ref/resolve/main/config.json.\n"
+    "Please make sure you specified the correct `repo_id`."
+)
+
+
+def test_weights_missing_reference_names_the_reference_not_the_quant(monkeypatch, capsys, tmp_path):
+    """Bug: the CLI blamed the FIRST model id ('good/q') for a missing REFERENCE repo."""
+    import huggingface_hub
+    from huggingface_hub.errors import RepositoryNotFoundError
+
+    good = tmp_path / "config.json"
+    good.write_text(json.dumps({"model_type": "llama", "vocab_size": 3}))
+
+    def fake_dl(repo, filename, **kw):
+        if repo == "bad/ref":
+            raise RepositoryNotFoundError(_HUB_404, response=_hub_response(404))
+        return str(good)
+
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", fake_dl)
+    assert cli.main(["weights", "good/q", "--reference", "bad/ref"]) == 2
+    err = capsys.readouterr().err
+    assert "bad/ref" in err
+    assert "good/q" not in err
+    assert "Repository Not Found for url" in err  # not just the "404 Client Error." first line
+    assert "Request ID" not in err
+    assert "internal error" not in err
+
+
+def test_unattributable_load_failure_is_reported_neutrally(monkeypatch, capsys):
+    """Bug: a failure raised inside the probe (which repo is unknown) named one model id."""
+    from huggingface_hub.errors import RepositoryNotFoundError
+
+    def _raise(*_a, **_k):
+        raise RepositoryNotFoundError("404 Client Error", response=_hub_response(404))
+
+    monkeypatch.setattr(cli, "measure_weight_fidelity", _raise)
+    assert cli.main(["weights", "good/q", "--reference", "bad/ref"]) == 2
+    err = capsys.readouterr().err
+    assert err.startswith("error: 404 Client Error (typo, gated repo, or offline?)")
+    assert "good/q" not in err
+
+
+@pytest.mark.parametrize(
+    ("argv", "prefix"),
+    [
+        (["kv", "m", "--kv-group-size", "48"], "error: --kv-group-size: "),
+        (["kv", "m", "--kv-method", "turboquant", "--kv-bits", "9"], "error: --kv-method: "),
+        (["kv", "m", "--kv-method", "nonexistent"], "error: --kv-method: "),
+    ],
+)
+def test_kv_flag_path_errors_name_the_offending_flag_first(capsys, argv, prefix):
+    """Bug: a rejected flag value surfaces as a bare library message ('unsupported group_size=48')
+    with no hint which command-line flag to change."""
+    assert cli.main(argv) == 2
+    assert capsys.readouterr().err.startswith(prefix)

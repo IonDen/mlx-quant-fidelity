@@ -80,7 +80,12 @@ def _bos_policy(tokenizer: _TokenizerProtocol) -> str:
         without_special = tokenizer.encode("a", add_special_tokens=False)
     except TypeError:
         return "none"
-    return "first-chunk" if len(with_special) > len(without_special) else "none"
+    # A special token appended at the END (EOS) also lengthens the encoding; only a changed FIRST
+    # token means the default encode prepends one.
+    prepends = len(with_special) > len(without_special) and (
+        not without_special or with_special[0] != without_special[0]
+    )
+    return "first-chunk" if prepends else "none"
 
 
 def load_wikitext2(

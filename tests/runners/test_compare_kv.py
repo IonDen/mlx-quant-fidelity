@@ -6,12 +6,13 @@ import json
 import types
 
 import pytest
+from tests.factories import make_fid_report
 from tests.probes.fake_turboquant import install_fake_port
-from tests.test_cli import _fake_report
 
 from mlx_quant_fidelity.errors import CompareConfigError, CorpusError, LogitsBudgetError
 from mlx_quant_fidelity.metrics import ScalarSummary
 from mlx_quant_fidelity.policy import verdict_for
+from mlx_quant_fidelity.probes._preload import PreloadResult
 from mlx_quant_fidelity.probes.kv_methods import StockKVMethod, TurboQuantKVMethod
 from mlx_quant_fidelity.runners import compare as cmp
 
@@ -92,7 +93,9 @@ def _patch_kv_compare(
 ) -> list:
     """Patch all real-model helpers; return the call list for score_kv_config."""
     monkeypatch.setattr(cmp, "install_memory_caps", lambda: (0, 0))
-    monkeypatch.setattr(cmp, "preload_check", lambda model, revision, *, allow_custom_code: {})
+    monkeypatch.setattr(
+        cmp, "preload_check", lambda model, revision, *, allow_custom_code: PreloadResult({}, None)
+    )
     monkeypatch.setattr(cmp, "_load_model", lambda model_id, revision: (object(), object()))
     monkeypatch.setattr(cmp, "_kv_dims", lambda model: dims)
     calls: list[tuple[int, int]] = []
@@ -119,7 +122,7 @@ def test_compare_kv_refuses_custom_code_before_load(monkeypatch, tmp_path):
     from mlx_quant_fidelity.errors import UntrustedModelCodeError
     from mlx_quant_fidelity.probes import _preload
 
-    monkeypatch.setattr(_preload, "read_model_config", lambda m, r=None: {"model_file": "m.py"})
+    monkeypatch.setattr(_preload, "_fetch_config", lambda m, r=None: ({"model_file": "m.py"}, None))
 
     def boom(*a, **k):
         raise AssertionError("must not load")
@@ -297,7 +300,9 @@ def test_compare_kv_model_loaded_once(monkeypatch, tmp_path):
         return (object(), object())
 
     monkeypatch.setattr(cmp, "install_memory_caps", lambda: (0, 0))
-    monkeypatch.setattr(cmp, "preload_check", lambda model, revision, *, allow_custom_code: {})
+    monkeypatch.setattr(
+        cmp, "preload_check", lambda model, revision, *, allow_custom_code: PreloadResult({}, None)
+    )
     monkeypatch.setattr(cmp, "_load_model", fake_load)
     monkeypatch.setattr(cmp, "_kv_dims", lambda model: (16, 8, 64))
 
@@ -346,7 +351,9 @@ def test_compare_kv_threads_revision_and_tokenizer(monkeypatch, tmp_path):
         return object()
 
     monkeypatch.setattr(cmp, "install_memory_caps", lambda: (0, 0))
-    monkeypatch.setattr(cmp, "preload_check", lambda model, revision, *, allow_custom_code: {})
+    monkeypatch.setattr(
+        cmp, "preload_check", lambda model, revision, *, allow_custom_code: PreloadResult({}, None)
+    )
     monkeypatch.setattr(cmp, "_load_model", fake_load_model)
     monkeypatch.setattr(cmp, "_kv_dims", lambda model: (16, 8, 64))
     monkeypatch.setattr(cmp, "_load_corpus_for_kv", fake_load_corpus)
@@ -471,7 +478,9 @@ def test_compare_kv_corrupt_at_collect_yields_failed_result(monkeypatch, tmp_pat
     monkeypatch.setattr(pathlib.Path, "read_text", patched_read_text)
 
     monkeypatch.setattr(cmp, "install_memory_caps", lambda: (0, 0))
-    monkeypatch.setattr(cmp, "preload_check", lambda model, revision, *, allow_custom_code: {})
+    monkeypatch.setattr(
+        cmp, "preload_check", lambda model, revision, *, allow_custom_code: PreloadResult({}, None)
+    )
     monkeypatch.setattr(cmp, "_load_model", lambda model_id, revision: (object(), object()))
     monkeypatch.setattr(cmp, "_kv_dims", lambda model: (16, 8, 64))
     monkeypatch.setattr(cmp, "_load_corpus_for_kv", lambda tok, mid, mc, *, chunk_length: object())
@@ -522,7 +531,9 @@ def test_compare_kv_all_resumed_skips_model_load(monkeypatch, tmp_path):
         raise AssertionError("score_kv_config should not be called when all configs are cached")
 
     monkeypatch.setattr(cmp, "install_memory_caps", lambda: (0, 0))
-    monkeypatch.setattr(cmp, "preload_check", lambda model, revision, *, allow_custom_code: {})
+    monkeypatch.setattr(
+        cmp, "preload_check", lambda model, revision, *, allow_custom_code: PreloadResult({}, None)
+    )
     monkeypatch.setattr(cmp, "_load_model", fail_if_loaded)
     monkeypatch.setattr(cmp, "_kv_dims", lambda model: (16, 8, 64))
     monkeypatch.setattr(cmp, "_load_corpus_for_kv", lambda tok, mid, mc, *, chunk_length: object())
@@ -570,21 +581,21 @@ def test_compare_kv_resume_data_integrity(monkeypatch, tmp_path):
 # ── Fix 2: defensive ValueError for non-numeric cost in envelope ───────────────
 
 
-def test_kv_envelope_to_result_raises_on_bad_cost_type():
-    """_kv_envelope_to_result raises ValueError when cost is a non-numeric type (fix 2).
+@pytest.mark.parametrize("bad_cost", ["not_a_number", True, False, [1], {"a": 1}])
+def test_kv_envelope_with_bad_cost_is_corrupt_partial(bad_cost):
+    """A non-numeric cost (a bool included: `True` is an int to isinstance) becomes a
+    CorruptPartial row instead of raising, like every other malformed-partial case.
 
-    Under normal operation cost is always int|None, but a hand-edited or externally
-    produced partial could carry a string — the assert was stripped under python -O,
-    the ValueError fires unconditionally.
-
-    This test calls _kv_envelope_to_result directly to assert the function itself raises.
-    The collect-loop isolation behaviour (ValueError caught → failed result) is covered by
-    test_compare_kv_collect_loop_isolates_bad_cost_partial.
+    Changed from the old `pytest.raises(ValueError, match="unexpected cost type")` contract
+    (Task 20): the row is isolated at the converter, not by the collect loop's catch.
     """
     rep = _fid((4, 64), 0.05)
-    env = {"status": "ok", "report": dataclasses.asdict(rep), "cost": "not_a_number"}
-    with pytest.raises(ValueError, match="unexpected cost type"):
-        cmp._kv_envelope_to_result("4:64", env)
+    env = {"status": "ok", "report": dataclasses.asdict(rep), "cost": bad_cost}
+    result = cmp._kv_envelope_to_result("4:64", env)
+    assert result.status == "failed"
+    assert result.error_type == "CorruptPartial"
+    assert result.point is None
+    assert "cost" in (result.message or "")
 
 
 # ── Fix A: collect-loop isolates bad-cost partial instead of aborting ─────────
@@ -594,8 +605,8 @@ def test_compare_kv_collect_loop_isolates_bad_cost_partial(monkeypatch, tmp_path
     """A valid-JSON partial with a non-numeric cost becomes a 'failed' result in the collect
     loop; the other config's result is unaffected and the overall run completes.
 
-    This distinguishes the collect-loop path from _kv_envelope_to_result's own ValueError
-    guard: the collect loop must CATCH ValueError and isolate it, not propagate it.
+    The converter (_kv_envelope_to_result) isolates the bad cost as a CorruptPartial row; this
+    exercises that through the whole collect loop, which must not propagate it.
     """
     rep_4 = _fid((4, 64), 0.05)
     rep_8 = _fid((8, 64), 0.01)
@@ -842,7 +853,7 @@ def test_kv_envelope_with_invalid_verdict_is_corrupt_partial():
 def _kv_partial_env(bits: int, gs: int, *, kl_mean: float, cost: int) -> dict[str, object]:
     """A cached, identity-valid KV partial envelope (dict) for compare_kv_fidelity('org/m', ...)."""
     rep = dataclasses.replace(
-        _fake_report(),
+        make_fid_report(),
         kv_bits=bits,
         kv_group_size=gs,
         kl=ScalarSummary(kl_mean, kl_mean, kl_mean, kl_mean),
@@ -922,7 +933,9 @@ def test_compare_kv_stress_partial_recomputed_for_deployment(monkeypatch, tmp_pa
         )  # identity mismatch → pending non-empty → load attempted
 
     monkeypatch.setattr(cmp, "install_memory_caps", lambda: (0, 0))
-    monkeypatch.setattr(cmp, "preload_check", lambda model, revision, *, allow_custom_code: {})
+    monkeypatch.setattr(
+        cmp, "preload_check", lambda model, revision, *, allow_custom_code: PreloadResult({}, None)
+    )
     monkeypatch.setattr(cmp, "_load_model", _fake_load)
     with pytest.raises(RuntimeError, match="stop after load"):
         cmp.compare_kv_fidelity(
@@ -962,11 +975,11 @@ def test_kv_envelope_non_dict_is_corrupt_partial():
 # ── regression: chunk_length as a first-class knob ─────────────────────────────
 
 
-def test_kv_partial_schema_version_is_4():
+def test_kv_partial_schema_version_is_5():
     # Literal pin (mirrors the weight-side == 1 pin in test_compare_weight.py): a future
     # unrelated edit that accidentally bumps or resets this constant goes red here, not just
     # against whatever the constant happens to be at the time.
-    assert cmp._KV_PARTIAL_SCHEMA_VERSION == 4
+    assert cmp._KV_PARTIAL_SCHEMA_VERSION == 5
 
 
 def test_kv_partial_identity_includes_chunk_length(monkeypatch, tmp_path):
@@ -978,9 +991,9 @@ def test_kv_partial_identity_includes_chunk_length(monkeypatch, tmp_path):
     cmp.compare_kv_fidelity("m", [(4, 64), (8, 64)], chunk_length=1024, artifacts_dir=tmp_path)
     env = json.loads((tmp_path / "4_64.json").read_text())
     assert env["run_identity"]["chunk_length"] == 1024
-    # Literal (not compared against the live constant -- see test_kv_partial_schema_version_is_4
+    # Literal (not compared against the live constant -- see test_kv_partial_schema_version_is_5
     # for that pin; this asserts the ACTUAL persisted value, not a hardcoded guess).
-    assert env["run_identity"]["schema_version"] == 4
+    assert env["run_identity"]["schema_version"] == 5
 
 
 def test_chunk_length_change_invalidates_partials(monkeypatch, tmp_path):
@@ -1153,12 +1166,12 @@ def test_compare_kv_accepts_mixed_tuple_and_method_list(monkeypatch, tmp_path):
     assert (tmp_path / "turboquant_4.json").exists()
 
 
-def test_compare_kv_partial_identity_carries_method_and_schema_4(monkeypatch, tmp_path):
+def test_compare_kv_partial_identity_carries_method_and_schema_5(monkeypatch, tmp_path):
     reports = {(4, 64): _fid((4, 64), 0.09), (8, 64): _fid((8, 64), 0.01)}
     _patch_kv_compare(monkeypatch, reports)
     cmp.compare_kv_fidelity("m", [(4, 64), (8, 64)], artifacts_dir=tmp_path)
     ident = json.loads((tmp_path / "4_64.json").read_text())["run_identity"]
-    assert ident["schema_version"] == 4
+    assert ident["schema_version"] == 5
     assert ident["method"] == "stock"
     assert ident["params"] == {"bits": 4, "group_size": 64}
     assert "bits" not in ident
@@ -1308,7 +1321,9 @@ def test_compare_kv_runs_control_only_for_stock(monkeypatch, tmp_path):
     """
     install_fake_port(monkeypatch)  # ensure_available runs before the (patched) load
     monkeypatch.setattr(cmp, "install_memory_caps", lambda: (0, 0))
-    monkeypatch.setattr(cmp, "preload_check", lambda model, revision, *, allow_custom_code: {})
+    monkeypatch.setattr(
+        cmp, "preload_check", lambda model, revision, *, allow_custom_code: PreloadResult({}, None)
+    )
     monkeypatch.setattr(cmp, "_load_model", lambda model_id, revision: (object(), object()))
     monkeypatch.setattr(cmp, "_kv_dims", lambda model: (16, 8, 64))
     monkeypatch.setattr(
@@ -1343,7 +1358,9 @@ def test_compare_kv_ranks_on_quantizer_only_kl(monkeypatch, tmp_path):
     """
     install_fake_port(monkeypatch)  # ensure_available runs before the (patched) load
     monkeypatch.setattr(cmp, "install_memory_caps", lambda: (0, 0))
-    monkeypatch.setattr(cmp, "preload_check", lambda model, revision, *, allow_custom_code: {})
+    monkeypatch.setattr(
+        cmp, "preload_check", lambda model, revision, *, allow_custom_code: PreloadResult({}, None)
+    )
     monkeypatch.setattr(cmp, "_load_model", lambda model_id, revision: (object(), object()))
     monkeypatch.setattr(cmp, "_kv_dims", lambda model: (16, 8, 64))
     monkeypatch.setattr(
@@ -1431,7 +1448,7 @@ def test_compare_kv_schema_3_partial_recomputes(monkeypatch, tmp_path):
     reports = {(4, 64): _fid((4, 64), 0.09), (8, 64): _fid((8, 64), 0.01)}
     calls = _patch_kv_compare(monkeypatch, reports)
     cmp.compare_kv_fidelity("m", [(4, 64), (8, 64)], artifacts_dir=tmp_path)
-    assert (4, 64) in calls, "schema_version=3 partial must not resume under schema 4"
+    assert (4, 64) in calls, "schema_version=3 partial must not resume under a newer schema"
 
 
 def test_kv_partial_with_ranked_footing_resumes(monkeypatch, tmp_path):
@@ -1540,7 +1557,9 @@ def test_compare_kv_control_gate_skip_names_real_remedy(monkeypatch, tmp_path):
     prov = CorpusProvenance("x", "test", "m", 4096, 4096, "none", "drop", "raw", 4096)
     corpus = Corpus(chunks=(mx.arange(8) % 3,), provenance=prov)
     monkeypatch.setattr(cmp, "install_memory_caps", lambda: (0, 0))
-    monkeypatch.setattr(cmp, "preload_check", lambda model, revision, *, allow_custom_code: {})
+    monkeypatch.setattr(
+        cmp, "preload_check", lambda model, revision, *, allow_custom_code: PreloadResult({}, None)
+    )
     monkeypatch.setattr(
         cmp, "_load_model", lambda model_id, revision: (types.SimpleNamespace(args=args), object())
     )
@@ -1622,3 +1641,138 @@ def test_compare_kv_all_methods_unavailable_never_loads_the_model(monkeypatch, t
         "m", [TurboQuantKVMethod(bits=4), TurboQuantKVMethod(bits=3)], artifacts_dir=tmp_path
     )
     assert {r.status for r in report.results} == {"failed"}
+
+
+def test_compare_kv_forwards_quantize_start_and_control(monkeypatch, tmp_path):
+    """Reds if compare_kv_fidelity stops handing quantize_start (or control) to score_kv_config:
+    every row would silently be measured in stress mode while the comparison claims deployment."""
+    _patch_kv_compare(monkeypatch, {})
+    seen: dict[str, dict[str, object]] = {}
+
+    def fake_score(model, corpus, *, method, **kw):  # type: ignore[return]
+        seen[method.label] = kw
+        start = kw.get("quantize_start", 0)  # absent kw -> stress, like the real default
+        return dataclasses.replace(
+            _fid((method.params["bits"], method.params["group_size"]), 0.05),
+            quantize_start=start,
+            quantize_mode="stress" if start == 0 else "deployment",
+        )
+
+    monkeypatch.setattr(cmp, "score_kv_config", fake_score)
+    report = cmp.compare_kv_fidelity(
+        "m", [(4, 64), (8, 64)], quantize_start=8, artifacts_dir=tmp_path
+    )
+    assert {k: (v["quantize_start"], v["control"]) for k, v in seen.items()} == {
+        "4:64": (8, True),
+        "8:64": (8, True),
+    }
+    for result in report.results:
+        assert result.report is not None
+        assert (result.report.quantize_start, result.report.quantize_mode) == (8, "deployment")
+
+
+def test_sweep_bits_is_the_stock_bit_list():
+    # bug caught: a second, hand-copied bit list that drifts from the stock method's own
+    from mlx_quant_fidelity.probes.kv_methods import _STOCK_BITS
+
+    assert cmp._SWEEP_BITS is _STOCK_BITS
+
+
+def test_compare_kv_loads_exactly_the_checked_commit(monkeypatch, tmp_path):
+    """Bug: compare kv loads the user revision (None -> main) rather than the commit the
+    pre-load check inspected, so a repo swapped in between is loaded unchecked."""
+    import huggingface_hub
+
+    snap = tmp_path / "hub" / "snapshots" / "abc123"
+    snap.mkdir(parents=True)
+    (snap / "config.json").write_text(json.dumps({"vocab_size": 3}))
+    monkeypatch.setattr(
+        huggingface_hub, "hf_hub_download", lambda *a, **k: str(snap / "config.json")
+    )
+    monkeypatch.setattr(cmp, "install_memory_caps", lambda: (0, 0))
+    seen = {}
+
+    class _StopError(Exception):
+        pass
+
+    def fake_load(model_id, revision):
+        seen["revision"] = revision
+        raise _StopError
+
+    monkeypatch.setattr(cmp, "_load_model", fake_load)
+    with pytest.raises(_StopError):
+        cmp.compare_kv_fidelity("org/m", [(4, 64), (8, 64)], artifacts_dir=tmp_path / "art")
+    assert seen["revision"] == "abc123"
+
+
+def test_compare_kv_resume_never_imports_a_squatter_turboquant(monkeypatch, tmp_path):
+    """Bug: the resume identity calls provenance(), which imported turboquant_mlx without the
+    install-source check, so a squatter distribution executed its code on a plain re-run."""
+    import sys
+
+    from mlx_quant_fidelity.probes.kv_methods import TurboQuantKVMethod
+
+    monkeypatch.delitem(sys.modules, "turboquant_mlx", raising=False)
+    monkeypatch.setattr("mlx_quant_fidelity.probes.kv_methods._turboquant_installed", lambda: True)
+    monkeypatch.setattr(
+        "mlx_quant_fidelity.probes.kv_methods._turboquant_direct_url",
+        lambda: json.dumps({"url": "https://github.com/someone/turboquant-mlx", "vcs_info": {}}),
+    )
+    real_import = __import__
+
+    def guarded(name, *a, **k):
+        if name.split(".")[0] == "turboquant_mlx":
+            raise AssertionError("turboquant_mlx imported during the resume-identity check")
+        return real_import(name, *a, **k)
+
+    monkeypatch.setattr("builtins.__import__", guarded)
+    _patch_kv_compare(monkeypatch, {(4, 64): _fid((4, 64), 0.05)})
+    tq = TurboQuantKVMethod(bits=4)
+    (tmp_path / cmp._kv_partial_filename(tq)).write_text(json.dumps({"status": "ok"}))
+    result = cmp.compare_kv_fidelity("org/m", [(4, 64), tq], artifacts_dir=tmp_path)
+    assert "turboquant_mlx" not in sys.modules
+    failed = [r for r in result.results if r.status == "failed"]
+    assert failed
+    assert all("squatter" in (r.message or "") for r in failed)
+    assert "https git install" in failed[0].message
+
+
+def test_compare_kv_schema_4_partial_recomputes(monkeypatch, tmp_path):
+    """Bug: a 0.9-era partial (report provenance without bos_policy / dataset_revision /
+    n_tokens) resumes into a report that silently lacks the new provenance."""
+    rep = _fid((4, 64), 0.09)
+    (tmp_path / "4_64.json").write_text(
+        _kv_partial_with_identity(rep, 1000, bits=4, group_size=64, schema_version=4)
+    )
+    reports = {(4, 64): _fid((4, 64), 0.09), (8, 64): _fid((8, 64), 0.01)}
+    calls = _patch_kv_compare(monkeypatch, reports)
+    cmp.compare_kv_fidelity("m", [(4, 64), (8, 64)], artifacts_dir=tmp_path)
+    assert (4, 64) in calls
+
+
+def test_compare_kv_carries_the_caps_warning_into_every_config_report(monkeypatch, tmp_path):
+    """Bug: compare kv drops install_memory_caps' result, so an unbounded run (caps not
+    installed on a device that reports a working set) looks the same as a bounded one."""
+    from mlx_quant_fidelity import _memory_caps
+
+    reports = {(4, 64): _fid((4, 64), 0.09), (8, 64): _fid((8, 64), 0.01)}
+    _patch_kv_compare(monkeypatch, reports)  # install_memory_caps -> (0, 0)
+    monkeypatch.setattr(
+        _memory_caps.mx, "device_info", lambda: {"max_recommended_working_set_size": 25 * 1024**3}
+    )
+    report = cmp.compare_kv_fidelity("m", [(4, 64), (8, 64)], artifacts_dir=tmp_path)
+    assert len(report.results) == 2
+    for result in report.results:
+        assert result.report is not None
+        assert any("memory caps could not be installed" in w for w in result.report.warnings)
+
+
+def test_compare_kv_adds_no_caps_warning_when_caps_are_installed(monkeypatch, tmp_path):
+    """Bug: the caps warning is attached to every run, not only an unbounded one."""
+    reports = {(4, 64): _fid((4, 64), 0.09), (8, 64): _fid((8, 64), 0.01)}
+    _patch_kv_compare(monkeypatch, reports)
+    monkeypatch.setattr(cmp, "install_memory_caps", lambda: (20, 22))
+    report = cmp.compare_kv_fidelity("m", [(4, 64), (8, 64)], artifacts_dir=tmp_path)
+    for result in report.results:
+        assert result.report is not None
+        assert not any("memory caps" in w for w in result.report.warnings)

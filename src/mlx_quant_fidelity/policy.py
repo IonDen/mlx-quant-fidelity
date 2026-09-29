@@ -25,10 +25,12 @@ _KV_TIERS = Tiers(
 # Calibrated from the 0.2.0 sample reports (Llama-3.2-1B/3B 4bit+8bit vs bf16, Qwen2.5-7B q4-vs-q8):
 # q8 lands "good" (kl_mean ~1e-3, ~2% flips), q4 "marginal" (kl_mean ~0.08-0.15, 15-21% flips),
 # lower bit-widths "bad". Weight quant drifts more than KV, so the ceilings are looser.
-_WEIGHT_TIERS_v0_2_0 = Tiers(
+WEIGHT_TIERS = Tiers(
     good={"kl_mean": 0.01, "kl_p99": 0.10, "flip_rate": 0.05},
     marginal={"kl_mean": 0.20, "kl_p99": 1.50, "flip_rate": 0.25},
 )
+
+_WEIGHT_TIERS_v0_2_0 = WEIGHT_TIERS  # historical name, kept for callers that pinned it
 
 
 def verdict_for(

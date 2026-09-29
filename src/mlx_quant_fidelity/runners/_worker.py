@@ -59,7 +59,7 @@ def run_weight_worker(argv: list[str] | None = None) -> int:
     return 0
 
 
-def _console_entry() -> None:  # pragma: no cover - process-exit wrapper
+def _console_entry() -> None:
     import os
 
     from mlx_quant_fidelity._watchdog import MemoryWatchdog

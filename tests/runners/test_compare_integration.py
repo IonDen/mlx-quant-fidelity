@@ -22,7 +22,8 @@ def test_compare_kv_two_configs_real_model(tmp_path):
     assert report.mode == "kv"
     assert report.model == _MODEL
     assert len(report.frontier) >= 1
-    assert all(r.status in ("ok", "failed") for r in report.results)
+    assert [r.status for r in report.results] == ["ok", "ok"]
+    assert {r.label for r in report.results} == {"4:64", "8:64"}
 
 
 @pytest.mark.slow
@@ -33,4 +34,4 @@ def test_compare_weight_two_targets_real_model(tmp_path):
     assert report.reference == _REF
     assert {r.label for r in report.results} == {_MODEL, _Q8}
     assert len(report.frontier) >= 1
-    assert all(r.status in ("ok", "failed") for r in report.results)
+    assert [r.status for r in report.results] == ["ok", "ok"]

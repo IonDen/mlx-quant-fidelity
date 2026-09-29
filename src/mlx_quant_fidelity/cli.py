@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import math
 import os
 import sys
 from typing import TYPE_CHECKING
@@ -29,6 +30,7 @@ from mlx_quant_fidelity.report import (
     render_weight_markdown,
 )
 from mlx_quant_fidelity.runners.compare import (
+    MAX_WORKER_TIMEOUT_S,
     compare_kv_fidelity,
     compare_weight_fidelity,
     filter_configs_by_kv_budget,
@@ -85,13 +87,19 @@ def _resolve_kv_method(args: argparse.Namespace) -> KVCacheMethod:
             raise ValueError("--kv-seed is only valid with --kv-method turboquant")
         bits = 4 if args.kv_bits is None else args.kv_bits
         gs = 64 if args.kv_group_size is None else args.kv_group_size
-        return StockKVMethod(bits=bits, group_size=gs)
+        try:
+            return StockKVMethod(bits=bits, group_size=gs)
+        except CompareConfigError as exc:  # only the group size is validated at construction
+            raise CompareConfigError(f"--kv-group-size: {exc}") from exc
     if value == "turboquant":
         if args.kv_group_size is not None:
             raise ValueError("--kv-group-size is only valid with --kv-method stock")
         bits = 4 if args.kv_bits is None else args.kv_bits
         seed = TURBOQUANT_DEFAULT_SEED if args.kv_seed is None else args.kv_seed
-        return TurboQuantKVMethod(bits=bits, seed=seed)
+        try:
+            return TurboQuantKVMethod(bits=bits, seed=seed)
+        except CompareConfigError as exc:
+            raise CompareConfigError(f"--kv-method: {exc}") from exc
     if value == "affine":
         raise ValueError(
             "--kv-method affine has no flag-based form (it needs both k_bits and v_bits); "
@@ -103,8 +111,11 @@ def _resolve_kv_method(args: argparse.Namespace) -> KVCacheMethod:
         if args.kv_bits is None:
             raise ValueError("--kv-method turboquant-vonly requires --kv-bits (used as v_bits)")
         seed = TURBOQUANT_DEFAULT_SEED if args.kv_seed is None else args.kv_seed
-        return TurboQuantVOnlyKVMethod(v_bits=args.kv_bits, seed=seed)
-    raise ValueError(f"unknown --kv-method {value!r}; known: {sorted(METHODS)}")
+        try:
+            return TurboQuantVOnlyKVMethod(v_bits=args.kv_bits, seed=seed)
+        except CompareConfigError as exc:
+            raise CompareConfigError(f"--kv-method: {exc}") from exc
+    raise ValueError(f"--kv-method: unknown method {value!r}; known: {sorted(METHODS)}")
 
 
 def _stderr_progress(message: str) -> None:
@@ -112,10 +123,23 @@ def _stderr_progress(message: str) -> None:
     print(message, file=sys.stderr, flush=True)
 
 
+def _non_negative_seconds(value: str) -> float:
+    """Argparse type for --worker-timeout: a finite, non-negative number of seconds."""
+    seconds = float(value)
+    if not (math.isfinite(seconds) and seconds >= 0):  # rejects NaN and inf too
+        raise argparse.ArgumentTypeError(f"must be >= 0 (0 disables the limit), got {value}")
+    if seconds > MAX_WORKER_TIMEOUT_S:
+        # macOS subprocess.run(timeout=...) overflows above ~2,147,483 s.
+        raise argparse.ArgumentTypeError(
+            f"must be <= {MAX_WORKER_TIMEOUT_S:,.0f} seconds (use 0 to disable the limit), got {value}"
+        )
+    return seconds
+
+
 def _user_error_types() -> tuple[type[BaseException], ...]:
     """Exception types that mean "the model could not be found or read", not a library bug.
 
-    Lazy-imports huggingface_hub / mlx_lm so importing this module stays cheap.
+    Lazy-imports huggingface_hub so importing this module stays cheap.
     """
     from huggingface_hub import errors as hub_errors
 
@@ -129,23 +153,7 @@ def _user_error_types() -> tuple[type[BaseException], ...]:
         hub_errors.HfHubHTTPError,
         FileNotFoundError,
     ]
-    try:
-        from mlx_lm.utils import ModelNotFoundError  # type: ignore[attr-defined,unused-ignore]
-    except ImportError:
-        pass
-    else:
-        types.append(ModelNotFoundError)
     return tuple(types)
-
-
-def _first_model_id(args: argparse.Namespace) -> str:
-    """The first positional model id of the chosen command, for error messages."""
-    for name in ("model", "quant_model"):
-        value = getattr(args, name, None)
-        if isinstance(value, str):
-            return value
-    quant_models = getattr(args, "quant_models", None)
-    return str(quant_models[0]) if quant_models else "<model>"
 
 
 def _all_rows_failed(report: ComparisonReport) -> bool:
@@ -259,11 +267,11 @@ def main(argv: list[str] | None = None) -> int:
     cw.add_argument("--allow-custom-code", action="store_true", help=allow_code_help)
     cw.add_argument(
         "--worker-timeout",
-        type=float,
-        default=7200.0,
+        type=_non_negative_seconds,
+        default=21600.0,
         metavar="SECONDS",
         help="wall-clock limit per target's worker process; a target over it becomes a failed "
-        "row (default 7200; 0 disables)",
+        "row (default 21600 = 6 h; 0 disables)",
     )
     cw.add_argument("--format", choices=["json", "md"], default="md", help=format_help)
 
@@ -448,18 +456,16 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 2
     except _user_error_types() as exc:
+        # Raised from inside a probe, where the failing repo is unknown: stay neutral rather
+        # than blame the first model id on the command line.
         first_line = (str(exc).splitlines() or [type(exc).__name__])[0]
-        print(
-            f"error: could not load {_first_model_id(args)!r}: {first_line} "
-            "(typo, gated repo, or offline?)",
-            file=sys.stderr,
-        )
+        print(f"error: {first_line} (typo, gated repo, or offline?)", file=sys.stderr)
         return 2
     print(out)
     return exit_code
 
 
-def _console_entry() -> None:  # pragma: no cover - process-exit wrapper
+def _console_entry() -> None:
     """Console-script entry point.
 
     Runs :func:`main`, flushes output, then hard-exits via ``os._exit`` to skip MLX's

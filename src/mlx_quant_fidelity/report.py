@@ -6,7 +6,7 @@ import dataclasses
 import json
 import math
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Self, cast
 
 from mlx_quant_fidelity.corpora.provenance import CorpusProvenance
 from mlx_quant_fidelity.errors import ReportSchemaError
@@ -158,13 +158,38 @@ def render_json(report: FidelityReport | WeightFidelityReport) -> str:
     return json.dumps(dataclasses.asdict(report), indent=2, sort_keys=True)
 
 
+def _metric_table_lines(report: FidelityReport | WeightFidelityReport) -> list[str]:
+    """The shared `| metric | value |` table both markdown renderers print."""
+    return [
+        "| metric | value |",
+        "|---|---|",
+        f"| KL mean | {report.kl.mean:.4f} nats |",
+        f"| KL median | {report.kl.median:.4f} nats |",
+        f"| KL p99 | {report.kl.p99:.4f} nats |",
+        f"| KL max | {report.kl.max:.4f} nats |",
+        f"| flip rate | {report.flip_rate:.4f} |",
+        f"| perplexity Δ | {report.perplexity_delta:+.4f} "
+        f"({report.perplexity_ref:.3f} → {report.perplexity_quant:.3f}) |",
+    ]
+
+
+def _corpus_qualifier(report: FidelityReport | WeightFidelityReport) -> str:
+    """The 'Measured on <corpus>...' sentence; a number is never printed without it."""
+    c = report.corpus
+    return (
+        f"Measured on **{c.name}/{c.split}**, {report.n_positions} positions across "
+        f"{report.n_chunks} chunks of length {c.chunk_length} (tokenizer `{c.tokenizer_id}`). "
+        "Fidelity is corpus- and context-length-specific; short-prose temp-0 drift "
+        "under-predicts long-context/code degradation."
+    )
+
+
 def render_weight_markdown(report: WeightFidelityReport) -> str:
     """Human-readable weight-fidelity report. Always qualifies by corpus + context length."""
     precision = weight_precision_text(report)
     if precision is None:  # legacy report: the pre-0.8.0 headline, byte-for-byte
         bits = report.quant_bits if report.quant_bits is not None else "unknown"
         precision = f"{bits}-bit (group {report.quant_group_size})"
-    c = report.corpus
     lines = [
         f"# Weight-fidelity: `{report.quant_model_id}` @ {precision} vs `{report.reference_model_id}`",
         "",
@@ -179,20 +204,9 @@ def render_weight_markdown(report: WeightFidelityReport) -> str:
         ]
     lines += [
         "",
-        "| metric | value |",
-        "|---|---|",
-        f"| KL mean | {report.kl.mean:.4f} nats |",
-        f"| KL median | {report.kl.median:.4f} nats |",
-        f"| KL p99 | {report.kl.p99:.4f} nats |",
-        f"| KL max | {report.kl.max:.4f} nats |",
-        f"| flip rate | {report.flip_rate:.4f} |",
-        f"| perplexity Δ | {report.perplexity_delta:+.4f} "
-        f"({report.perplexity_ref:.3f} → {report.perplexity_quant:.3f}) |",
+        *_metric_table_lines(report),
         "",
-        f"Measured on **{c.name}/{c.split}**, {report.n_positions} positions across "
-        f"{report.n_chunks} chunks of length {c.chunk_length} (tokenizer `{c.tokenizer_id}`). "
-        "Fidelity is corpus- and context-length-specific; short-prose temp-0 drift "
-        "under-predicts long-context/code degradation.",
+        _corpus_qualifier(report),
         "",
         f"_mlx {report.mlx_version}, mlx-lm {report.mlx_lm_version}, "
         f"quant {report.quant_model_bytes} B, reference {report.reference_model_bytes} B, "
@@ -237,6 +251,8 @@ def fidelity_report_from_dict(d: dict[str, object]) -> FidelityReport:
         partial = d.get("kv_partial")
         if partial is not None and not isinstance(partial, bool):
             raise ReportSchemaError("persisted 'kv_partial' must be a bool")
+        if partial is None:
+            fields["kv_partial"] = False
         if "drift_footing" not in d:
             fields["drift_footing"] = (
                 "bundled" if d.get("kv_method", "stock") == "stock" else "quantizer_only"
@@ -267,7 +283,6 @@ def method_bits_text(report: FidelityReport) -> str:
 
 def render_markdown(report: FidelityReport) -> str:
     """Human-readable report. Always qualifies the number by corpus + context length."""
-    c = report.corpus
     group = "—" if report.kv_group_size is None else str(report.kv_group_size)
     method_tag = "" if report.kv_method == "stock" else f" via {report.kv_method}"
     partial_title = (
@@ -283,20 +298,9 @@ def render_markdown(report: FidelityReport) -> str:
         f"**Verdict:** {report.verdict}{partial_verdict} · **mode:** {report.quantize_mode} "
         f"(quantize_start={report.quantize_start})",
         "",
-        "| metric | value |",
-        "|---|---|",
-        f"| KL mean | {report.kl.mean:.4f} nats |",
-        f"| KL median | {report.kl.median:.4f} nats |",
-        f"| KL p99 | {report.kl.p99:.4f} nats |",
-        f"| KL max | {report.kl.max:.4f} nats |",
-        f"| flip rate | {report.flip_rate:.4f} |",
-        f"| perplexity Δ | {report.perplexity_delta:+.4f} "
-        f"({report.perplexity_ref:.3f} → {report.perplexity_quant:.3f}) |",
+        *_metric_table_lines(report),
         "",
-        f"Measured on **{c.name}/{c.split}**, {report.n_positions} positions across "
-        f"{report.n_chunks} chunks of length {c.chunk_length} (tokenizer `{c.tokenizer_id}`). "
-        "Fidelity is corpus- and context-length-specific; short-prose temp-0 drift "
-        "under-predicts long-context/code degradation.",
+        _corpus_qualifier(report),
         "",
         f"_mlx {report.mlx_version}, mlx-lm {report.mlx_lm_version}, "
         f"model rev `{report.model_revision}`, peak {report.peak_memory_bytes / 1e9:.2f} GB"
@@ -367,6 +371,16 @@ class ComparisonTargetResult:
     ranked_kl: float | None = None
     ranked_verdict: str | None = None
     ranked_footing: str | None = None
+
+    @classmethod
+    def failed(cls, label: str, error_type: str | None, message: str | None) -> Self:
+        """A failed row: no report, no rank point, the error's type and message."""
+        return cls(label, "failed", None, None, None, error_type, message)
+
+    @classmethod
+    def skipped(cls, label: str, reason: str | None) -> Self:
+        """A skipped row: never measured; ``reason`` becomes the excluded reason."""
+        return cls(label, "skipped", None, None, reason, None, None)
 
 
 @dataclass(frozen=True, slots=True)
@@ -470,16 +484,15 @@ def _kv_row_kl_and_flip(
     """(KL mean, KL p99, flip) a kv-mode row shows in its ranked columns.
 
     `kl`/`flip_rate` are shared by both report types; `control_kl`/`control_flip_rate` are
-    KV-only — `getattr` with a default guards a row whose `.report` happens to be a
+    KV-only — the `isinstance` narrowing guards a row whose `.report` happens to be a
     `WeightFidelityReport` (existing kv-mode tests build rows that way) as well as a legacy
     partial with no control lane recorded.
     """
     kl_mean = ranked_kl if ranked_kl is not None else report.kl.mean
-    control_kl = getattr(report, "control_kl", None)
-    if control_kl is not None:
-        control_flip = getattr(report, "control_flip_rate", None)
+    if isinstance(report, FidelityReport) and report.control_kl is not None:
+        control_flip = report.control_flip_rate
         flip = control_flip if control_flip is not None else report.flip_rate
-        return kl_mean, control_kl.p99, flip
+        return kl_mean, report.control_kl.p99, flip
     return kl_mean, report.kl.p99, report.flip_rate
 
 
@@ -520,18 +533,23 @@ def render_comparison_markdown(report: ComparisonReport) -> str:
         if is_kv:
             kl_mean, kl_p99, flip = _kv_row_kl_and_flip(r.report, r.ranked_kl)
             verdict = r.ranked_verdict if r.ranked_verdict is not None else r.report.verdict
+            fid = r.report if isinstance(r.report, FidelityReport) else None
             bundled = (
                 f"{r.report.kl.mean:.4f}"
-                if r.ranked_kl is not None and getattr(r.report, "drift_footing", None) == "bundled"
+                if r.ranked_kl is not None and fid is not None and fid.drift_footing == "bundled"
                 else "—"
             )
-            resident = _human_bytes(getattr(r.report, "working_set_bytes_per_token", None))
+            resident = _human_bytes(fid.working_set_bytes_per_token if fid is not None else None)
             lines.append(
                 f"| `{r.label}` | {_human_bytes(r.point.cost_bytes)} | {kl_mean:.4f} | "
                 f"{kl_p99:.4f} | {flip:.4f} | {bundled} | {resident} | {verdict} | {mark} |"
             )
         else:
-            bpw_value = getattr(r.report, "quant_bits_per_weight", None)
+            bpw_value = (
+                r.report.quant_bits_per_weight
+                if isinstance(r.report, WeightFidelityReport)
+                else None
+            )
             bpw = f"{bpw_value:.2f}" if bpw_value is not None else "—"
             lines.append(
                 f"| `{r.label}` | {_human_bytes(r.point.cost_bytes)} | {r.report.kl.mean:.4f} | "

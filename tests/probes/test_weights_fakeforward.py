@@ -12,6 +12,7 @@ from mlx_quant_fidelity.errors import (
     InsufficientMemoryError,
     ModelMismatchError,
 )
+from mlx_quant_fidelity.probes._preload import PreloadResult
 from mlx_quant_fidelity.probes.weights import (
     TOKENIZER_ASSUMPTION_WARNING,
     QuantMeta,
@@ -23,6 +24,16 @@ from mlx_quant_fidelity.probes.weights import (
     extract_quant_meta,
     measure_weight_fidelity,
 )
+
+
+@pytest.fixture(autouse=True)
+def _pinned_device(monkeypatch):
+    """Hermetic device: the memory pre-flight reads mx.device_info() directly, so pin the 32 GB
+    M1 Max working set instead of whatever the host (or a small CI runner) reports. Tests that
+    exercise the gate override it."""
+    monkeypatch.setattr(
+        mx, "device_info", lambda: {"max_recommended_working_set_size": 26_800_603_136}
+    )
 
 
 def test_extract_native_quantization():
@@ -294,6 +305,9 @@ def _patch_loads(monkeypatch, ref_peak, quant_peak, *, calls, ref_quantized=Fals
     from mlx_quant_fidelity.probes import weights as w
 
     monkeypatch.setattr(w, "install_memory_caps", lambda: calls.append("caps") or (0, 0))
+    # host-independent: the fake install returns (0, 0), which on a real Mac would add the
+    # "caps not installed" warning and disturb the warning-order assertions.
+    monkeypatch.setattr(w, "caps_warning", lambda installed: None)
     monkeypatch.setattr(w, "_resolve_weight_bytes", lambda *a, **k: sizes)
     monkeypatch.setattr(w, "_hub_weight_bytes", lambda *a, **k: sizes)  # never reach the network
     ref_fake = _FakeWeightModel(ref_peak)
@@ -324,7 +338,9 @@ def _patch_loads(monkeypatch, ref_peak, quant_peak, *, calls, ref_quantized=Fals
     monkeypatch.setattr(
         w,
         "preload_check",
-        lambda model, revision, *, allow_custom_code: cfgs["ref" if model == "ref" else "quant"],
+        lambda model, revision, *, allow_custom_code: PreloadResult(
+            cfgs["ref" if model == "ref" else "quant"], None
+        ),
     )
 
     def fake_load(repo, **kw):
@@ -513,7 +529,7 @@ def test_measure_weight_refuses_custom_code_in_either_repo_before_load(monkeypat
     def fake_read(model, revision=None):
         return {"model_file": "m.py"} if model == bad_repo else {"model_type": "llama"}
 
-    monkeypatch.setattr(_preload, "read_model_config", fake_read)
+    monkeypatch.setattr(_preload, "_fetch_config", lambda m, r=None: (fake_read(m, r), None))
 
     def boom(*a, **k):
         raise AssertionError("mlx_lm.load must not run")
@@ -541,7 +557,7 @@ def test_gate_runs_before_any_load(monkeypatch):
             "quantization": {"bits": 4, "group_size": 64},
         },
     }
-    monkeypatch.setattr(_preload, "read_model_config", lambda m, r=None: configs[m])
+    monkeypatch.setattr(_preload, "_fetch_config", lambda m, r=None: (configs[m], None))
 
     def boom(*a, **k):
         raise AssertionError("loaded")
@@ -681,3 +697,95 @@ def test_weight_report_provenance_n_tokens_matches_scored_chunks(monkeypatch):
     report = measure_weight_fidelity("quant", "ref", corpus=corpus, max_chunks=2)
     assert corpus.provenance.n_tokens == 20
     assert report.corpus.n_tokens == 8
+
+
+def test_measure_weight_appends_the_caps_warning_when_caps_are_missing(monkeypatch):
+    # bug caught: the weights probe dropping the "caps could not be installed" warning
+    from mlx_quant_fidelity.probes import weights as w
+
+    calls: list[str] = []
+    _patch_loads(monkeypatch, ref_peak=0, quant_peak=1, calls=calls)
+    monkeypatch.setattr(w, "caps_warning", lambda installed: f"SENTINEL caps {installed}")
+    report = measure_weight_fidelity("quant", "ref", corpus=_corpus(2))
+    assert "SENTINEL caps (0, 0)" in report.warnings
+
+
+def test_pre_load_gate_admits_legacy_quantization_config_without_bits():
+    """Bug: the pre-load gate demanded 'bits' in the RAW config, refusing mxfp4 / awq / gptq
+    repos that mlx-lm's load_model rewrites into a native block (with default bits) afterwards."""
+    raw = {
+        "model_type": "llama",
+        "vocab_size": 128,
+        "quantization_config": {"quant_method": "mxfp4"},
+    }
+    _gate_configs(quant_config=raw, reference_config=_REF_FP, pre_load=True)
+    # The post-load gate still refuses a loaded config that truly has no bits.
+    with pytest.raises(ModelMismatchError, match="bits"):
+        _gate_configs(quant_config=raw, reference_config=_REF_FP)
+
+
+def test_pre_load_gate_still_refuses_undeclared_quantization_and_mismatches():
+    """Bug: relaxing the bits check also drops the cheap checks that must precede the load."""
+    with pytest.raises(ModelMismatchError, match="no quantization"):
+        _gate_configs(quant_config=_REF_FP, reference_config=_REF_FP, pre_load=True)
+    with pytest.raises(ModelMismatchError, match="model_type"):
+        _gate_configs(
+            quant_config=_Q_NATIVE,
+            reference_config={"model_type": "qwen2", "vocab_size": 128},
+            pre_load=True,
+        )
+
+
+def test_underivable_vocab_is_a_report_warning(monkeypatch):
+    """Bug: with no integer vocab_size the per-chunk logits silently drop out of the memory
+    pre-flight and the report gives no hint."""
+    from mlx_quant_fidelity.probes import weights as w
+
+    calls: list[str] = []
+    _patch_loads(monkeypatch, 0, 1, calls=calls)
+    cfg = {"model_type": "llama", "vocab_size": "3", "quantization": {"bits": 4}}
+    monkeypatch.setattr(
+        w, "preload_check", lambda model, revision, *, allow_custom_code: PreloadResult(cfg, None)
+    )
+    report = measure_weight_fidelity("quant", "ref", corpus=_corpus(2))
+    assert any("per-chunk logits were not counted" in x for x in report.warnings)
+
+
+def test_derivable_vocab_adds_no_logits_warning(monkeypatch):
+    calls: list[str] = []
+    _patch_loads(monkeypatch, 0, 1, calls=calls)
+    report = measure_weight_fidelity("quant", "ref", corpus=_corpus(2))
+    assert not any("per-chunk logits were not counted" in x for x in report.warnings)
+
+
+def test_hub_weight_bytes_never_queries_the_hub_for_a_local_directory(monkeypatch, tmp_path):
+    """Bug: a local model directory (no safetensors) is sent to the Hub as a repo id, leaking
+    the path and stalling offline."""
+    import huggingface_hub
+
+    from mlx_quant_fidelity.probes.weights import _hub_weight_bytes
+
+    queried: list[str] = []
+
+    class RecordingApi:
+        def model_info(self, repo, **k):
+            queried.append(repo)  # recorded, not raised: the function swallows exceptions
+            raise RuntimeError("offline")
+
+    monkeypatch.setattr(huggingface_hub, "HfApi", RecordingApi)
+    assert _hub_weight_bytes(str(tmp_path), None) is None
+    assert queried == []
+
+
+@pytest.mark.parametrize("method", ["fp8", "bitsandbytes", "bitnet"])
+def test_pre_load_gate_refuses_bitless_methods_mlx_lm_does_not_rewrite(method):
+    """Bug: the pre-load relaxation admitted every bits-less quantization_config, so an fp8 repo
+    downloaded and loaded both models before the post-load gate refused it. mlx-lm rewrites only
+    mxfp4, compressed-tensors, awq and gptq into a native block with bits."""
+    raw = {
+        "model_type": "llama",
+        "vocab_size": 128,
+        "quantization_config": {"quant_method": method},
+    }
+    with pytest.raises(ModelMismatchError, match="bits"):
+        _gate_configs(quant_config=raw, reference_config=_REF_FP, pre_load=True)

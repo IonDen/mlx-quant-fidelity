@@ -5,7 +5,12 @@ import math
 
 import mlx.core as mx
 import pytest
-from tests.probes.fake_kv_method import FakeFullCache, FakeKVMethod, FakeMethodModel
+from tests.probes.fake_kv_method import (
+    FakeControlCache,
+    FakeFullCache,
+    FakeKVMethod,
+    FakeMethodModel,
+)
 
 from mlx_quant_fidelity.corpora.provenance import Corpus, CorpusProvenance
 from mlx_quant_fidelity.errors import (
@@ -15,6 +20,7 @@ from mlx_quant_fidelity.errors import (
     ExactZeroError,
 )
 from mlx_quant_fidelity.probes import kv as kvmod
+from mlx_quant_fidelity.probes._preload import PreloadResult
 from mlx_quant_fidelity.probes.kv import (
     MAX_CHUNK_LENGTH,
     _aggregate_chunks,
@@ -26,6 +32,14 @@ from mlx_quant_fidelity.probes.kv import (
     score_kv_config,
 )
 from mlx_quant_fidelity.probes.kv_methods import StockKVMethod
+
+
+@pytest.fixture(autouse=True)
+def _pinned_device(monkeypatch):
+    """Hermetic device: the gate tests below assume the 32 GB M1 Max working set, not whatever
+    the host (or a small CI runner) reports. Tests that exercise the gate override it."""
+    monkeypatch.setattr(kvmod, "_max_working_set_bytes", lambda: 26_800_603_136)
+
 
 # ---------------------------------------------------------------------------
 # regression: pure helpers — capability gate, exact-zero guard, aggregation
@@ -124,7 +138,9 @@ def test_measure_installs_caps_before_model_load(monkeypatch):
         pass
 
     monkeypatch.setattr(kv_mod, "install_memory_caps", lambda: calls.append("caps") or (0, 0))
-    monkeypatch.setattr(kv_mod, "preload_check", lambda m, r, *, allow_custom_code: {})
+    monkeypatch.setattr(
+        kv_mod, "preload_check", lambda m, r, *, allow_custom_code: PreloadResult({}, None)
+    )
 
     def _fake_load(*_a, **_k):
         calls.append("load")
@@ -199,7 +215,9 @@ def test_measure_kv_rejects_incompatible_group_size_before_scoring(monkeypatch):
     from mlx_quant_fidelity.probes import kv as kv_mod
 
     monkeypatch.setattr(kv_mod, "install_memory_caps", lambda: (0, 0))
-    monkeypatch.setattr(kv_mod, "preload_check", lambda m, r, *, allow_custom_code: {})
+    monkeypatch.setattr(
+        kv_mod, "preload_check", lambda m, r, *, allow_custom_code: PreloadResult({}, None)
+    )
     stub = _ModelWithArgs(_Args(head_dim=48, model_type="llama"))
     monkeypatch.setattr(mlx_lm, "load", lambda *a, **k: (stub, object()))
     cache_calls: list[str] = []
@@ -560,10 +578,14 @@ class _FakeLayerCachePreQ:
 
 
 def test_score_chunk_deployment_boundary():
+    """Changed contract (Task 21): the four bundled arrays cover ONLY the post-boundary region.
+
+    Was: shape (5,) with a prefix exact-0 slice `kl[:n]`; the prefix is no longer reduced.
+    """
     from mlx_quant_fidelity.probes.kv import _score_chunk_deployment
 
     model = _FakeDivergentModel()  # peak-0 for no-.bits cache, peak-1 for .bits cache
-    ids = mx.arange(6)  # L=6 → 5 prediction positions
+    ids = mx.arange(6)  # L=6 -> 5 prediction positions, 3 of them after the boundary
     n = 2
     ref_cache = [_FakeLayerCachePreQ()]
     quant_cache = [_FakeLayerCachePreQ()]  # full-precision; converted at the boundary
@@ -576,12 +598,88 @@ def test_score_chunk_deployment_boundary():
         method=StockKVMethod(bits=4, group_size=64),
     )
     mx.eval(kl, flips, ref_nll, quant_nll)
-    assert kl.shape == (5,)  # all L-1 positions returned
-    assert float(kl[:n].max()) == 0.0  # prefix exact-0 (offline)
-    assert float(kl[n:].min()) > 0.0  # post-boundary drift engaged
-    assert int(kl[n:].shape[0]) == len(ids) - 1 - n  # segment-2 length exactly L-1-N == 3
+    assert kl.shape == (3,)  # exactly L-1-N post-boundary positions
+    assert float(kl.min()) > 0.0  # post-boundary drift engaged
     assert kl_c is None  # no control_method passed -> no control lane
     assert flip_c is None
+
+
+def test_score_chunk_deployment_returns_post_boundary_only(monkeypatch):
+    """Bug caught: segment 1 still runs lm_head + fp32 cast + four log-softmaxes + argmax and the
+    caller then throws it away (~5% of chunk time). Also pins the values: the post-boundary
+    KL / flip / NLL equal a float64 numpy softmax over the fake's literal logits.
+    """
+    import numpy as np
+
+    from mlx_quant_fidelity.probes.kv import _score_chunk_deployment
+
+    reduce_lengths: list[int] = []
+    real_reduce = kvmod._reduce_pair
+
+    def _spy(ref_logits, quant_logits, targets):
+        reduce_lengths.append(int(quant_logits.shape[0]))
+        return real_reduce(ref_logits, quant_logits, targets)
+
+    monkeypatch.setattr(kvmod, "_reduce_pair", _spy)
+    ids = mx.arange(6) % 4  # tokens [0, 1, 2, 3, 0, 1]; targets ids[1:] = [1, 2, 3, 0, 1]
+    n = 2
+    kl, flips, ref_nll, quant_nll, _, _ = _score_chunk_deployment(
+        _FakeDivergentModel(),
+        ids,
+        [_FakeLayerCachePreQ()],
+        [_FakeLayerCachePreQ()],
+        quantize_start=n,
+        method=StockKVMethod(bits=4, group_size=64),
+    )
+    mx.eval(kl, flips, ref_nll, quant_nll)
+
+    assert reduce_lengths == [3]  # one reduce, over the 3 post-boundary positions
+    for arr in (kl, flips, ref_nll, quant_nll):
+        assert arr.shape == (3,)
+
+    # Literal logits of the fake: ref peaks on class 0, the quantized cache on class 1.
+    ref = np.array([5.0, 0.0, 0.0, 0.0])
+    quant = np.array([0.0, 5.0, 0.0, 0.0])
+    logp = ref - np.log(np.exp(ref).sum())
+    logq = quant - np.log(np.exp(quant).sum())
+    kl_expected = float((np.exp(logp) * (logp - logq)).sum())  # same at every position
+    targets_post = [3, 0, 1]  # ids[n + 1:]
+    np.testing.assert_allclose(np.asarray(kl), [kl_expected] * 3, atol=1e-4)
+    assert kl_expected == pytest.approx(4.8679, abs=1e-3)  # 5 * (e^5 - 1) / (e^5 + 3)
+    assert np.asarray(flips).astype(bool).tolist() == [True, True, True]  # argmax 0 vs 1
+    np.testing.assert_allclose(np.asarray(ref_nll), [-logp[t] for t in targets_post], atol=1e-4)
+    np.testing.assert_allclose(np.asarray(quant_nll), [-logq[t] for t in targets_post], atol=1e-4)
+
+
+def test_score_chunk_deployment_evaluates_segment_one_cache_state():
+    """Bug caught: dropping the state eval leaves the seg-1 graph un-collapsed at the boundary.
+
+    The fake cache records `state` reads and the boundary `convert` in one event list, so the
+    order is what is asserted, not just that a read happened.
+    """
+    from mlx_quant_fidelity.probes.kv import _score_chunk_deployment
+
+    events: list[str] = []
+
+    class _Cache(_FakeLayerCachePreQ):
+        state = property(lambda self: events.append("state") or ())
+
+        def to_quantized(self, group_size, bits):
+            events.append("convert")
+            return super().to_quantized(group_size, bits)
+
+    _score_chunk_deployment(
+        _FakeDivergentModel(),
+        mx.arange(6) % 4,
+        [_FakeLayerCachePreQ()],
+        [_Cache()],
+        quantize_start=2,
+        method=StockKVMethod(bits=4, group_size=64),
+    )
+    assert "state" in events
+    assert "convert" in events
+    # the state is read (and evaluated) BEFORE the boundary conversion consumes the cache
+    assert events.index("state") < events.index("convert")
 
 
 # ---------------------------------------------------------------------------
@@ -886,6 +984,9 @@ def _pin_caps(monkeypatch, wired_gb=20, memory_gb=22):
     would be disconnected and leave these assertions machine-dependent.
     """
     monkeypatch.setattr(kvmod, "compute_safe_caps_gb", lambda: (wired_gb, memory_gb))
+    # The resident-weights check reads the device working set through its own helper; pin it
+    # too (24.96 GiB, or "not reported" alongside (0, 0) caps) so a 4.7 GiB CI runner agrees.
+    monkeypatch.setattr(kvmod, "_max_working_set_bytes", lambda: 26_800_603_136 if wired_gb else 0)
 
 
 def test_large_window_emits_memory_warning(monkeypatch):
@@ -955,14 +1056,14 @@ def test_underivable_vocab_reports_unchecked_budget(monkeypatch):
 
 def test_preflight_below_warn_band_returns_none(monkeypatch):
     """Reds if the zero-term path starts warning where 0.6.0 stayed silent."""
-    monkeypatch.setattr(kvmod, "compute_safe_caps_gb", lambda: (20, 22))
+    _pin_caps(monkeypatch)
     # est(512, 128k) = 7 * 511 * 128000 * 4 ~= 1.83 GiB < the 4 GiB warn band -> None
     assert kvmod._preflight_logits_budget(512, 128_000) is None
 
 
 def test_preflight_warn_band_text_unchanged(monkeypatch):
     """Reds if the zero-term path changes the legacy warning wording or threshold."""
-    monkeypatch.setattr(kvmod, "compute_safe_caps_gb", lambda: (20, 22))
+    _pin_caps(monkeypatch)
     # est(2048, 128k) = 7 * 2047 * 128000 * 4 ~= 6.8 GiB: above 4 GiB warn, under the 14 GiB gate
     warning = kvmod._preflight_logits_budget(2048, 128_000)
     assert warning is not None and "GiB per chunk" in warning  # noqa: PT018
@@ -976,7 +1077,7 @@ def test_control_bytes_tips_the_gate_with_drop_control_remedy(monkeypatch):
     margin + 1 bytes of control_bytes proves the term is additive to the byte, not merely
     "large enough to usually matter".
     """
-    monkeypatch.setattr(kvmod, "compute_safe_caps_gb", lambda: (20, 22))
+    _pin_caps(monkeypatch)
     window, vocab = 4096, 128_000
     gate = int(kvmod.LOGITS_BUDGET_FRACTION * 20 * 1024**3)
     est = kvmod._paired_logits_bytes(window, vocab)
@@ -993,7 +1094,7 @@ def test_method_ws_bytes_tips_the_gate_without_drop_control_remedy(monkeypatch):
     Same margin+1 tip as the control_bytes test above, but via method_ws_bytes -- the remedy
     must NOT suggest dropping --control when control was never the cause.
     """
-    monkeypatch.setattr(kvmod, "compute_safe_caps_gb", lambda: (20, 22))
+    _pin_caps(monkeypatch)
     window, vocab = 4096, 128_000
     gate = int(kvmod.LOGITS_BUDGET_FRACTION * 20 * 1024**3)
     est = kvmod._paired_logits_bytes(window, vocab)
@@ -1011,7 +1112,7 @@ def _pin_device(monkeypatch, max_ws_gib=24.96):
 
 def test_preflight_refuses_when_weights_plus_logits_exceed_working_set(monkeypatch):
     """Bug: the gate ignores resident weights, so a 15 GiB model at window 4096 runs."""
-    monkeypatch.setattr(kvmod, "compute_safe_caps_gb", lambda: (20, 22))
+    _pin_caps(monkeypatch)
     _pin_device(monkeypatch)
     with pytest.raises(kvmod.LogitsBudgetError) as excinfo:
         kvmod._preflight_logits_budget(4096, 128256, resident_bytes=15 * 1024**3)
@@ -1027,9 +1128,107 @@ def test_preflight_refuses_when_weights_plus_logits_exceed_working_set(monkeypat
 )
 def test_committed_sample_geometries_pass_gate(monkeypatch, window, vocab, resident):
     """Bug: an over-tight gate refuses the committed Llama-1B/3B and Qwen2.5-7B-4bit samples."""
-    monkeypatch.setattr(kvmod, "compute_safe_caps_gb", lambda: (20, 22))
+    _pin_caps(monkeypatch)
     _pin_device(monkeypatch)
     kvmod._preflight_logits_budget(window, vocab, resident_bytes=resident)  # must not raise
+
+
+@pytest.mark.parametrize(
+    ("window", "vocab", "resident", "layers", "kv_heads", "head_dim"),
+    [
+        (4096, 128256, int(0.7e9), 16, 8, 64),  # Llama-3.2-1B
+        (
+            512,
+            128256,
+            int(1.8e9),
+            28,
+            8,
+            128,
+        ),  # Llama-3.2-3B (committed samples use the 512 default)
+        (512, 152064, int(4.3e9), 28, 4, 128),  # Qwen2.5-7B-4bit
+    ],
+)
+def test_committed_sample_geometries_pass_gate_with_kv_caches(
+    monkeypatch, window, vocab, resident, layers, kv_heads, head_dim
+):
+    """Bug: adding the KV-cache terms to the gate over-tightens it and refuses a committed sample."""
+    _pin_caps(monkeypatch)
+    _pin_device(monkeypatch)
+    args = type(
+        "A",
+        (),
+        {"num_hidden_layers": layers, "num_key_value_heads": kv_heads, "head_dim": head_dim},
+    )()
+    ws, ctl, caches = kvmod._gate_extra_bytes(
+        StockKVMethod(bits=4, group_size=64), None, window=window, args=args, head_dim=head_dim
+    )
+    kvmod._preflight_logits_budget(
+        window,
+        vocab,
+        method_ws_bytes=ws,
+        control_bytes=ctl,
+        cache_bytes=caches,
+        resident_bytes=resident,
+    )
+
+
+def test_gate_counts_the_fp16_reference_cache_and_the_stored_method_cache(monkeypatch):
+    """Bug: the gate ignores the reference run's fp16 KV cache (step-256 padded) and the scored
+    method's stored cache, so an MHA model (40 layers x 40 kv heads x 128) at window 4096 that
+    only fits without them is waved through into a paging storm."""
+    _pin_caps(monkeypatch)
+    _pin_device(monkeypatch)
+    window, vocab = 4096, 32000
+    args = type(
+        "A",
+        (),
+        {"num_hidden_layers": 40, "num_key_value_heads": 40, "head_dim": 128},
+    )()
+    method = StockKVMethod(bits=4, group_size=64)
+    ws, ctl, caches = kvmod._gate_extra_bytes(method, None, window=window, args=args, head_dim=128)
+    kv_fp = 2 * 40 * 40 * 128 * 2 * 4096  # K+V fp16, 4096 is already a multiple of 256
+    stored = method.bytes_per_token(n_layers=40, n_kv_heads=40, head_dim=128) * window
+    assert ctl == 0
+    assert ws == 0  # stock has no fetch-path working set; the caches are the third figure
+    assert caches == kv_fp + stored
+    # A window that is not a multiple of 256 is padded up to the next step.
+    _, _, caches300 = kvmod._gate_extra_bytes(method, None, window=300, args=args, head_dim=128)
+    assert (
+        caches300
+        == 2 * 40 * 40 * 128 * 2 * 512
+        + method.bytes_per_token(n_layers=40, n_kv_heads=40, head_dim=128) * 300
+    )
+    # Deployment mode holds one more full-precision prefix cache before conversion.
+    _, _, caches_dep = kvmod._gate_extra_bytes(
+        method, None, window=window, args=args, head_dim=128, quantize_start=100
+    )
+    assert caches_dep == caches + kv_fp
+    # End to end: resident sized to fit WITHOUT the cache terms, refused WITH them.
+    limit = int(24.96 * 1024**3) - kvmod.RESIDENT_HEADROOM_BYTES
+    resident = limit - kvmod._paired_logits_bytes(window, vocab) - 500_000_000
+    kvmod._preflight_logits_budget(window, vocab, resident_bytes=resident)  # old gate: passes
+    with pytest.raises(kvmod.LogitsBudgetError):
+        kvmod._preflight_logits_budget(
+            window,
+            vocab,
+            method_ws_bytes=ws,
+            control_bytes=ctl,
+            cache_bytes=caches,
+            resident_bytes=resident,
+        )
+
+
+def test_gate_extra_bytes_ignores_a_method_that_cannot_size_its_cache():
+    """Bug: a method whose bytes_per_token raises CacheNotQuantizableError crashes the gate
+    instead of contributing 0 (its own refusal is reported elsewhere)."""
+
+    class _Refuses(FakeKVMethod):
+        def bytes_per_token(self, **kwargs):
+            raise CacheNotQuantizableError("no")
+
+    args = type("A", (), {"num_hidden_layers": 4, "num_key_value_heads": 2, "head_dim": 64})()
+    _, _, caches = kvmod._gate_extra_bytes(_Refuses(), None, window=256, args=args, head_dim=64)
+    assert caches == 2 * 4 * 2 * 64 * 2 * 256  # exactly the fp16 reference cache
 
 
 def test_model_arg_reads_text_config_and_treats_non_positive_as_missing():
@@ -1070,7 +1269,7 @@ def test_gate_applies_to_text_config_wrapper_model(monkeypatch):
 
 def test_unknown_vocab_refuses_above_default_window(monkeypatch):
     """Bug: an underivable vocab at a long window is waved through with a warning."""
-    monkeypatch.setattr(kvmod, "compute_safe_caps_gb", lambda: (20, 22))
+    _pin_caps(monkeypatch)
     _pin_device(monkeypatch)
     with pytest.raises(kvmod.LogitsBudgetError, match="512"):
         kvmod._preflight_logits_budget(1024, None)
@@ -1088,7 +1287,7 @@ def test_model_resident_bytes_sums_parameter_nbytes():
 
 
 def test_default_remedy_names_control_only_when_control_bytes(monkeypatch):
-    monkeypatch.setattr(kvmod, "compute_safe_caps_gb", lambda: (20, 22))
+    _pin_caps(monkeypatch)
     _pin_device(monkeypatch)
     with pytest.raises(kvmod.LogitsBudgetError) as excinfo:
         kvmod._preflight_logits_budget(4096, 128256, control_bytes=10**10, remedy="Use X")
@@ -1244,6 +1443,16 @@ def test_seam_leaves_working_set_bytes_per_token_none_without_kv_head_count(monk
         FakeMethodModel(), _kv_corpus(1, 4), model_id="org/m", method=FakeKVMethod()
     )
     assert report.working_set_bytes_per_token is None
+
+
+def test_seam_reads_kv_heads_from_text_config_for_working_set_bytes(monkeypatch):
+    """Bug: the report tail reads num_key_value_heads straight off args, so a text_config
+    wrapper model reports working_set_bytes_per_token None even though the gate resolved it."""
+    _patch_prompt_cache(monkeypatch)
+    model = FakeMethodModel()
+    model.args.text_config = {"num_key_value_heads": 2}
+    report = score_kv_config(model, _kv_corpus(1, 4), model_id="org/m", method=FakeKVMethod())
+    assert report.working_set_bytes_per_token == 0
 
 
 class _NoOffsetCache:
@@ -1539,10 +1748,10 @@ def test_control_deployment_covers_exactly_the_post_boundary_positions(monkeypat
     assert report.quantize_mode == "deployment"
 
     def _kl(gain: float) -> float:
-        """First-principles KL([5,0,0] || [gain,0,0]) over vocab 3."""
-        p = np.exp([5.0, 0, 0])
+        """First-principles KL([5,0,0,0,0,0] || [gain,0,0,0,0,0]) over vocab 6."""
+        p = np.exp([5.0, 0, 0, 0, 0, 0])
         p /= p.sum()
-        q = np.exp([gain, 0, 0])
+        q = np.exp([gain, 0, 0, 0, 0, 0])
         q /= q.sum()
         return float((p * np.log(p / q)).sum())
 
@@ -1582,7 +1791,7 @@ def test_control_lane_nan_kl_is_refused(monkeypatch):
 
 
 def test_score_kv_config_reports_chunk_progress(monkeypatch):
-    """Reds if the chunk loop is silent, or emits every chunk (a 25-chunk run is ~11 lines)."""
+    """Reds if the chunk loop is silent, or emits every chunk (a 25-chunk run is 13 lines)."""
     _patch_kv_caches_divergent(monkeypatch)
     seen: list[str] = []
     score_kv_config(_FakeDivergentModel(), _kv_corpus(25), model_id="org/m", progress=seen.append)
@@ -1639,7 +1848,9 @@ def test_measure_kv_fidelity_checks_availability_before_preload_and_load(monkeyp
 
     order: list[str] = []
     monkeypatch.setattr(
-        kvmod, "preload_check", lambda m, r, *, allow_custom_code: order.append("preload") or {}
+        kvmod,
+        "preload_check",
+        lambda m, r, *, allow_custom_code: order.append("preload") or PreloadResult({}, None),
     )
     monkeypatch.setattr(mlx_lm, "load", lambda *a, **k: order.append("load"))
 
@@ -1685,3 +1896,182 @@ def test_kv_rejects_single_token_chunk(monkeypatch):
     )
     with pytest.raises(CorpusError, match="at least 2 tokens"):
         score_kv_config(FakeMethodModel(), bad, model_id="m", method=FakeKVMethod())
+
+
+def test_deployment_converts_control_before_bundled():
+    """Reds if the bundled conversion runs first: it mutates quant_cache in place, leaving the
+    control lane nothing full-precision to replay."""
+    from mlx_quant_fidelity.probes.kv import _score_chunk_deployment
+
+    seen: list[str] = []
+
+    class _OrderCheckingControl:
+        name = "control"
+        label = "control"
+
+        def convert_prefix(self, fp_cache):
+            seen.append("control")
+            assert all(isinstance(c, FakeFullCache) for c in fp_cache), (
+                "control lane saw an already-converted cache"
+            )
+            return [FakeControlCache() for _ in fp_cache]
+
+    model = FakeMethodModel()
+    ids = mx.array([0, 1, 2, 0, 1, 2])
+    _score_chunk_deployment(
+        model,
+        ids,
+        [FakeFullCache()],
+        [FakeFullCache()],
+        quantize_start=2,
+        method=FakeKVMethod(),
+        control_method=_OrderCheckingControl(),
+    )
+    assert seen == ["control"]
+
+
+def test_kv_head_dim_gqa_divides_by_attention_heads_not_kv_heads():
+    """Reds if the fallback divides hidden_size by num_key_value_heads (512, not 128)."""
+    args = _Args(hidden_size=4096, num_attention_heads=32, num_key_value_heads=8)
+    assert _kv_head_dim(_ModelWithArgs(args)) == 128
+
+
+def test_resident_check_runs_even_when_vocab_is_underivable(monkeypatch):
+    """Bug: an architecture with no derivable vocab_size returned the 'unchecked' warning
+    before the resident-weights check, so a model bigger than the device still loaded."""
+    _pin_caps(monkeypatch)
+    _pin_device(monkeypatch)
+    with pytest.raises(kvmod.LogitsBudgetError, match="does not fit"):
+        kvmod._preflight_logits_budget(512, None, resident_bytes=30 * 1024**3)
+
+
+def test_weights_alone_over_the_limit_say_the_model_does_not_fit(monkeypatch):
+    """Bug: the refusal for a too-big model told the user to lower --chunk-length, which cannot
+    help when the weights alone exceed the device."""
+    _pin_caps(monkeypatch)
+    _pin_device(monkeypatch)
+    with pytest.raises(kvmod.LogitsBudgetError) as excinfo:
+        kvmod._preflight_logits_budget(512, 32000, resident_bytes=30 * 1024**3)
+    msg = str(excinfo.value)
+    assert "does not fit" in msg
+    assert "30.0 GiB" in msg
+    assert "--chunk-length" not in msg
+
+
+def test_model_resident_bytes_counts_a_shared_array_once():
+    """Bug: tied weights (one array under two keys) are double-counted, refusing models that fit."""
+    shared = mx.zeros((10,), dtype=mx.float32)
+
+    class _M:
+        def parameters(self):
+            return {"embed": shared, "head": shared, "other": mx.zeros((2,), mx.float32)}
+
+    assert kvmod.model_resident_bytes(_M()) == 10 * 4 + 2 * 4
+
+
+def test_unknown_weight_size_is_a_report_warning(monkeypatch):
+    """Bug: when the weight size cannot be read the memory gate silently drops the weights term."""
+    _patch_kv_caches_divergent(monkeypatch)
+    _pin_caps(monkeypatch)
+
+    class _NoSizeModel(_FakeDivergentModel):
+        def parameters(self):
+            return {}
+
+    report = score_kv_config(_NoSizeModel(), _kv_corpus(1), model_id="fake")
+    assert any("weight size unknown" in w for w in report.warnings)
+
+    # A model that does report weights carries no such warning.
+    class _SizedModel(_FakeDivergentModel):
+        def parameters(self):
+            return {"w": mx.zeros((4,), mx.float32)}
+
+    ok = score_kv_config(_SizedModel(), _kv_corpus(1), model_id="fake")
+    assert not any("weight size unknown" in w for w in ok.warnings)
+
+
+def test_kv_caches_count_against_the_working_set_not_the_wired_logits_budget(monkeypatch):
+    """Bug: adding the KV caches to the 70%-of-wired logits budget double-counts them (the 7x
+    multiplier was calibrated on measured total peaks, which already held the caches) and refuses
+    a plain Llama-3.2-3B run at window 4096 that 0.9.0 ran. The caches belong in the
+    weights + working-set rule only."""
+    _pin_caps(monkeypatch)  # 20 GiB wired -> 14.0 GiB logits budget
+    _pin_device(monkeypatch)  # 24.96 GiB working set
+    args = type(
+        "A", (), {"num_hidden_layers": 28, "num_key_value_heads": 8, "head_dim": 128}
+    )()  # Llama-3.2-3B
+    ws, ctl, caches = kvmod._gate_extra_bytes(
+        StockKVMethod(bits=4, group_size=64), None, window=4096, args=args, head_dim=128
+    )
+    assert ws == 0  # stock has no fetch-path working set
+    assert ctl == 0  # no control lane
+    assert (
+        caches
+        == 2 * 28 * 8 * 128 * 2 * 4096
+        + StockKVMethod(bits=4, group_size=64).bytes_per_token(
+            n_layers=28, n_kv_heads=8, head_dim=128
+        )
+        * 4096
+    )
+    kvmod._preflight_logits_budget(  # must not raise: 13.7 GiB logits < 14.0 GiB budget
+        4096,
+        128256,
+        method_ws_bytes=ws,
+        control_bytes=ctl,
+        cache_bytes=caches,
+        resident_bytes=int(1.8e9),
+    )
+
+
+def _eval_spy(monkeypatch, events, params):
+    """Record 'eval-params' when mx.eval receives the model's parameter tree, then delegate."""
+    real_eval = mx.eval
+
+    def spy(*args):
+        if any(a is params for a in args):
+            events.append("eval-params")
+        return real_eval(*args)
+
+    monkeypatch.setattr(kvmod.mx, "eval", spy)
+
+
+def test_weights_are_materialized_after_the_gate_and_before_the_first_forward(monkeypatch):
+    """Bug: with lazy loading the first weight read happened inside scoring (for a hybrid model,
+    inside the partial-coverage smoke forward, whose catch-all relabels a corrupt shard as a
+    mixed-cache failure). The weights must be read right after the memory gate passes."""
+    _patch_kv_caches_divergent(monkeypatch)
+    _pin_caps(monkeypatch)
+    events: list[str] = []
+    params = {"w": mx.zeros((4,), mx.float32)}
+
+    class _Model(_FakeDivergentModel):
+        def parameters(self):
+            return params
+
+        def __call__(self, *args, **kwargs):
+            events.append("forward")
+            return super().__call__(*args, **kwargs)
+
+    _eval_spy(monkeypatch, events, params)
+    score_kv_config(_Model(), _kv_corpus(1), model_id="fake")
+    assert "eval-params" in events
+    assert "forward" in events
+    assert events.index("eval-params") < events.index("forward")
+
+
+def test_weights_are_not_materialized_when_the_gate_refuses(monkeypatch):
+    """Bug: materializing before the gate would load the weights the gate exists to refuse."""
+    _patch_kv_caches_divergent(monkeypatch)
+    _pin_caps(monkeypatch)
+    events: list[str] = []
+    params = {"w": mx.zeros((4,), mx.float32)}
+
+    class _Huge(_FakeDivergentModel):
+        def parameters(self):
+            return params
+
+    monkeypatch.setattr(kvmod, "model_resident_bytes", lambda model: 30 * 1024**3)
+    _eval_spy(monkeypatch, events, params)
+    with pytest.raises(kvmod.LogitsBudgetError, match="does not fit"):
+        score_kv_config(_Huge(), _kv_corpus(1), model_id="fake")
+    assert "eval-params" not in events

@@ -7,7 +7,9 @@ import os
 import sys
 
 import pytest
+from hypothesis import settings as hypothesis_settings
 from tests._hide_port import apply_hide_port
+from tests._small_device import apply_small_device
 
 from mlx_quant_fidelity._memory_caps import install_memory_caps
 
@@ -20,6 +22,12 @@ GATED_MARKERS: tuple[tuple[str, str, str], ...] = (
 INSTALLED_CAPS_GB = install_memory_caps()
 
 _FINAL_EXIT_CODE = 0
+
+# Property tests draw the same examples on every run, so a red property test is reproducible
+# and the default lane cannot flake on a rare draw. Exploratory runs can still opt out with
+# `--hypothesis-profile=default`.
+hypothesis_settings.register_profile("derandomized", derandomize=True)
+hypothesis_settings.load_profile("derandomized")
 
 
 def _markers_to_skip(enabled_flags: set[str]) -> list[tuple[str, str]]:
@@ -45,12 +53,25 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         help="run the default suite with turboquant_mlx masked (import + distribution metadata), "
         "mirroring CI; default-lane only, not combinable with --run-slow",
     )
+    parser.addoption(
+        "--emulate-small-device",
+        action="store_true",
+        default=False,
+        help="report a 4.7 GiB working set / 7 GiB memory from mx.device_info() for the whole "
+        "session, mirroring the hosted CI runner; the memory caps are re-installed against it",
+    )
 
 
 def pytest_configure(config: pytest.Config) -> None:
     def _set_exit_code(code: int) -> None:
         global _FINAL_EXIT_CODE
         _FINAL_EXIT_CODE = code
+
+    # The session caps above were installed at import (the option is unreadable before
+    # configure), against the real device. Emulation then re-installs them against the small
+    # device; lowering a cap is always safe, and no MLX allocation happens in between.
+    if apply_small_device(enabled=bool(config.getoption("--emulate-small-device"))):
+        install_memory_caps()
 
     apply_hide_port(
         hide_port=bool(config.getoption("--hide-port")),

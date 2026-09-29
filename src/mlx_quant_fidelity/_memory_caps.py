@@ -5,18 +5,21 @@ clamps strictly below it. Returns (0, 0) as a no-op signal on devices/CI images
 that report no working-set size. Mirrors the proven mlx-taef pattern.
 """
 
+import contextlib
+
 import mlx.core as mx
 
 DESIRED_WIRED_GB = 20
 DESIRED_MEMORY_GB = 22
 HEADROOM_GB = 2
+MIN_WORKING_SET_GB = 3  # smallest working set that admits wired < memory <= working set
 CACHE_LIMIT_GB = 4  # bounds MLX's retained buffer pool (counted by the watchdog)
 
 
 def _clamp_caps_gb(max_recommended_gb: int) -> tuple[int, int]:
     """Clamp the desired caps to fit a device with `max_recommended_gb` working set."""
-    if max_recommended_gb <= 0:
-        return (0, 0)
+    if max_recommended_gb < MIN_WORKING_SET_GB:
+        return (0, 0)  # no cap strictly below the working set fits; caps_warning reports it
     wired_gb = min(DESIRED_WIRED_GB, max(1, max_recommended_gb - HEADROOM_GB))
     memory_gb = min(DESIRED_MEMORY_GB, max(wired_gb + 1, max_recommended_gb))
     return (wired_gb, memory_gb)
@@ -54,19 +57,47 @@ def device_string() -> str | None:
 def install_memory_caps() -> tuple[int, int]:
     """Apply wired + memory caps for the current device. Idempotent; never raises.
 
-    Returns the (wired_gb, memory_gb) actually installed, or (0, 0) on a device
-    with no reported working-set size or where caps could not be applied.
+    Returns the (wired_gb, memory_gb) actually installed (memory_gb is 0 when only the
+    advisory memory limit failed), or (0, 0) on a device with no reported working-set size
+    or where the wired cap could not be applied.
     """
     wired_gb, memory_gb = compute_safe_caps_gb()
     if wired_gb == 0:
         return (0, 0)
     try:
         mx.set_wired_limit(wired_gb * 1024**3)
-        mx.set_memory_limit(memory_gb * 1024**3)
-        mx.set_cache_limit(CACHE_LIMIT_GB * 1024**3)
     except Exception:
         return (0, 0)
+    # The wired cap is the panic guard; the memory limit is advisory, so its failure must not
+    # make a wired-bounded run report itself as unbounded.
+    try:
+        mx.set_memory_limit(memory_gb * 1024**3)
+    except Exception:
+        memory_gb = 0
+    # Bounds the retained pool only; the panic-guard caps above are already in place.
+    with contextlib.suppress(Exception):
+        mx.set_cache_limit(CACHE_LIMIT_GB * 1024**3)
     return (wired_gb, memory_gb)
 
 
-__all__ = ["compute_safe_caps_gb", "device_string", "install_memory_caps"]
+def caps_warning(installed: tuple[int, int]) -> str | None:
+    """A report warning when caps are missing on a device that does have a working-set limit.
+
+    ``installed`` is what :func:`install_memory_caps` returned. None when the caps were
+    installed, or when the device reports no working-set size (the intended no-op on CI images).
+    """
+    if installed != (0, 0):
+        return None
+    try:
+        reported = int(mx.device_info().get("max_recommended_working_set_size", 0) or 0)
+    except Exception:
+        return None
+    if reported <= 0:
+        return None
+    return (
+        "memory caps could not be installed on this device; the run was not bounded by the "
+        "wired cap."
+    )
+
+
+__all__ = ["caps_warning", "compute_safe_caps_gb", "device_string", "install_memory_caps"]

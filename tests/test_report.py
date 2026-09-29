@@ -82,6 +82,14 @@ def test_from_dict_defaults_partial_fields_for_legacy_dict():
     assert back.kv_layers_total is None
 
 
+def test_from_dict_null_kv_partial_is_false_not_none():
+    # bug caught: `kv_partial: null` rehydrating as None (a third state that renders falsy but
+    # fails `is False` checks and round-trips as null)
+    d = dataclasses.asdict(_report())
+    d["kv_partial"] = None
+    assert fidelity_report_from_dict(d).kv_partial is False
+
+
 @pytest.mark.parametrize(
     ("field", "bad"),
     [
@@ -135,9 +143,9 @@ def test_weight_from_dict_missing_kl_raises_report_schema_error():
 
 
 def test_render_markdown_deployment_states_post_boundary():
-    from tests.test_cli import _fake_report
+    from tests.factories import make_fid_report
 
-    rep = dataclasses.replace(_fake_report(), quantize_start=5, quantize_mode="deployment")
+    rep = dataclasses.replace(make_fid_report(), quantize_start=5, quantize_mode="deployment")
     md = render_markdown(rep)
     assert "post-boundary" in md or "excludes the first" in md  # the NEW exclusion statement
 
@@ -355,3 +363,71 @@ def test_dataset_revision_round_trips() -> None:
     rev = "b08601e04326c79dfdd32d625aee71d232d685c3"
     report = _mk_report(corpus=dataclasses.replace(_report().corpus, dataset_revision=rev))
     assert fidelity_report_from_dict(json.loads(render_json(report))).corpus.dataset_revision == rev
+
+
+def _populated_kv_report() -> FidelityReport:
+    """A KV report with EVERY defaulted field set to a non-default value."""
+    return dataclasses.replace(
+        _report(),
+        model_revision="0123abc",
+        device="Apple M1 Max, 32 GB",
+        kl_by_depth=(
+            DepthBucketSummary(start=0, end=256, kl_mean=0.01, kl_p99=0.2, n_positions=512),
+            DepthBucketSummary(start=256, end=511, kl_mean=0.03, kl_p99=0.4, n_positions=510),
+        ),
+        kv_method="affine",
+        kv_method_params={"k_bits": 8, "v_bits": 4, "group_size": 64},
+        kv_method_provenance={"package": "mlx", "version": "0.31.2"},
+        measured_kv_bytes_per_token=27648,
+        drift_footing="quantizer_only",
+        control_kl=ScalarSummary(0.011, 0.005, 0.09, 0.8),
+        control_flip_rate=0.004,
+        working_set_bytes_per_token=1024,
+        kv_partial=True,
+        kv_layers_total=26,
+        kv_layers_quantized=4,
+        kv_layers_skipped={"RotatingKVCache": 22},
+        corpus=CorpusProvenance(
+            "wikitext-2-raw", "test", "tok", 512, 512, "none", "drop", "raw", 1024, "deadbeef"
+        ),
+    )
+
+
+def _assert_no_default_left(report: object) -> None:
+    """Guard: a field added later must be populated here, or the round-trip proves nothing."""
+    for f in dataclasses.fields(report):  # type: ignore[arg-type]
+        if f.default is not dataclasses.MISSING:
+            assert getattr(report, f.name) != f.default, f"{f.name} still at its default"
+        elif f.default_factory is not dataclasses.MISSING:
+            assert getattr(report, f.name) != f.default_factory(), f"{f.name} still at default"
+
+
+def test_full_fidelity_report_round_trip():
+    """Reds if any FidelityReport field is lost or retyped by JSON render -> from_dict."""
+    full = _populated_kv_report()
+    _assert_no_default_left(full)
+    _assert_no_default_left(full.corpus)
+    assert fidelity_report_from_dict(json.loads(render_json(full))) == full
+
+
+def test_full_weight_report_round_trip():
+    """Reds if any WeightFidelityReport field is lost or retyped by JSON render -> from_dict."""
+    from tests.factories import make_weight_report
+
+    full = dataclasses.replace(
+        make_weight_report(reference_bits=8, warnings=("tok assumption",)),
+        quant_revision="aaa111",
+        reference_revision="bbb222",
+        per_layer=True,
+        device="Apple M1 Max, 32 GB",
+        quant_geometry=((4, 64, 200), (5, 32, 1)),
+        quant_n_full_precision=2,
+        quant_bits_per_weight=4.55,
+        quant_precision="mixed",
+        corpus=CorpusProvenance(
+            "wikitext-2-raw", "test", "tok", 512, 512, "none", "drop", "raw", 1024, "deadbeef"
+        ),
+    )
+    _assert_no_default_left(full)
+    _assert_no_default_left(full.corpus)
+    assert weight_report_from_dict(json.loads(render_json(full))) == full

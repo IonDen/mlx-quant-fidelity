@@ -1,6 +1,6 @@
 import json
 
-from tests.test_compare_report import _wreport
+from tests.factories import make_ranked_weight_report as _wreport
 
 from mlx_quant_fidelity.runners import _worker
 
@@ -193,3 +193,24 @@ def test_worker_parses_allow_custom_code_and_records_it(tmp_path, monkeypatch):
     )
     assert seen["allow_custom_code"] is True
     assert json.loads(out.read_text())["run_identity"]["allow_custom_code"] is True
+
+
+def test_run_weight_target_spawns_isolated_worker_with_single_token_out(tmp_path, monkeypatch):
+    """Bug: without ``-P`` a ``*.py`` in the cwd (e.g. a downloaded model folder) can shadow the
+    stdlib inside the worker; a spaced ``--out <path>`` starting with '-' breaks argparse."""
+    import subprocess
+
+    from mlx_quant_fidelity.runners import compare as cmp
+
+    seen: list[list[str]] = []
+
+    def _fake_run(cmd, **kwargs):
+        seen.append(list(cmd))
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(cmp.subprocess, "run", _fake_run)
+    cmp._run_weight_target("q", "r", tmp_path / "p.json", None)
+    argv = seen[0]
+    assert argv[1] == "-P"
+    assert any(a.startswith("--out=") for a in argv)
+    assert "--out" not in argv
