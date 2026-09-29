@@ -514,7 +514,9 @@ def test_provenance_reads_commit_from_direct_url(monkeypatch):
     )
     monkeypatch.setattr(
         "mlx_quant_fidelity.probes.kv_methods._turboquant_direct_url",
-        lambda: json.dumps({"vcs_info": {"commit_id": "abc"}}),
+        lambda: json.dumps(
+            {"url": "https://github.com/arozanov/turboquant-mlx", "vcs_info": {"commit_id": "abc"}}
+        ),
     )
     prov = TurboQuantKVMethod(bits=4, seed=7).provenance()
     assert prov["package"] == "turboquant-mlx"
@@ -539,10 +541,23 @@ def test_provenance_unknown_when_metadata_absent(monkeypatch):
     monkeypatch.setattr(
         "mlx_quant_fidelity.probes.kv_methods._turboquant_dist_version", lambda: "unknown"
     )
-    monkeypatch.setattr("mlx_quant_fidelity.probes.kv_methods._turboquant_direct_url", lambda: None)
+    monkeypatch.setattr(
+        "mlx_quant_fidelity.probes.kv_methods._turboquant_direct_url",
+        lambda: json.dumps({"url": "https://github.com/arozanov/turboquant-mlx", "vcs_info": {}}),
+    )
     prov = TurboQuantKVMethod(bits=4).provenance()
     assert prov["commit"] == "unknown"
     assert prov["dist_version"] == "unknown"
+
+
+def test_provenance_refuses_when_install_record_is_absent(monkeypatch):
+    """Bug: provenance() imported the port without the install-source check, so a squatter
+    distribution ran its code just to be described."""
+    install_fake_port(monkeypatch)
+    monkeypatch.setattr("mlx_quant_fidelity.probes.kv_methods._turboquant_installed", lambda: True)
+    monkeypatch.setattr("mlx_quant_fidelity.probes.kv_methods._turboquant_direct_url", lambda: None)
+    with pytest.raises(MethodUnavailableError, match="squatter"):
+        TurboQuantKVMethod(bits=4).provenance()
 
 
 def test_no_pin_warning_when_installed_commit_matches(monkeypatch):
@@ -877,7 +892,9 @@ def test_vonly_provenance_reads_commit_from_direct_url(monkeypatch):
     )
     monkeypatch.setattr(
         "mlx_quant_fidelity.probes.kv_methods._turboquant_direct_url",
-        lambda: json.dumps({"vcs_info": {"commit_id": "abc"}}),
+        lambda: json.dumps(
+            {"url": "https://github.com/arozanov/turboquant-mlx", "vcs_info": {"commit_id": "abc"}}
+        ),
     )
     prov = TurboQuantVOnlyKVMethod(v_bits=4, seed=7).provenance()
     assert prov["package"] == "turboquant-mlx"
@@ -898,10 +915,23 @@ def test_vonly_provenance_unknown_when_metadata_absent(monkeypatch):
     monkeypatch.setattr(
         "mlx_quant_fidelity.probes.kv_methods._turboquant_dist_version", lambda: "unknown"
     )
-    monkeypatch.setattr("mlx_quant_fidelity.probes.kv_methods._turboquant_direct_url", lambda: None)
+    monkeypatch.setattr(
+        "mlx_quant_fidelity.probes.kv_methods._turboquant_direct_url",
+        lambda: json.dumps({"url": "https://github.com/arozanov/turboquant-mlx", "vcs_info": {}}),
+    )
     prov = TurboQuantVOnlyKVMethod(v_bits=4).provenance()
     assert prov["commit"] == "unknown"
     assert prov["dist_version"] == "unknown"
+
+
+def test_vonly_provenance_refuses_when_install_record_is_absent(monkeypatch):
+    """Bug: provenance() imported the port without the install-source check, so a squatter
+    distribution ran its code just to be described."""
+    install_fake_port(monkeypatch)
+    monkeypatch.setattr("mlx_quant_fidelity.probes.kv_methods._turboquant_installed", lambda: True)
+    monkeypatch.setattr("mlx_quant_fidelity.probes.kv_methods._turboquant_direct_url", lambda: None)
+    with pytest.raises(MethodUnavailableError, match="squatter"):
+        TurboQuantVOnlyKVMethod(v_bits=4).provenance()
 
 
 def test_vonly_no_pin_warning_when_installed_commit_matches(monkeypatch):
@@ -1056,3 +1086,74 @@ def test_control_lane_protocol_is_structural():
     assert isinstance(StockKVMethod(bits=4, group_size=64), ControlLaneMethod)
     assert not isinstance(AffineKVMethod(k_bits=8, v_bits=4), ControlLaneMethod)
     assert not isinstance(TurboQuantKVMethod(bits=4), ControlLaneMethod)
+
+
+def test_packed_width_mismatch_lives_in_kv_methods_and_kv_reexports_it():
+    # bug caught: the helper drifting back into the method-agnostic probe (import cycle dodge)
+    from mlx_quant_fidelity.probes import kv, kv_methods
+
+    assert kv_methods.packed_width_mismatch(128, 6) is True
+    assert kv.packed_width_mismatch is kv_methods.packed_width_mismatch
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://github.com/arozanov/turboquant-mlx",
+        "https://github.com/arozanov/turboquant-mlx.git",
+        "https://github.com/arozanov/turboquant-mlx.git/",
+        "https://GitHub.com/Arozanov/TurboQuant-MLX.git/",
+    ],
+)
+def test_canonical_source_url_accepts_the_spellings_of_the_pinned_repo(url):
+    """Bug: a trailing `.git`, a trailing slash or different case makes the genuine install
+    look like a squatter and refuses the method."""
+    from mlx_quant_fidelity.probes.kv_methods import _TURBOQUANT_SOURCE_URL, _canonical_source_url
+
+    assert _canonical_source_url(url) == _TURBOQUANT_SOURCE_URL
+
+
+@pytest.mark.parametrize(
+    "record",
+    [
+        # right repo, but an archive/wheel install: nothing pins the commit
+        {"url": "https://github.com/arozanov/turboquant-mlx", "archive_info": {"hash": "x"}},
+        # a fork under another owner
+        {"url": "https://github.com/other/turboquant-mlx", "vcs_info": {"vcs": "git"}},
+        # a name-alike path under the right owner
+        {"url": "https://github.com/arozanov/turboquant-mlx-fork", "vcs_info": {"vcs": "git"}},
+    ],
+)
+def test_import_gate_refuses_installs_that_are_not_the_pinned_git_repo(monkeypatch, record):
+    """Bug: the gate accepts the right URL without a vcs_info record (an archive install), or a
+    near-match URL, and imports code that is not the pinned commit."""
+    from mlx_quant_fidelity.probes.kv_methods import _import_turboquant
+
+    monkeypatch.setattr("mlx_quant_fidelity.probes.kv_methods._turboquant_installed", lambda: True)
+    monkeypatch.setattr(
+        "mlx_quant_fidelity.probes.kv_methods._turboquant_direct_url",
+        lambda: json.dumps(record),
+    )
+    monkeypatch.setitem(sys.modules, "turboquant_mlx", None)
+    with pytest.raises(MethodUnavailableError, match="squatter"):
+        _import_turboquant()
+
+
+def test_absent_distribution_says_not_installed_not_squatter(monkeypatch):
+    """Bug: a machine with no turboquant-mlx at all is told it has an unrelated squatter."""
+    monkeypatch.setattr("mlx_quant_fidelity.probes.kv_methods._turboquant_installed", lambda: False)
+    monkeypatch.setattr("mlx_quant_fidelity.probes.kv_methods._turboquant_direct_url", lambda: None)
+    with pytest.raises(MethodUnavailableError) as exc:
+        TurboQuantKVMethod(bits=4).probe_capability([KVCache()])
+    assert "is not installed" in str(exc.value)
+    assert TURBOQUANT_PINNED_COMMIT in str(exc.value)
+    assert "squatter" not in str(exc.value)
+
+
+def test_present_distribution_without_git_record_is_named_a_wrong_install(monkeypatch):
+    """Bug: a present distribution with no git install record is reported as merely absent,
+    hiding that the wrong package is installed."""
+    monkeypatch.setattr("mlx_quant_fidelity.probes.kv_methods._turboquant_installed", lambda: True)
+    monkeypatch.setattr("mlx_quant_fidelity.probes.kv_methods._turboquant_direct_url", lambda: None)
+    with pytest.raises(MethodUnavailableError, match="squatter"):
+        TurboQuantKVMethod(bits=4).probe_capability([KVCache()])

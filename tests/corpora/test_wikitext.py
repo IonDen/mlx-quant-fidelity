@@ -25,6 +25,15 @@ class _NoBosTokenizer:
         return [ord(ch) % 50 + 1 for ch in text]
 
 
+class _EosAppendingTokenizer:
+    """T5 style: encode() APPENDS token 2 (EOS); nothing leads the sequence."""
+
+    name_or_path = "fake/eos-appender"
+
+    def encode(self, text, add_special_tokens=True):
+        return [ord(ch) % 50 + 1 for ch in text] + ([2] if add_special_tokens else [])
+
+
 class _NoKwargTokenizer:
     """encode() does not accept add_special_tokens at all."""
 
@@ -49,6 +58,13 @@ def test_wikitext_records_bos_when_tokenizer_adds_one(offline):
 
 def test_wikitext_records_none_for_qwen_style_tokenizer(offline):
     corpus = wikitext.load_wikitext2(_NoBosTokenizer(), chunk_length=8)
+    assert corpus.provenance.bos_policy == "none"
+
+
+def test_wikitext_records_none_when_the_tokenizer_appends_eos(offline):
+    """Bug: comparing lengths alone records a trailing EOS as a leading BOS ('first-chunk'), so
+    the report claims chunk 0 starts with a special token that is not there."""
+    corpus = wikitext.load_wikitext2(_EosAppendingTokenizer(), chunk_length=8)
     assert corpus.provenance.bos_policy == "none"
 
 
@@ -81,3 +97,18 @@ def test_wikitext_fetch_is_revision_pinned(monkeypatch):
     pinned = "b08601e04326c79dfdd32d625aee71d232d685c3"
     assert seen["kwargs"]["revision"] == pinned  # type: ignore[index]
     assert corpus.provenance.dataset_revision == pinned
+
+
+class _EmptyPlainTokenizer:
+    """Pathological: the plain encoding of the probe text is empty, the default adds a BOS."""
+
+    name_or_path = "fake/empty-plain"
+
+    def encode(self, text, add_special_tokens=True):
+        return [100] if add_special_tokens else []
+
+
+def test_bos_policy_handles_an_empty_plain_encoding():
+    """Bug: `without_special[0]` raised IndexError while loading the corpus when the plain
+    encoding came back empty; a leading special token must still be recorded."""
+    assert wikitext._bos_policy(_EmptyPlainTokenizer()) == "first-chunk"

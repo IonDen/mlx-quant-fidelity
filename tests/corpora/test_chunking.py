@@ -76,7 +76,12 @@ def test_load_wikitext2_live_provenance_and_chunks():
     assert prov.split == "test"
     assert prov.chunk_length == 512
     assert prov.stride == 512
-    assert prov.bos_policy == "none"
+    # The Llama-3 tokenizer's default encode prepends <|begin_of_text|> (id 128000); the
+    # provenance must say so, and chunk 0 must really start with it (this assertion used to
+    # pin "none", which was the recorded field disagreeing with the tokens actually scored).
+    assert prov.bos_policy == "first-chunk"
+    assert int(corpus.chunks[0][0]) == 128000
+    assert prov.dataset_revision == "b08601e04326c79dfdd32d625aee71d232d685c3"
     assert prov.final_chunk_policy == "drop"
     assert prov.normalization == "raw"
     assert prov.tokenizer_id != ""

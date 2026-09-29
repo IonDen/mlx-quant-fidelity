@@ -977,3 +977,26 @@ def test_comparison_markdown_bundled_kl_follows_drift_footing_not_method_name() 
     row = next(line for line in md.splitlines() if "| `custom:1` |" in line)
     cells = [c.strip() for c in row.strip().strip("|").split("|")]
     assert cells[5] == "0.1500", f"bundled KL: {cells}"
+
+
+def test_comparison_target_result_failed_and_skipped_constructors() -> None:
+    # bug caught: a positional constructor swap (error_type <-> message, reason <-> message)
+    failed = ComparisonTargetResult.failed("a", "CorruptPartial", "bad body")
+    assert (failed.label, failed.status, failed.error_type, failed.message) == (
+        "a",
+        "failed",
+        "CorruptPartial",
+        "bad body",
+    )
+    assert failed.report is None
+    assert failed.point is None
+    assert failed.excluded_reason is None
+    skipped = ComparisonTargetResult.skipped("b", "over budget")
+    assert (skipped.label, skipped.status, skipped.excluded_reason) == (
+        "b",
+        "skipped",
+        "over budget",
+    )
+    assert skipped.error_type is None
+    assert skipped.message is None
+    assert skipped.report is None

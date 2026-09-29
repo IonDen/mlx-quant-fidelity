@@ -64,6 +64,10 @@ def collect_kv_points(samples_dir: Path) -> list[CliffPoint]:
         data: dict[str, Any] = json.loads(path.read_text())
         if "kv_bits" not in data:
             continue
+        # The chart is the stock method at full coverage; a third-party cache or a partial
+        # hybrid-model report would be drawn as a stock point. Legacy samples carry neither key.
+        if data.get("kv_method") not in (None, "stock") or data.get("kv_partial"):
+            continue
         if data["corpus"]["chunk_length"] != 512 or data["quantize_mode"] != "stress":
             continue
         points.append(

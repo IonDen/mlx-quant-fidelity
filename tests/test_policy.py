@@ -1,3 +1,7 @@
+import math
+
+import pytest
+
 from mlx_quant_fidelity.policy import _WEIGHT_TIERS_v0_2_0, qualifies, tier_rank, verdict_for
 
 
@@ -120,3 +124,33 @@ def test_qualifies_rejects_nan_kl():
 
     assert qualifies(kl_mean=float("nan"), verdict="good", max_kld=0.1, min_tier=None) is False
     assert qualifies(kl_mean=float("nan"), verdict="good", max_kld=None, min_tier=None) is False
+
+
+# Literals from docs/threshold-policy.md (KV tiers), not read from policy._KV_TIERS.
+_KV_GOOD = {"kl_mean": 0.01, "kl_p99": 0.10, "flip_rate": 0.01}
+_KV_MARGINAL = {"kl_mean": 0.10, "kl_p99": 1.00, "flip_rate": 0.05}
+
+
+@pytest.mark.parametrize("axis", ["kl_mean", "kl_p99", "flip_rate"])
+def test_kv_good_ceiling_relaxation_side_is_pinned(axis):
+    """Reds if any good ceiling is loosened: one ulp over it must drop to marginal."""
+    at = dict(_KV_GOOD)
+    assert verdict_for(**at) == "good"
+    over = dict(at, **{axis: math.nextafter(at[axis], 1.0)})
+    assert verdict_for(**over) == "marginal"
+
+
+@pytest.mark.parametrize("axis", ["kl_mean", "kl_p99", "flip_rate"])
+def test_kv_marginal_ceiling_relaxation_side_is_pinned(axis):
+    """Reds if any marginal ceiling is loosened: one ulp over it must drop to bad."""
+    at = dict(_KV_MARGINAL)
+    assert verdict_for(**at) == "marginal"
+    over = dict(at, **{axis: math.nextafter(at[axis], 2.0)})
+    assert verdict_for(**over) == "bad"
+
+
+def test_weight_tiers_is_public_and_the_old_private_name_is_an_alias():
+    # bug caught: probes/weights importing a private, version-suffixed name across modules
+    from mlx_quant_fidelity import policy
+
+    assert policy.WEIGHT_TIERS is policy._WEIGHT_TIERS_v0_2_0

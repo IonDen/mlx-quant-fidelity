@@ -224,7 +224,7 @@ def test_kv_refuses_custom_code_before_load(monkeypatch, capsys):
 
     from mlx_quant_fidelity.probes import _preload
 
-    monkeypatch.setattr(_preload, "read_model_config", lambda m, r=None: {"model_file": "m.py"})
+    monkeypatch.setattr(_preload, "_fetch_config", lambda m, r=None: ({"model_file": "m.py"}, None))
 
     def boom(*a, **k):
         raise AssertionError("mlx_lm.load must not run")
@@ -355,7 +355,7 @@ def test_cli_sweep_budget_with_incomplete_geometry_exits_2(monkeypatch, capsys):
 
 @pytest.mark.parametrize(
     ("extra", "expected"),
-    [([], 7200.0), (["--worker-timeout", "90"], 90.0), (["--worker-timeout", "0"], None)],
+    [([], 21600.0), (["--worker-timeout", "90"], 90.0), (["--worker-timeout", "0"], None)],
 )
 def test_compare_weights_worker_timeout_flag(monkeypatch, extra, expected):
     """Reds if --worker-timeout is ignored, or 0 fails to disable the limit."""
@@ -434,3 +434,59 @@ def test_compare_kv_reports_progress_on_stderr(monkeypatch, capsys):
     captured = capsys.readouterr()
     assert "[1/2] 4:64" in captured.err
     assert json.loads(captured.out)["mode"] == "kv"
+
+
+def test_compare_weights_negative_worker_timeout_is_a_usage_error(monkeypatch, capsys):
+    """Bug: a negative --worker-timeout silently meant 'no limit' (the `> 0` else-branch)."""
+    monkeypatch.setattr(cli, "compare_weight_fidelity", lambda *a, **k: pytest.fail("must not run"))
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["compare", "weights", "a", "b", "--reference", "r", "--worker-timeout", "-5"])
+    assert exc.value.code == 2
+    assert "worker-timeout" in capsys.readouterr().err
+
+
+def test_compare_weights_infinite_worker_timeout_is_a_usage_error(monkeypatch, capsys):
+    """Bug: `--worker-timeout inf` passed the >= 0 check and crashed subprocess.run with an
+    OverflowError reported as an internal error (exit 1) instead of a usage error."""
+    monkeypatch.setattr(cli, "compare_weight_fidelity", lambda *a, **k: pytest.fail("must not run"))
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["compare", "weights", "a", "b", "--reference", "r", "--worker-timeout", "inf"])
+    assert exc.value.code == 2
+    assert "worker-timeout" in capsys.readouterr().err
+
+
+def test_compare_weights_unreadable_reference_exits_2(monkeypatch, capsys, tmp_path):
+    """Bug: an unreadable shared reference exits 1 (a report of failed rows) instead of 2."""
+    from mlx_quant_fidelity.errors import ModelNotAccessibleError
+    from mlx_quant_fidelity.probes import _preload
+    from mlx_quant_fidelity.runners import compare as cmp
+
+    def _fetch(model, revision=None):
+        if model == "ref":
+            raise ModelNotAccessibleError("could not read config.json for 'ref'")
+        return {}, None
+
+    monkeypatch.setattr(_preload, "_fetch_config", _fetch)
+    monkeypatch.setattr(
+        cmp, "_run_weight_target", lambda *a, **k: pytest.fail("no worker may spawn")
+    )
+    monkeypatch.chdir(tmp_path)
+    assert main(["compare", "weights", "q8", "q4", "--reference", "ref"]) == 2
+    assert "ref" in capsys.readouterr().err
+
+
+def test_compare_weights_oversized_worker_timeout_is_a_usage_error(monkeypatch, capsys):
+    """Bug: a timeout above ~2,147,483 s passes the >= 0 check and overflows
+    subprocess.run on macOS (an internal error, exit 1) instead of a usage error."""
+    monkeypatch.setattr(cli, "compare_weight_fidelity", lambda *a, **k: pytest.fail("must not run"))
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["compare", "weights", "a", "b", "--reference", "r", "--worker-timeout", "3e9"])
+    assert exc.value.code == 2
+    err = capsys.readouterr().err
+    assert "worker-timeout" in err
+    assert "use 0 to disable" in err
+    assert "2,000,000" in err  # readable limit, not "2e+06"
+
+
+def test_worker_timeout_at_the_bound_is_accepted():
+    assert cli._non_negative_seconds("2000000") == 2_000_000.0

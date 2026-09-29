@@ -7,6 +7,7 @@ DO NOT run in CI or in a subagent.
 
 import mlx.core as mx
 import pytest
+from tests.probes.port_skip import port_or_skip
 
 from mlx_quant_fidelity.corpora.provenance import Corpus, CorpusProvenance
 from mlx_quant_fidelity.metrics import kl_divergence
@@ -80,7 +81,6 @@ def test_deployment_post_boundary_matches_stress(method_name):
     """
     from mlx_lm import load
 
-    from mlx_quant_fidelity.errors import MethodUnavailableError
     from mlx_quant_fidelity.probes.kv import score_kv_config
     from mlx_quant_fidelity.probes.kv_methods import StockKVMethod, TurboQuantKVMethod
 
@@ -90,10 +90,7 @@ def test_deployment_post_boundary_matches_stress(method_name):
         else TurboQuantKVMethod(bits=4)
     )
     if method_name == "turboquant":
-        try:
-            method.probe_capability([])
-        except MethodUnavailableError as exc:
-            pytest.skip(str(exc))
+        port_or_skip(method)
     model, tok = load(MODEL)
     corpus = _tiny_corpus(tok, chunk_length=64, n_chunks=2)
     stress = score_kv_config(model, corpus, model_id=MODEL, method=method, quantize_start=0)

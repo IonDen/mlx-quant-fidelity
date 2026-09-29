@@ -50,17 +50,17 @@ def _reduce_pair(
 
 
 def _require_finite(name: str, values: np.ndarray, *, allow_inf: bool = False) -> None:
-    """Raise NonFiniteMetricError on NaN (and on +/-inf unless ``allow_inf``).
+    """Raise NonFiniteMetricError on NaN and -inf, and on +inf unless ``allow_inf``.
 
     A per-position KL of +inf is the documented zero-probability policy, so KL passes
-    ``allow_inf=True``; NLLs must be fully finite (they feed perplexity).
+    ``allow_inf=True``; -inf is never legal. NLLs must be fully finite (they feed perplexity).
     """
     arr = np.asarray(values, dtype=np.float64)
-    bad = np.isnan(arr).any() if allow_inf else not np.isfinite(arr).all()
+    bad = (np.isnan(arr) | np.isneginf(arr)).any() if allow_inf else not np.isfinite(arr).all()
     if bad:
         raise NonFiniteMetricError(
             f"{name} contains non-finite values (NaN"
-            + ("" if allow_inf else " or inf")
+            + (" or -inf" if allow_inf else " or inf")
             + "); a NaN would pass every threshold and could be ranked as a real "
             "measurement. Likely an fp16 overflow in the forward pass or a third-party kernel."
         )

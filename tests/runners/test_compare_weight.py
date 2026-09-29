@@ -2,10 +2,18 @@ import dataclasses
 import json
 
 import pytest
-from tests.test_compare_report import _wreport
+from tests.factories import make_ranked_weight_report as _wreport
 
 from mlx_quant_fidelity.errors import CompareConfigError
 from mlx_quant_fidelity.runners import compare as cmp
+
+
+@pytest.fixture(autouse=True)
+def _reference_config_readable(monkeypatch):
+    """The reference pre-check reads config.json; keep it offline (tests override to fail)."""
+    from mlx_quant_fidelity.probes import _preload
+
+    monkeypatch.setattr(_preload, "_fetch_config", lambda m, r=None: ({}, None))
 
 
 def _ok_envelope(label, kl_mean, cost):
@@ -188,7 +196,7 @@ def test_compare_weight_failed_partial_is_recomputed(monkeypatch, tmp_path):
     Line 202 (elif env is not None: env = None) is the branch for non-ok, non-corrupt
     partials — they are discarded and the target is re-run.
     """
-    from tests.test_compare_report import _wreport
+    from tests.factories import make_ranked_weight_report as _wreport
 
     # Pre-seed a failed partial for q8 (no reference identity stored)
     failed_envelope = {"status": "failed", "error_type": "RuntimeError", "message": "boom"}
@@ -712,8 +720,9 @@ def test_weight_partials_survive_unrelated_schema_bumps(monkeypatch, tmp_path):
 
 def test_compare_weight_old_schema_version_partial_recomputes(monkeypatch, tmp_path):
     """A partial written at schema_version=1 (pre-revision-identity) must not resume once the
-    live constant is 2 — the identity dict shape changed (it gained quant_revision/
-    reference_revision), so an old partial's identity can never equal the new expected one.
+    live constant is 3 — the identity dict shape changed (it gained quant_revision/
+    reference_revision, then the mlx / mlx-lm versions), so an old partial's identity can
+    never equal the new expected one.
     """
     stale_env = _weight_ok_envelope_with_identity("q8", 0.01, 8000, schema_version=1)
     (tmp_path / "q8.json").write_text(json.dumps(stale_env))
@@ -738,7 +747,35 @@ def test_compare_weight_old_schema_version_partial_recomputes(monkeypatch, tmp_p
 
     cmp.compare_weight_fidelity(["q8", "q9"], "ref", artifacts_dir=tmp_path)
 
-    assert "q8" in calls, "a schema-1 partial must recompute under the schema-2 constant"
+    assert "q8" in calls, "a schema-1 partial must recompute under the current schema constant"
+
+
+def test_compare_weight_stale_mlx_version_partial_is_recomputed(monkeypatch, tmp_path):
+    """Bug: a partial measured under another mlx version resumes, so a ranking silently mixes
+    numbers from two runtimes (kernels and numerics change between mlx releases)."""
+    stale_env = _weight_ok_envelope_with_identity("q8", 0.01, 8000)
+    stale_env["run_identity"]["mlx_version"] = "0.0.0-stale"
+    (tmp_path / "q8.json").write_text(json.dumps(stale_env))
+
+    calls = []
+
+    def _fake_run(
+        quant,
+        reference,
+        partial_path,
+        max_chunks,
+        quant_revision=None,
+        reference_revision=None,
+        timeout_s=None,
+    ):
+        calls.append(quant)
+        env = _weight_ok_envelope_with_identity(quant, 0.01, 8000)
+        partial_path.write_text(json.dumps(env))
+        return env
+
+    monkeypatch.setattr(cmp, "_run_weight_target", _fake_run)
+    cmp.compare_weight_fidelity(["q8", "q9"], "ref", artifacts_dir=tmp_path)
+    assert "q8" in calls, "a partial from another mlx version must be recomputed"
 
 
 def test_compare_weight_stale_quant_revision_partial_is_recomputed(monkeypatch, tmp_path):
@@ -876,9 +913,8 @@ def test_run_weight_target_passes_revisions_to_worker_cmd_only_when_set(monkeypa
     )
 
     cmd = captured["cmd"]
-    assert "--quant-revision" in cmd
-    assert cmd[cmd.index("--quant-revision") + 1] == "rev-q"
-    assert "--reference-revision" not in cmd
+    assert "--quant-revision=rev-q" in cmd
+    assert not any(t.startswith("--reference-revision") for t in cmd)
 
 
 # ── repo[@revision] target grammar (Task 5) ──────────────────────────────────
@@ -1051,8 +1087,99 @@ def test_run_weight_target_timeout_is_a_failed_row(monkeypatch, tmp_path):
     assert env == {
         "status": "failed",
         "error_type": "WorkerTimeout",
-        "message": "worker exceeded 90s",
+        "message": "worker exceeded 90s; raise --worker-timeout (0 disables) for long "
+        "full-corpus runs",
     }
+
+
+def test_run_weight_target_failed_worker_envelope(monkeypatch, tmp_path):
+    """Reds if a non-zero worker exit escapes as an exception, or drops the worker's stderr."""
+    import subprocess
+
+    def fake_run(cmd, **kwargs):
+        raise subprocess.CalledProcessError(3, cmd, output="", stderr="  boom: out of memory \n")
+
+    monkeypatch.setattr(cmp.subprocess, "run", fake_run)
+    env = cmp._run_weight_target("q/r", "ref/r", tmp_path / "o.json", None)
+    assert env == {
+        "status": "failed",
+        "error_type": "WorkerError",
+        "message": "boom: out of memory",
+    }
+
+
+def test_run_weight_target_missing_partial(monkeypatch, tmp_path):
+    """Reds if a worker that exits 0 without writing its partial reads as success."""
+    import subprocess
+
+    monkeypatch.setattr(
+        cmp.subprocess, "run", lambda cmd, **kw: subprocess.CompletedProcess(cmd, 0, "", "")
+    )
+    env = cmp._run_weight_target("q/r", "ref/r", tmp_path / "absent.json", None)
+    assert env == {
+        "status": "failed",
+        "error_type": "WorkerError",
+        "message": "worker wrote no partial",
+    }
+
+
+def test_run_weight_target_returns_the_parsed_envelope_and_builds_the_command(
+    monkeypatch, tmp_path
+):
+    """Reds if the worker command drops --quant/--reference/--out or an opt-in flag, or the
+    parsed partial is not what the caller gets back."""
+    import subprocess
+
+    out = tmp_path / "o.json"
+    out.write_text(json.dumps({"status": "ok", "report": {"x": 1}}))
+    seen: dict[str, list[str]] = {}
+
+    def fake_run(cmd, **kw):
+        seen["cmd"] = cmd
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(cmp.subprocess, "run", fake_run)
+    env = cmp._run_weight_target(
+        "q/r", "ref/r", out, 5, quant_revision="abc", allow_custom_code=True
+    )
+    assert env == {"status": "ok", "report": {"x": 1}}
+    cmd = seen["cmd"]
+    assert "--quant=q/r" in cmd
+    assert "--reference=ref/r" in cmd
+    assert f"--out={out}" in cmd
+    assert cmd[cmd.index("--max-chunks") + 1] == "5"
+    assert "--quant-revision=abc" in cmd
+    assert "--allow-custom-code" in cmd
+    assert not any(t.startswith("--reference-revision") for t in cmd)
+
+
+def test_run_weight_target_binds_dash_leading_ids_to_their_flag(monkeypatch, tmp_path):
+    """Bug: a repo id or revision starting with '-' becomes a separate token the worker's argparse
+    reads as an option (flag injection, e.g. an id of '--allow-custom-code')."""
+    import subprocess
+
+    out = tmp_path / "o.json"
+    out.write_text(json.dumps({"status": "ok", "report": {}}))
+    seen: dict[str, list[str]] = {}
+
+    def fake_run(cmd, **kw):
+        seen["cmd"] = cmd
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(cmp.subprocess, "run", fake_run)
+    cmp._run_weight_target(
+        "--allow-custom-code",
+        "-ref",
+        out,
+        None,
+        quant_revision="-rq",
+        reference_revision="-rr",
+    )
+    cmd = seen["cmd"]
+    for token in ("--allow-custom-code", "-ref", "-rq", "-rr"):
+        assert token not in cmd  # never a free-standing token
+    assert {"--quant=--allow-custom-code", "--reference=-ref"} <= set(cmd)
+    assert {"--quant-revision=-rq", "--reference-revision=-rr"} <= set(cmd)
 
 
 def test_compare_weight_forwards_worker_timeout_only_when_set(monkeypatch, tmp_path):
@@ -1064,7 +1191,7 @@ def test_compare_weight_forwards_worker_timeout_only_when_set(monkeypatch, tmp_p
 
     monkeypatch.setattr(cmp, "_run_weight_target", _fake_run)
     cmp.compare_weight_fidelity(["a", "b"], "ref", artifacts_dir=tmp_path)
-    assert calls[0]["timeout_s"] == 7200.0
+    assert calls[0]["timeout_s"] == 21600.0
     calls.clear()
     cmp.compare_weight_fidelity(
         ["a", "b"], "ref", artifacts_dir=tmp_path / "x", worker_timeout_s=None
@@ -1094,3 +1221,50 @@ def test_compare_weight_reports_target_progress(monkeypatch, tmp_path):
     seen: list[str] = []
     cmp.compare_weight_fidelity(["a", "b"], "ref", artifacts_dir=tmp_path, progress=seen.append)
     assert seen == ["[1/2] a", "[2/2] b"]
+
+
+def test_unreadable_reference_raises_before_any_worker_spawns(monkeypatch, tmp_path):
+    """Bug: an unreadable shared reference is recorded as N identical failed rows (one per
+    spawned worker) instead of one up-front user error."""
+    from mlx_quant_fidelity.errors import ModelNotAccessibleError
+    from mlx_quant_fidelity.probes import _preload
+
+    def _fetch(model, revision=None):
+        if model == "ref":
+            raise ModelNotAccessibleError("could not read config.json for 'ref'")
+        return {}, None
+
+    def _no_worker(*a, **k):
+        raise AssertionError("no worker may spawn when the reference is unreadable")
+
+    monkeypatch.setattr(_preload, "_fetch_config", _fetch)
+    monkeypatch.setattr(cmp, "_run_weight_target", _no_worker)
+    with pytest.raises(ModelNotAccessibleError):
+        cmp.compare_weight_fidelity(["q8", "q4"], "ref", artifacts_dir=tmp_path)
+
+
+def test_custom_code_reference_raises_before_any_worker_spawns(monkeypatch, tmp_path):
+    """Bug: a reference naming a model_file is only refused inside each worker."""
+    from mlx_quant_fidelity.errors import UntrustedModelCodeError
+    from mlx_quant_fidelity.probes import _preload
+
+    monkeypatch.setattr(
+        _preload,
+        "_fetch_config",
+        lambda m, r=None: ({"model_file": "m.py"} if m == "ref" else {}, None),
+    )
+
+    def _no_worker(*a, **k):
+        raise AssertionError("no worker may spawn")
+
+    monkeypatch.setattr(cmp, "_run_weight_target", _no_worker)
+    with pytest.raises(UntrustedModelCodeError):
+        cmp.compare_weight_fidelity(["q8", "q4"], "ref", artifacts_dir=tmp_path)
+
+
+def test_api_oversized_worker_timeout_raises_config_error(tmp_path):
+    """Bug: the Python API accepts a timeout that overflows subprocess.run on macOS."""
+    with pytest.raises(CompareConfigError, match="worker_timeout_s"):
+        cmp.compare_weight_fidelity(
+            ["q8", "q4"], "ref", artifacts_dir=tmp_path, worker_timeout_s=3e9
+        )

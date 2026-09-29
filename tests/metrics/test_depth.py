@@ -1,3 +1,5 @@
+import itertools
+
 import numpy as np
 import pytest
 
@@ -63,3 +65,18 @@ def test_unequal_chunk_lengths_raise():
 def test_empty_input_raises():
     with pytest.raises(ValueError, match="at least one"):
         bucket_by_depth([])
+
+
+def test_uneven_positions_cover_every_position():
+    """Reds if floor-stepped edges leave the remainder in the last bucket (or drop it).
+
+    511 positions (a 512-token window) over 8 buckets: 511 = 8*63 + 7, so seven buckets are 64
+    wide and one is 63; no bucket may be wider than 64 or narrower than 63.
+    """
+    buckets = bucket_by_depth([np.arange(511.0)], n_buckets=8)
+    assert len(buckets) == 8
+    assert sum(b.n_positions for b in buckets) == 511
+    assert buckets[0].start == 0
+    assert buckets[-1].end == 511
+    assert {b.end - b.start for b in buckets} <= {63, 64}
+    assert all(a.end == b.start for a, b in itertools.pairwise(buckets))
