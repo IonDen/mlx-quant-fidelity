@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 
 from mlx_quant_fidelity._memory_caps import install_memory_caps
 from mlx_quant_fidelity.badge import render_badge_markdown
-from mlx_quant_fidelity.errors import QuantFidelityError
+from mlx_quant_fidelity.errors import CompareConfigError, QuantFidelityError
 from mlx_quant_fidelity.probes._preload import read_model_config
 from mlx_quant_fidelity.probes.kv import measure_kv_fidelity
 from mlx_quant_fidelity.probes.kv_methods import (
@@ -47,7 +47,13 @@ def _parse_kv_configs(raw: str) -> list[KVCacheMethod]:
 
     Raises ValueError (via CompareConfigError) on a malformed entry.
     """
-    return [parse_method_spec(item) for item in raw.split(",")]
+    methods: list[KVCacheMethod] = []
+    for item in raw.split(","):
+        try:
+            methods.append(parse_method_spec(item))
+        except ValueError as exc:
+            raise CompareConfigError(f"--configs entry: {exc}") from exc
+    return methods
 
 
 def _resolve_kv_method(args: argparse.Namespace) -> KVCacheMethod:
@@ -70,7 +76,10 @@ def _resolve_kv_method(args: argparse.Namespace) -> KVCacheMethod:
             raise ValueError(
                 "--kv-method with a spec string replaces --kv-bits/--kv-group-size/--kv-seed"
             )
-        return parse_method_spec(value)
+        try:
+            return parse_method_spec(value)
+        except CompareConfigError as exc:
+            raise CompareConfigError(f"--kv-method: {exc}") from exc
     if value == "stock":
         if args.kv_seed is not None:
             raise ValueError("--kv-seed is only valid with --kv-method turboquant")

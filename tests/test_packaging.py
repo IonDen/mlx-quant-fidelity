@@ -75,3 +75,14 @@ def test_ci_tests_every_declared_python_version() -> None:
     tested = {v.strip().strip("\"'") for v in matrix.group(1).split(",")}
     assert declared == {"3.11", "3.12", "3.13"}
     assert tested == declared
+
+
+def test_pyarrow_floor_excludes_cve_2023_47248() -> None:
+    # pyarrow 14.0.0 and older unpickle attacker-controlled data (CVE-2023-47248); the floor
+    # must start at the first fixed release, 14.0.1.
+    from packaging.requirements import Requirement
+
+    deps = _pyproject()["project"]["dependencies"]  # type: ignore[index]
+    (pyarrow,) = [Requirement(d) for d in deps if Requirement(d).name == "pyarrow"]
+    assert "14.0.0" not in pyarrow.specifier
+    assert "14.0.1" in pyarrow.specifier

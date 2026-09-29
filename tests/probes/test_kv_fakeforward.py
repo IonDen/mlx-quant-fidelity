@@ -776,12 +776,12 @@ def test_score_kv_config_deployment_reraises_unrelated_value_error(monkeypatch):
 def test_packed_width_message_offers_only_workable_bits():
     """The remedy list is computed, not a fixed '2/3/4/8' string that can itself be wrong.
 
-    At head_dim=80 both bits=3 (8 vs 7) and bits=6 (16 vs 15) mismatch, so a message naming
+    At head_dim=160 both bits=3 and bits=6 mismatch, so a message naming
     bits 3 sends the user straight into a second crash.
     """
-    model = _FakeDivergentModel(head_dim=80)
+    model = _FakeDivergentModel(head_dim=160)
     with pytest.raises(CacheNotQuantizableError) as excinfo:
-        score_kv_config(model, _kv_corpus(1), model_id="fake", kv_bits=6, kv_group_size=16)
+        score_kv_config(model, _kv_corpus(1), model_id="fake", kv_bits=6, kv_group_size=32)
     msg = str(excinfo.value)
     assert "use bits 2/4/8" in msg
     assert "2/3/4/8" not in msg
@@ -1602,3 +1602,86 @@ def test_score_kv_config_is_silent_without_progress(monkeypatch, capsys):
     captured = capsys.readouterr()
     assert captured.out == ""
     assert captured.err == ""
+
+
+def test_custom_method_with_control_lane_reports_bundled_footing(monkeypatch):
+    """Reds if drift_footing / the control lane key off the method NAME ('stock') rather than
+    the presence of a control lane: a custom method with control_method is bundled."""
+    _patch_prompt_cache(monkeypatch)
+    report = score_kv_config(
+        FakeMethodModel(control_peak=2),
+        _kv_corpus(1, 4),
+        model_id="m",
+        method=FakeKVMethod(stock_like=True, name="custom"),
+        control=True,
+    )
+    assert report.kv_method == "custom"
+    assert report.drift_footing == "bundled"
+    assert report.control_kl is not None
+
+
+def test_custom_method_without_control_lane_reports_quantizer_only_footing(monkeypatch):
+    _patch_prompt_cache(monkeypatch)
+    report = score_kv_config(
+        FakeMethodModel(),
+        _kv_corpus(1, 4),
+        model_id="m",
+        method=FakeKVMethod(name="stock"),  # named stock but no control lane
+    )
+    assert report.drift_footing == "quantizer_only"
+
+
+def test_measure_kv_fidelity_checks_availability_before_preload_and_load(monkeypatch):
+    """Reds if ensure_available / bits validation run after preload_check (network) or load."""
+    import mlx_lm
+
+    from mlx_quant_fidelity.errors import MethodUnavailableError
+
+    order: list[str] = []
+    monkeypatch.setattr(
+        kvmod, "preload_check", lambda m, r, *, allow_custom_code: order.append("preload") or {}
+    )
+    monkeypatch.setattr(mlx_lm, "load", lambda *a, **k: order.append("load"))
+
+    class _Unavailable(FakeKVMethod):
+        def ensure_available(self):
+            order.append("ensure_available")
+            raise MethodUnavailableError("port missing")
+
+    with pytest.raises(MethodUnavailableError):
+        measure_kv_fidelity("any-model", method=_Unavailable())
+    assert order == ["ensure_available"]
+
+
+def test_report_provenance_n_tokens_matches_scored_chunks(monkeypatch):
+    """Reds if max_chunks slices the chunks but the report keeps the full corpus token count."""
+    _patch_prompt_cache(monkeypatch)
+    report = score_kv_config(
+        FakeMethodModel(),
+        _kv_corpus(3, 4),  # provenance n_tokens = 12
+        model_id="m",
+        method=FakeKVMethod(),
+        max_chunks=2,
+    )
+    assert report.n_chunks == 2
+    assert report.corpus.n_tokens == 8
+
+
+def test_report_provenance_untouched_when_max_chunks_does_not_slice(monkeypatch):
+    _patch_prompt_cache(monkeypatch)
+    corpus = _kv_corpus(2, 4)
+    report = score_kv_config(
+        FakeMethodModel(), corpus, model_id="m", method=FakeKVMethod(), max_chunks=5
+    )
+    assert report.corpus == corpus.provenance
+
+
+def test_kv_rejects_single_token_chunk(monkeypatch):
+    """Reds if a 1-token chunk (zero teacher-forced positions) reaches the scoring loop."""
+    _patch_prompt_cache(monkeypatch)
+    bad = Corpus(
+        chunks=(mx.array([0, 1, 2, 0]), mx.array([1])),
+        provenance=CorpusProvenance("x", "test", "org/m", 4, 4, "none", "drop", "raw", 5),
+    )
+    with pytest.raises(CorpusError, match="at least 2 tokens"):
+        score_kv_config(FakeMethodModel(), bad, model_id="m", method=FakeKVMethod())

@@ -328,3 +328,30 @@ def test_control_kl_non_dict_raises_report_schema_error():
     d["control_kl"] = "boom"
     with pytest.raises(ReportSchemaError):
         fidelity_report_from_dict(d)
+
+
+def test_markdown_title_marks_partial_coverage() -> None:
+    """Reds if a partial-coverage report's title and verdict line read like whole-model ones."""
+    partial = _mk_report(kv_partial=True, kv_layers_total=26, kv_layers_quantized=4)
+    lines = render_markdown(partial).splitlines()
+    assert lines[0].endswith("(partial: 4/26 layers)")
+    verdict_line = next(line for line in lines if line.startswith("**Verdict:**"))
+    assert "(partial coverage)" in verdict_line
+    full = render_markdown(_report())
+    assert "partial" not in full.splitlines()[0]
+    assert "(partial coverage)" not in full
+
+
+def test_old_report_rehydrates_without_dataset_revision() -> None:
+    """Reds if a report persisted before the dataset revision was recorded stops loading."""
+    old = dataclasses.asdict(_report())
+    del old["corpus"]["dataset_revision"]
+    back = fidelity_report_from_dict(old)
+    assert back.corpus.dataset_revision is None
+    assert back.corpus.n_tokens == 1024
+
+
+def test_dataset_revision_round_trips() -> None:
+    rev = "b08601e04326c79dfdd32d625aee71d232d685c3"
+    report = _mk_report(corpus=dataclasses.replace(_report().corpus, dataset_revision=rev))
+    assert fidelity_report_from_dict(json.loads(render_json(report))).corpus.dataset_revision == rev

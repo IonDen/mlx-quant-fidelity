@@ -7,7 +7,8 @@ Stock mlx-lm ``QuantizedKVCache`` is the reference implementation; third-party c
 
 import importlib.metadata
 import json
-from collections.abc import Iterator
+import types
+from collections.abc import Callable, Iterator
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
@@ -29,6 +30,8 @@ TURBOQUANT_INSTALL_HINT = (
 )
 
 _STOCK_BITS: tuple[int, ...] = (2, 3, 4, 6, 8)
+SUPPORTED_GROUP_SIZES: tuple[int, ...] = (32, 64, 128)
+_TURBOQUANT_SOURCE_URL = "https://github.com/arozanov/turboquant-mlx"
 
 
 class KVCacheMethod(Protocol):
@@ -55,6 +58,21 @@ class KVCacheMethod(Protocol):
     @property
     def params(self) -> dict[str, int]:
         """JSON-stable (int-valued) parameters; part of the compare partial identity."""
+        ...
+
+    def validate_before_load(self) -> None:
+        """Model-free parameter validation, run before any network access or model load.
+
+        A no-op for a method with nothing to reject without a model (see
+        :func:`check_before_load`, which tolerates methods that omit it).
+        """
+        ...
+
+    def ensure_available(self) -> None:
+        """Prove the method's runtime is installed and shaped as expected, before any load.
+
+        Raises MethodUnavailableError; a no-op for methods that need no third-party package.
+        """
         ...
 
     def check(self, *, head_dim: int | None, model_type: str) -> list[str]:
@@ -98,6 +116,67 @@ class KVCacheMethod(Protocol):
     def report_warnings(self) -> list[str]:
         """Method-specific notes the report must carry (numerics path, pin mismatch)."""
         ...
+
+
+@runtime_checkable
+class ControlLaneMethod(Protocol):
+    """Optional capability: the method has a bundled path with a quantizer-only control lane.
+
+    Stock mlx-lm rides quantized attention (bundled numerics); its ``control_method()`` returns
+    the dequantize-on-fetch equivalent. ``probes/kv.py`` and ``runners/compare.py`` branch on
+    ``isinstance(method, ControlLaneMethod)`` rather than on the method's name.
+    """
+
+    def control_method(self) -> KVCacheMethod:
+        """The quantizer-only control method at equal bits."""
+        ...
+
+
+def check_before_load(method: KVCacheMethod) -> None:
+    """Run a method's model-free validation and availability checks (before preload / load).
+
+    ``validate_before_load`` and ``ensure_available`` are optional on third-party methods; a
+    method that omits either is treated as having nothing to check.
+    """
+    for hook in ("validate_before_load", "ensure_available"):
+        fn = getattr(method, hook, None)
+        if fn is not None:
+            fn()
+
+
+def _require_plain_kv_cache(cache: list[object], who: str) -> None:
+    """Refuse any layer that is not a plain mlx-lm ``KVCache`` (``who`` names the method)."""
+    from mlx_lm.models.cache import KVCache
+
+    for layer in cache:
+        if type(layer) is not KVCache:
+            raise CacheNotQuantizableError(
+                f"cache layer {type(layer).__name__} is not a plain KVCache; {who} only "
+                "replaces plain per-layer caches (sliding-window / MLA / mixed models are "
+                "not supported)."
+            )
+
+
+def _replay_prefix(
+    fp_cache: list[object], factory: Callable[[], object], *, trim: bool
+) -> list[object]:
+    """Replay each layer's stored full-precision prefix through a fresh cache from ``factory``.
+
+    ``KVCache.state`` is sliced to ``offset`` (never the step-padded buffer). ``trim`` drops the
+    dequantized working buffers a port retains after ``update_and_fetch``. One batched eval for
+    all layers, so the returned caches hold evaluated state (the seam's ``convert_prefix``
+    contract).
+    """
+    out: list[object] = []
+    for layer in fp_cache:
+        k, v = layer.state  # type: ignore[attr-defined]
+        new = factory()
+        new.update_and_fetch(k, v)  # type: ignore[attr-defined]
+        if trim:
+            new.trim(0)  # type: ignore[attr-defined]
+        out.append(new)
+    mx.eval([c.state for c in out])  # type: ignore[attr-defined]
+    return out
 
 
 def _iter_arrays(obj: object) -> Iterator[mx.array]:
@@ -223,6 +302,24 @@ class StockKVMethod:
     bits: int
     group_size: int
 
+    def __post_init__(self) -> None:
+        """Reject a group size ``mx.quantize`` does not support."""
+        if self.group_size not in SUPPORTED_GROUP_SIZES:
+            raise CompareConfigError(
+                f"unsupported group_size={self.group_size}; MLX KV quantization supports "
+                f"{'/'.join(str(g) for g in SUPPORTED_GROUP_SIZES)}."
+            )
+
+    def validate_before_load(self) -> None:
+        """Refuse a bit width MLX cannot quantize to, before any model is fetched."""
+        if self.bits not in _STOCK_BITS:
+            raise CacheNotQuantizableError(
+                f"unsupported kv_bits={self.bits}; MLX supports 2/3/4/6/8."
+            )
+
+    def ensure_available(self) -> None:
+        """Nothing to install: mlx-lm is a hard dependency."""
+
     @property
     def name(self) -> str:
         """``'stock'``."""
@@ -253,10 +350,7 @@ class StockKVMethod:
                 f"kv_group_size={self.group_size} does not divide the model's KV "
                 f"head_dim={head_dim}; choose a group size that divides {head_dim} (e.g. 32 or 64)."
             )
-        if self.bits not in _STOCK_BITS:
-            raise CacheNotQuantizableError(
-                f"unsupported kv_bits={self.bits}; MLX supports 2/3/4/6/8."
-            )
+        self.validate_before_load()
         if head_dim is not None and packed_width_mismatch(head_dim, self.bits):
             usable = [b for b in _STOCK_BITS if not packed_width_mismatch(head_dim, b)]
             remedy = (
@@ -548,6 +642,54 @@ def _turboquant_direct_url() -> str | None:
         return None
 
 
+def _canonical_source_url(url: object) -> str:
+    return str(url).strip().rstrip("/").removesuffix(".git").lower()
+
+
+def _import_turboquant(*, verify_source: bool = True) -> types.ModuleType:
+    """Import ``turboquant_mlx``, first proving the distribution is the pinned git install.
+
+    The PyPI name is an unrelated squatter whose import would run its code, so the install
+    record (``direct_url.json``) is read BEFORE importing: it must be a VCS install from
+    arozanov/turboquant-mlx. ``verify_source=False`` skips that gate (provenance reporting only
+    needs the module's facts, never runs the cache).
+    """
+    if verify_source:
+        raw = _turboquant_direct_url()
+        info: object = None
+        if raw:
+            try:
+                info = json.loads(raw)
+            except json.JSONDecodeError:
+                info = None
+        vcs = info.get("vcs_info") if isinstance(info, dict) else None
+        url = info.get("url") if isinstance(info, dict) else None
+        if not (isinstance(vcs, dict) and _canonical_source_url(url) == _TURBOQUANT_SOURCE_URL):
+            raise MethodUnavailableError(
+                "turboquant-mlx is not installed from the arozanov/turboquant-mlx git commit "
+                "(the PyPI package of that name is an unrelated squatter, so it was not "
+                f"imported). Install the pinned port: {TURBOQUANT_INSTALL_HINT}"
+            )
+    try:
+        import turboquant_mlx
+    except ImportError as exc:
+        raise MethodUnavailableError(
+            f"turboquant_mlx is not installed. Install the pinned port: {TURBOQUANT_INSTALL_HINT}"
+        ) from exc
+    return turboquant_mlx  # type: ignore[no-any-return]
+
+
+def _pin_mismatch_note(prefix: str) -> str | None:
+    """The report warning when the installed port commit is not the pinned one; else None."""
+    commit = _installed_commit()
+    if commit == TURBOQUANT_PINNED_COMMIT:
+        return None
+    return (
+        f"{prefix}: installed commit {commit} is not the pinned {TURBOQUANT_PINNED_COMMIT}; "
+        "numbers may not reproduce the committed sample."
+    )
+
+
 def _installed_commit() -> str:
     raw = _turboquant_direct_url()
     if not raw:
@@ -575,9 +717,16 @@ class TurboQuantKVMethod:
     def __post_init__(self) -> None:
         """Reject bit widths the port does not implement, and a non-positive rotation seed."""
         if self.bits not in _TURBOQUANT_BITS:
-            raise ValueError(f"turboquant supports bits 2/3/4, got bits={self.bits}")
+            raise CompareConfigError(f"turboquant supports bits 2/3/4, got bits={self.bits}")
         if self.seed < 1:
-            raise ValueError(f"turboquant seed must be >= 1, got seed={self.seed}")
+            raise CompareConfigError(f"turboquant seed must be >= 1, got seed={self.seed}")
+
+    def validate_before_load(self) -> None:
+        """Every parameter is already validated at construction."""
+
+    def ensure_available(self) -> None:
+        """Import the port and verify its API shape (no kernels run); raise MethodUnavailableError."""
+        self._cache_cls()
 
     @property
     def name(self) -> str:
@@ -602,12 +751,7 @@ class TurboQuantKVMethod:
 
     def _cache_cls(self) -> type:
         """Import the port and verify its API shape; raise MethodUnavailableError with the pin."""
-        try:
-            import turboquant_mlx
-        except ImportError as exc:
-            raise MethodUnavailableError(
-                f"turboquant_mlx is not installed. Install the pinned port: {TURBOQUANT_INSTALL_HINT}"
-            ) from exc
+        turboquant_mlx = _import_turboquant()
         try:
             from turboquant_mlx.cache import TurboQuantKVCache
         except ImportError as exc:
@@ -653,15 +797,7 @@ class TurboQuantKVMethod:
         full-precision working copies of the prefix past the boundary; a port that never
         populates them in the first place would make that same memory note groundless.
         """
-        from mlx_lm.models.cache import KVCache
-
-        for layer in empty_cache:
-            if type(layer) is not KVCache:
-                raise CacheNotQuantizableError(
-                    f"cache layer {type(layer).__name__} is not a plain KVCache; TurboQuant-MLX "
-                    "only replaces plain per-layer caches (sliding-window / MLA / mixed models are "
-                    "not supported)."
-                )
+        _require_plain_kv_cache(empty_cache, "TurboQuant-MLX")
         cls = self._cache_cls()
         probe = self._new(cls)
         try:
@@ -710,15 +846,7 @@ class TurboQuantKVMethod:
         different, fp16-output kernel). One batched eval for all layers, as kv.py does.
         """
         cls = self._cache_cls()
-        out: list[object] = []
-        for layer in fp_cache:
-            k, v = layer.state  # type: ignore[attr-defined]
-            new = self._new(cls)
-            new.update_and_fetch(k, v)  # type: ignore[attr-defined]
-            new.trim(0)  # type: ignore[attr-defined]
-            out.append(new)
-        mx.eval([c.state for c in out])  # type: ignore[attr-defined]
-        return out
+        return _replay_prefix(fp_cache, lambda: self._new(cls), trim=True)
 
     def guard(self) -> AbstractContextManager[None]:
         """No known crash to translate."""
@@ -749,12 +877,7 @@ class TurboQuantKVMethod:
 
     def provenance(self) -> dict[str, str]:
         """Package / module versions, installed vs pinned commit, seeds and pinned knobs."""
-        try:
-            import turboquant_mlx
-        except ImportError as exc:
-            raise MethodUnavailableError(
-                f"turboquant_mlx is not installed. Install the pinned port: {TURBOQUANT_INSTALL_HINT}"
-            ) from exc
+        turboquant_mlx = _import_turboquant(verify_source=False)
 
         return {
             "package": "turboquant-mlx",
@@ -783,12 +906,9 @@ class TurboQuantKVMethod:
             "geometry, derived from the port's retained dequantization buffers — so peak memory "
             "does not show the compression."
         ]
-        commit = _installed_commit()
-        if commit != TURBOQUANT_PINNED_COMMIT:
-            notes.append(
-                f"turboquant: installed commit {commit} is not the pinned {TURBOQUANT_PINNED_COMMIT}; "
-                "numbers may not reproduce the committed sample."
-            )
+        mismatch = _pin_mismatch_note("turboquant")
+        if mismatch is not None:
+            notes.append(mismatch)
         return notes
 
 
@@ -809,9 +929,18 @@ class TurboQuantVOnlyKVMethod:
     def __post_init__(self) -> None:
         """Reject V bit widths the port does not implement, and a non-positive rotation seed."""
         if self.v_bits not in _TURBOQUANT_BITS:
-            raise ValueError(f"turboquant-vonly supports v_bits 2/3/4, got v_bits={self.v_bits}")
+            raise CompareConfigError(
+                f"turboquant-vonly supports v_bits 2/3/4, got v_bits={self.v_bits}"
+            )
         if self.seed < 1:
-            raise ValueError(f"turboquant-vonly seed must be >= 1, got seed={self.seed}")
+            raise CompareConfigError(f"turboquant-vonly seed must be >= 1, got seed={self.seed}")
+
+    def validate_before_load(self) -> None:
+        """Every parameter is already validated at construction."""
+
+    def ensure_available(self) -> None:
+        """Import the port and verify its V-only API shape (no kernels run)."""
+        self._cache_cls()
 
     @property
     def name(self) -> str:
@@ -840,12 +969,7 @@ class TurboQuantVOnlyKVMethod:
 
     def _cache_cls(self) -> type:
         """Import the port and verify its V-only API shape; raise MethodUnavailableError with the pin."""
-        try:
-            import turboquant_mlx
-        except ImportError as exc:
-            raise MethodUnavailableError(
-                f"turboquant_mlx is not installed. Install the pinned port: {TURBOQUANT_INSTALL_HINT}"
-            ) from exc
+        turboquant_mlx = _import_turboquant()
         try:
             from turboquant_mlx.v_only_cache import VOnlyTurboQuantCache
         except ImportError as exc:
@@ -891,15 +1015,7 @@ class TurboQuantVOnlyKVMethod:
         dequant working buffer lives one level down at ``probe._v_tq._v_deq_buf`` (the inner
         ``TurboQuantKVCache`` instance the V-only wrapper delegates V storage to).
         """
-        from mlx_lm.models.cache import KVCache
-
-        for layer in empty_cache:
-            if type(layer) is not KVCache:
-                raise CacheNotQuantizableError(
-                    f"cache layer {type(layer).__name__} is not a plain KVCache; TurboQuant-MLX "
-                    "V-only only replaces plain per-layer caches (sliding-window / MLA / mixed "
-                    "models are not supported)."
-                )
+        _require_plain_kv_cache(empty_cache, "TurboQuant-MLX V-only")
         cls = self._cache_cls()
         probe = self._new(cls)
         try:
@@ -950,15 +1066,7 @@ class TurboQuantVOnlyKVMethod:
         eval for all layers, as :meth:`TurboQuantKVMethod.convert_prefix` does.
         """
         cls = self._cache_cls()
-        out: list[object] = []
-        for layer in fp_cache:
-            k, v = layer.state  # type: ignore[attr-defined]
-            new = self._new(cls)
-            new.update_and_fetch(k, v)  # type: ignore[attr-defined]
-            new.trim(0)  # type: ignore[attr-defined]
-            out.append(new)
-        mx.eval([c.state for c in out])  # type: ignore[attr-defined]
-        return out
+        return _replay_prefix(fp_cache, lambda: self._new(cls), trim=True)
 
     def guard(self) -> AbstractContextManager[None]:
         """No known crash to translate."""
@@ -997,12 +1105,7 @@ class TurboQuantVOnlyKVMethod:
         port's inner ``TurboQuantKVCache`` seeds its V quantizer at ``seed + 1`` unconditionally,
         the same offset :attr:`TurboQuantKVMethod.provenance` records.
         """
-        try:
-            import turboquant_mlx
-        except ImportError as exc:
-            raise MethodUnavailableError(
-                f"turboquant_mlx is not installed. Install the pinned port: {TURBOQUANT_INSTALL_HINT}"
-            ) from exc
+        turboquant_mlx = _import_turboquant(verify_source=False)
 
         return {
             "package": "turboquant-mlx",
@@ -1024,12 +1127,9 @@ class TurboQuantVOnlyKVMethod:
             "KVCache, so stored bytes EXCEED a plain fp16 cache — the V-only value at this "
             "commit is V-compression quality, not memory.",
         ]
-        commit = _installed_commit()
-        if commit != TURBOQUANT_PINNED_COMMIT:
-            notes.append(
-                f"turboquant-vonly: installed commit {commit} is not the pinned "
-                f"{TURBOQUANT_PINNED_COMMIT}; numbers may not reproduce the committed sample."
-            )
+        mismatch = _pin_mismatch_note("turboquant-vonly")
+        if mismatch is not None:
+            notes.append(mismatch)
         return notes
 
 
@@ -1052,9 +1152,20 @@ class AffineKVMethod:
         """Reject bit widths outside mx.quantize's set and a non-positive group size."""
         for side, bits in (("k_bits", self.k_bits), ("v_bits", self.v_bits)):
             if bits not in _STOCK_BITS:
-                raise ValueError(f"unsupported {side}={bits}; MLX affine supports 2/3/4/6/8.")
-        if self.group_size <= 0:
-            raise ValueError(f"group_size must be positive, got {self.group_size}")
+                raise CompareConfigError(
+                    f"unsupported {side}={bits}; MLX affine supports 2/3/4/6/8."
+                )
+        if self.group_size not in SUPPORTED_GROUP_SIZES:
+            raise CompareConfigError(
+                f"unsupported group_size={self.group_size}; MLX affine supports "
+                f"{'/'.join(str(g) for g in SUPPORTED_GROUP_SIZES)}."
+            )
+
+    def validate_before_load(self) -> None:
+        """Every parameter is already validated at construction."""
+
+    def ensure_available(self) -> None:
+        """Nothing to install: plain ``mx.quantize``."""
 
     @property
     def name(self) -> str:
@@ -1088,14 +1199,7 @@ class AffineKVMethod:
 
     def probe_capability(self, empty_cache: list[object]) -> None:
         """Require plain per-layer KVCache — the same shape every other method replaces."""
-        from mlx_lm.models.cache import KVCache
-
-        for layer in empty_cache:
-            if type(layer) is not KVCache:
-                raise CacheNotQuantizableError(
-                    f"cache layer {type(layer).__name__} is not a plain KVCache; the affine "
-                    "method only replaces plain per-layer caches."
-                )
+        _require_plain_kv_cache(empty_cache, "the affine method")
 
     def make_cache(self, *, n_layers: int) -> list[object]:
         """Fresh per-layer affine caches."""
@@ -1106,14 +1210,13 @@ class AffineKVMethod:
 
     def convert_prefix(self, fp_cache: list[object]) -> list[object]:
         """Quantize each layer's stored fp prefix into a fresh affine cache; one batched eval."""
-        out: list[object] = []
-        for layer in fp_cache:
-            k, v = layer.state  # type: ignore[attr-defined]
-            new = _AffineCache(k_bits=self.k_bits, v_bits=self.v_bits, group_size=self.group_size)
-            new.update_and_fetch(k, v)
-            out.append(new)
-        mx.eval([c.state for c in out])  # type: ignore[attr-defined]
-        return out
+        return _replay_prefix(
+            fp_cache,
+            lambda: _AffineCache(
+                k_bits=self.k_bits, v_bits=self.v_bits, group_size=self.group_size
+            ),
+            trim=False,
+        )
 
     def guard(self) -> AbstractContextManager[None]:
         """No known crash to translate."""
@@ -1162,7 +1265,7 @@ class AffineKVMethod:
 
 def _positive_ints(parts: list[str], *, spec: str, expected: str, example: str) -> list[int]:
     if not parts or not all(p.isascii() and p.isdigit() and int(p) > 0 for p in parts):
-        raise CompareConfigError(f"--configs entry {spec!r} must be {expected} (e.g. {example}).")
+        raise CompareConfigError(f"method spec {spec!r} must be {expected} (e.g. {example}).")
     return [int(p) for p in parts]
 
 
@@ -1170,7 +1273,8 @@ def parse_method_spec(spec: str) -> KVCacheMethod:
     """Parse ``'4:64'`` | ``'stock:4:64'`` | ``'turboquant:bits[:seed]'`` | ``'affine:k:v[:group]'``.
 
     A bare ``bits:group_size`` is stock (backward-compatible). Raises CompareConfigError
-    (a ValueError) on anything malformed. The parser enumerates the shipped methods by
+    (a ValueError) on anything malformed; every message starts ``method spec '<spec>'`` so the
+    caller can prefix the flag it came from. The parser enumerates the shipped methods by
     hand; ``METHODS`` is the CLI's choices list, not a registry (a plugin registry is
     future work).
     """
@@ -1178,30 +1282,34 @@ def parse_method_spec(spec: str) -> KVCacheMethod:
     if parts and parts[0].isdigit():
         parts = ["stock", *parts]
     name, *args = parts
+    try:
+        return _build_method(spec, name, args)
+    except CompareConfigError as exc:
+        if str(exc).startswith(f"method spec {spec!r}"):
+            raise
+        raise CompareConfigError(f"method spec {spec!r}: {exc}") from exc
+
+
+def _build_method(spec: str, name: str, args: list[str]) -> KVCacheMethod:
     if name == "stock":
         if len(args) != 2:
-            raise CompareConfigError(
-                f"--configs entry {spec!r} must be 'bits:group_size' (e.g. 4:64)."
-            )
+            raise CompareConfigError(f"method spec {spec!r} must be 'bits:group_size' (e.g. 4:64).")
         bits, gs = _positive_ints(args, spec=spec, expected="'bits:group_size'", example="4:64")
         return StockKVMethod(bits=bits, group_size=gs)
     if name == "turboquant":
         if len(args) not in (1, 2):
             raise CompareConfigError(
-                f"--configs entry {spec!r} must be 'turboquant:bits' or 'turboquant:bits:seed'."
+                f"method spec {spec!r} must be 'turboquant:bits' or 'turboquant:bits:seed'."
             )
         nums = _positive_ints(
             args, spec=spec, expected="'turboquant:bits[:seed]'", example="turboquant:4"
         )
         seed = nums[1] if len(nums) == 2 else TURBOQUANT_DEFAULT_SEED
-        try:
-            return TurboQuantKVMethod(bits=nums[0], seed=seed)
-        except ValueError as exc:
-            raise CompareConfigError(f"--configs entry {spec!r}: {exc}") from exc
+        return TurboQuantKVMethod(bits=nums[0], seed=seed)
     if name == "turboquant-vonly":
         if len(args) not in (1, 2):
             raise CompareConfigError(
-                f"--configs entry {spec!r} must be 'turboquant-vonly:v_bits' or "
+                f"method spec {spec!r} must be 'turboquant-vonly:v_bits' or "
                 "'turboquant-vonly:v_bits:seed'."
             )
         nums = _positive_ints(
@@ -1211,26 +1319,20 @@ def parse_method_spec(spec: str) -> KVCacheMethod:
             example="turboquant-vonly:3",
         )
         seed = nums[1] if len(nums) == 2 else TURBOQUANT_DEFAULT_SEED
-        try:
-            return TurboQuantVOnlyKVMethod(v_bits=nums[0], seed=seed)
-        except ValueError as exc:
-            raise CompareConfigError(f"--configs entry {spec!r}: {exc}") from exc
+        return TurboQuantVOnlyKVMethod(v_bits=nums[0], seed=seed)
     if name == "affine":
         if len(args) not in (2, 3):
             raise CompareConfigError(
-                f"--configs entry {spec!r} must be 'affine:k_bits:v_bits[:group_size]' "
+                f"method spec {spec!r} must be 'affine:k_bits:v_bits[:group_size]' "
                 "(e.g. affine:8:4)."
             )
         nums = _positive_ints(
             args, spec=spec, expected="'affine:k_bits:v_bits[:group_size]'", example="affine:8:4"
         )
         gs = nums[2] if len(nums) == 3 else 64
-        try:
-            return AffineKVMethod(k_bits=nums[0], v_bits=nums[1], group_size=gs)
-        except ValueError as exc:
-            raise CompareConfigError(f"--configs entry {spec!r}: {exc}") from exc
+        return AffineKVMethod(k_bits=nums[0], v_bits=nums[1], group_size=gs)
     raise CompareConfigError(
-        f"--configs entry {spec!r}: unknown method {name!r}; known: {sorted(METHODS)}."
+        f"method spec {spec!r}: unknown method {name!r}; known: {sorted(METHODS)}."
     )
 
 

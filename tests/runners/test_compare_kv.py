@@ -147,14 +147,14 @@ def test_compare_kv_isolates_unsupported_config(monkeypatch, tmp_path):
 
     reports = {
         (4, 64): _fid((4, 64), 0.09),
-        (3, 999): CacheNotQuantizableError("no divide"),
+        (3, 128): CacheNotQuantizableError("no divide"),
     }
     _patch_kv_compare(monkeypatch, reports)
-    report = cmp.compare_kv_fidelity("m", [(4, 64), (3, 999)], artifacts_dir=tmp_path)
-    failed = next(r for r in report.results if r.label == "3:999")
+    report = cmp.compare_kv_fidelity("m", [(4, 64), (3, 128)], artifacts_dir=tmp_path)
+    failed = next(r for r in report.results if r.label == "3:128")
     assert failed.status == "failed"
     assert failed.error_type == "CacheNotQuantizableError"
-    assert "3:999" not in report.frontier
+    assert "3:128" not in report.frontier
     # Fix 9: positive isolation assert — the good config IS on the frontier alone
     assert "4:64" in report.frontier
     assert len(report.frontier) == 1
@@ -1132,6 +1132,7 @@ def _fid_method(method_name: str, params: dict, kl_mean: float):
 
 
 def test_compare_kv_accepts_mixed_tuple_and_method_list(monkeypatch, tmp_path):
+    install_fake_port(monkeypatch)  # ensure_available runs before the (patched) load
     reports = {
         (4, 64): _fid((4, 64), 0.09),
         (4, 42): _fid_method("turboquant", {"bits": 4, "seed": 42}, 0.03),
@@ -1305,6 +1306,7 @@ def test_compare_kv_runs_control_only_for_stock(monkeypatch, tmp_path):
     (stock) and control=False for one that doesn't (turboquant) — proving the flow never
     AttributeErrors on a method lacking the attribute.
     """
+    install_fake_port(monkeypatch)  # ensure_available runs before the (patched) load
     monkeypatch.setattr(cmp, "install_memory_caps", lambda: (0, 0))
     monkeypatch.setattr(cmp, "preload_check", lambda model, revision, *, allow_custom_code: {})
     monkeypatch.setattr(cmp, "_load_model", lambda model_id, revision: (object(), object()))
@@ -1339,6 +1341,7 @@ def test_compare_kv_ranks_on_quantizer_only_kl(monkeypatch, tmp_path):
     """The ranked RankPoint quality is the quantizer-only KL, not the bundled one, for a
     control-ran stock config; a native quantizer-only config (no control) ranks on its own kl.
     """
+    install_fake_port(monkeypatch)  # ensure_available runs before the (patched) load
     monkeypatch.setattr(cmp, "install_memory_caps", lambda: (0, 0))
     monkeypatch.setattr(cmp, "preload_check", lambda model, revision, *, allow_custom_code: {})
     monkeypatch.setattr(cmp, "_load_model", lambda model_id, revision: (object(), object()))
@@ -1577,3 +1580,45 @@ def test_compare_kv_reports_config_progress(monkeypatch, tmp_path):
     seen: list[str] = []
     cmp.compare_kv_fidelity("m", [(4, 64), (8, 64)], artifacts_dir=tmp_path, progress=seen.append)
     assert seen == ["[1/2] 4:64", "[2/2] 8:64"]
+
+
+def test_compare_kv_unavailable_method_is_a_failed_row_and_the_run_continues(monkeypatch, tmp_path):
+    """Reds if a missing port aborts the run, or is only found (as a failed row) after the load."""
+    import sys
+
+    from mlx_quant_fidelity.errors import MethodUnavailableError
+
+    monkeypatch.setitem(sys.modules, "turboquant_mlx", None)  # port absent
+    reports = {(4, 64): _fid((4, 64), 0.02), (8, 64): _fid((8, 64), 0.01)}
+    calls = _patch_kv_compare(monkeypatch, reports)
+    report = cmp.compare_kv_fidelity(
+        "m",
+        [
+            StockKVMethod(bits=4, group_size=64),
+            TurboQuantKVMethod(bits=4),
+            StockKVMethod(bits=8, group_size=64),
+        ],
+        artifacts_dir=tmp_path,
+    )
+    by_label = {r.label: r for r in report.results}
+    assert by_label["turboquant:4"].status == "failed"
+    assert by_label["turboquant:4"].error_type == MethodUnavailableError.__name__
+    assert by_label["4:64"].status == by_label["8:64"].status == "ok"
+    assert (4, 42) not in calls  # never handed to score_kv_config
+
+
+def test_compare_kv_all_methods_unavailable_never_loads_the_model(monkeypatch, tmp_path):
+    """Reds if the model is loaded just to record that every method is unavailable."""
+    import sys
+
+    monkeypatch.setitem(sys.modules, "turboquant_mlx", None)
+    _patch_kv_compare(monkeypatch, {})
+
+    def boom(*_a, **_k):
+        raise AssertionError("model loaded although no method can run")
+
+    monkeypatch.setattr(cmp, "_load_model", boom)
+    report = cmp.compare_kv_fidelity(
+        "m", [TurboQuantKVMethod(bits=4), TurboQuantKVMethod(bits=3)], artifacts_dir=tmp_path
+    )
+    assert {r.status for r in report.results} == {"failed"}

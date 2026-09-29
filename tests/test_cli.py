@@ -670,3 +670,54 @@ def test_compare_kv_menu_text_and_quant_revision_help(capsys):
     with pytest.raises(SystemExit):
         cli.main(["weights", "--help"])
     assert "without an inline @revision" in " ".join(capsys.readouterr().out.split())
+
+
+def _load_must_not_run(monkeypatch: pytest.MonkeyPatch) -> None:
+    import mlx_lm
+
+    def _boom(*_a: object, **_k: object) -> None:
+        raise AssertionError("mlx_lm.load ran for a request that should be refused up front")
+
+    monkeypatch.setattr(mlx_lm, "load", _boom)
+
+
+@pytest.mark.parametrize(
+    "flags", [["--kv-group-size", "0"], ["--kv-group-size", "16"], ["--kv-bits", "5"]]
+)
+def test_cli_kv_bad_params_exit_2_without_loading(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], flags: list[str]
+) -> None:
+    """Reds if bad bits / group size only surface after the model load (or as a traceback)."""
+    _load_must_not_run(monkeypatch)
+    assert cli.main(["kv", "org/never-fetched", *flags]) == 2
+    assert capsys.readouterr().err.startswith("error:")
+
+
+def test_cli_kv_turboquant_unavailable_exits_2_without_loading(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import sys
+
+    _load_must_not_run(monkeypatch)
+    monkeypatch.setitem(sys.modules, "turboquant_mlx", None)
+    rc = cli.main(["kv", "org/never-fetched", "--kv-method", "turboquant", "--kv-bits", "4"])
+    assert rc == 2
+    assert "turboquant" in capsys.readouterr().err
+
+
+def test_kv_method_spec_error_does_not_mention_configs_flag(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Reds if `kv --kv-method affine:9:4` blames a `--configs` flag the command lacks."""
+    assert cli.main(["kv", "m", "--kv-method", "affine:9:4"]) == 2
+    err = capsys.readouterr().err
+    assert "--configs" not in err
+    assert "--kv-method" in err
+
+
+def test_compare_configs_error_names_the_configs_flag(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Reds if the CLI drops the `--configs entry` prefix the parser no longer supplies."""
+    assert cli.main(["compare", "kv", "m", "--configs", "4:64,affine:9:4"]) == 2
+    assert "--configs entry" in capsys.readouterr().err

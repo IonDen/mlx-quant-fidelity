@@ -60,7 +60,9 @@ class FakeKVMethod:
         convert_noop: bool = False,
         bytes_per_chunk: int = 144,
         stock_like: bool = False,
+        name: str | None = None,
     ):
+        self._name_override = name
         self.convert_noop = convert_noop
         self.bytes_per_chunk = bytes_per_chunk
         self.calls: list[str] = []
@@ -75,6 +77,8 @@ class FakeKVMethod:
 
     @property
     def name(self):
+        if self._name_override is not None:
+            return self._name_override
         return "stock" if self._stock_like else "fake"
 
     @property

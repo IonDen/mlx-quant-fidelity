@@ -15,6 +15,7 @@ from mlx_quant_fidelity._memory_caps import (
     device_string,
     install_memory_caps,
 )
+from mlx_quant_fidelity.corpora.provenance import scored_provenance
 from mlx_quant_fidelity.errors import (
     CacheNotQuantizableError,
     CompareConfigError,
@@ -33,10 +34,17 @@ from mlx_quant_fidelity.probes._paired import (
     report_chunk_progress,
 )
 from mlx_quant_fidelity.probes._preload import preload_check
-from mlx_quant_fidelity.probes.kv_methods import PartialCoverageMethod, StockKVMethod
+from mlx_quant_fidelity.probes.kv_methods import (
+    ControlLaneMethod,
+    PartialCoverageMethod,
+    StockKVMethod,
+    check_before_load,
+)
 from mlx_quant_fidelity.report import FidelityReport
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from mlx_quant_fidelity.corpora.provenance import Corpus
     from mlx_quant_fidelity.probes.kv_methods import KVCacheMethod, LayerCoverage
 
@@ -266,6 +274,14 @@ def _score_chunk_control(
     return kl_divergence(ref_logits, control_logits), top_token_flips(ref_logits, control_logits)
 
 
+def _require_teacher_forced_positions(chunks: Sequence[mx.array]) -> None:
+    """Every scored chunk needs at least one teacher-forced position (2 tokens)."""
+    if any(c.shape[0] < 2 for c in chunks):
+        raise CorpusError(
+            "every corpus chunk must have at least 2 tokens (one teacher-forced position)."
+        )
+
+
 def _resolve_method(
     method: KVCacheMethod | None, kv_bits: int, kv_group_size: int
 ) -> KVCacheMethod:
@@ -383,13 +399,13 @@ def score_kv_config(
     method = _resolve_method(method, kv_bits, kv_group_size)
     control_m: KVCacheMethod | None = None
     if control:
-        maker = getattr(method, "control_method", None)
-        if maker is None:
+        if not isinstance(method, ControlLaneMethod):
             raise CompareConfigError(
-                f"--control only applies to the stock method; method {method.name!r} is "
-                "already quantizer-only (dequantize-on-fetch, standard SDPA)."
+                f"--control only applies to a method with a bundled quantized-attention path "
+                f"(stock); method {method.name!r} is already quantizer-only "
+                "(dequantize-on-fetch, standard SDPA)."
             )
-        control_m = maker()
+        control_m = method.control_method()
     probe_warnings: list[str] = []
     args = getattr(model, "args", None)
     model_type = str(getattr(args, "model_type", "unknown"))
@@ -398,6 +414,9 @@ def score_kv_config(
     # nothing, so the kernel-panic budget gate below still precedes any cache construction.
     probe_warnings.extend(method.check(head_dim=head_dim, model_type=model_type))
     window = getattr(corpus.provenance, "chunk_length", None)
+    _require_teacher_forced_positions(
+        corpus.chunks[:max_chunks] if max_chunks is not None else corpus.chunks
+    )
     # Gate geometry is model.args-derived and computed BEFORE any cache construction (the gate's
     # whole point is running before cache/model allocations — see make_prompt_cache below, which
     # this precedes). Each of method_ws_bytes/control_bytes degrades to 0 (the 0.6.0 estimate)
@@ -672,7 +691,7 @@ def score_kv_config(
         perplexity_delta=agg.perplexity_quant - agg.perplexity_ref,
         n_positions=agg.n_positions,
         n_chunks=n_scored,
-        corpus=corpus.provenance,
+        corpus=scored_provenance(corpus, len(chunks)),
         mlx_version=importlib.metadata.version("mlx"),
         mlx_lm_version=importlib.metadata.version("mlx-lm"),
         peak_memory_bytes=int(mx.get_peak_memory()),
@@ -685,7 +704,7 @@ def score_kv_config(
         kv_method_params=dict(method.params),
         kv_method_provenance=method.provenance(),
         measured_kv_bytes_per_token=measured_bpt,
-        drift_footing="bundled" if method.name == "stock" else "quantizer_only",
+        drift_footing="bundled" if isinstance(method, ControlLaneMethod) else "quantizer_only",
         control_kl=control_summary,
         control_flip_rate=control_flip_rate,
         working_set_bytes_per_token=working_set_bytes_per_token,
@@ -800,6 +819,12 @@ def measure_kv_fidelity(
         raise CorpusError(f"max_chunks must be >= 1 (got {max_chunks}).")
     if corpus is not None and len(corpus.chunks) == 0:
         raise CorpusError("the provided corpus has no chunks; at least one is required.")
+    if corpus is not None:
+        _require_teacher_forced_positions(corpus.chunks)
+    # Model-free method checks (bit widths, installed runtime) need no network: refuse here,
+    # before the pre-load config fetch and long before the model download.
+    method = _resolve_method(method, kv_bits, kv_group_size)
+    check_before_load(method)
     preload_check(model_id, model_revision, allow_custom_code=allow_custom_code)
     install_memory_caps()  # must precede model load
     _loaded = load(model_id, revision=model_revision)  # pragma: no cover
@@ -819,8 +844,6 @@ def measure_kv_fidelity(
         corpus,
         model_id=model_id,
         model_revision=model_revision,
-        kv_bits=kv_bits,
-        kv_group_size=kv_group_size,
         method=method,
         quantize_start=quantize_start,
         max_chunks=max_chunks,
