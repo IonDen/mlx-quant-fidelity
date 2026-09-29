@@ -5,16 +5,27 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: macos-15
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
         with:
           fetch-depth: 0  # hatch-vcs needs tags/history
-      - uses: astral-sh/setup-uv@v5
-      - run: uv sync --group dev
-      - run: uv run python -c "import mlx.core, mlx_lm; print('mlx import OK')"
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86  # v5.4.2
+        with:
+          version: "0.11.2"
+          python-version: ${{ matrix.python-version }}
+      - run: uv sync --locked --group dev
+      - run: uv run python -c "import sys, mlx.core, mlx_lm; print('mlx import OK on', sys.version)"
       - run: uv run ruff check .
       - run: uv run ruff format --check .
       - run: uv run mypy
@@ -24,7 +35,8 @@ jobs:
     # (e.g. a build-backend metadata version newer than the bundled twine) fails on the PR.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
         with:
           fetch-depth: 0
-      - uses: hynek/build-and-inspect-python-package@v3.0.1
+          persist-credentials: false
+      - uses: hynek/build-and-inspect-python-package@2abe76da66d0a6a4a227101f9348ee855797cfa5  # v3.0.1
