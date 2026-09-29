@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import importlib.metadata
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import mlx.core as mx
 import numpy as np
+from mlx.utils import tree_flatten
 from mlx_lm.models.cache import make_prompt_cache
 
 from mlx_quant_fidelity._memory_caps import (
@@ -23,7 +24,15 @@ from mlx_quant_fidelity.errors import (
 )
 from mlx_quant_fidelity.metrics import bucket_by_depth, kl_divergence, summarize, top_token_flips
 from mlx_quant_fidelity.policy import verdict_for
-from mlx_quant_fidelity.probes._paired import _aggregate_chunks, _check_exact_zero, _reduce_pair
+from mlx_quant_fidelity.probes._paired import (
+    ProgressFn,
+    _aggregate_chunks,
+    _check_exact_zero,
+    _reduce_pair,
+    _require_finite,
+    report_chunk_progress,
+)
+from mlx_quant_fidelity.probes._preload import preload_check
 from mlx_quant_fidelity.probes.kv_methods import PartialCoverageMethod, StockKVMethod
 from mlx_quant_fidelity.report import FidelityReport
 
@@ -66,6 +75,58 @@ _LOGITS_WARN_BYTES = 4 * 1024**3
 RECEIPTED_METHODS = frozenset({"stock", "turboquant", "turboquant-vonly", "affine"})
 
 
+# Headroom kept free of the device working set on top of weights + transient estimate.
+RESIDENT_HEADROOM_BYTES = 2 * 1024**3
+
+# Largest window gated without a known vocabulary: above it an underivable vocab_size refuses.
+UNKNOWN_VOCAB_MAX_WINDOW = 512
+
+
+def _model_arg(args: object, name: str) -> object:
+    """Read a geometry field from ``args``, falling back to ``args.text_config``.
+
+    mlx-lm wrapper architectures keep their language-model geometry under ``text_config``
+    (a dict or an object). Returns None for a missing field or a non-positive int (0 is how
+    some configs say "derive it").
+    """
+
+    def _clean(value: object) -> object:
+        if isinstance(value, int) and not isinstance(value, bool) and value <= 0:
+            return None
+        return value
+
+    value = _clean(getattr(args, name, None))
+    if value is not None:
+        return value
+    text_config = getattr(args, "text_config", None)
+    if text_config is None:
+        return None
+    if isinstance(text_config, dict):
+        return _clean(text_config.get(name))
+    return _clean(getattr(text_config, name, None))
+
+
+def model_resident_bytes(model: object) -> int:
+    """Bytes held by the model's parameters (metadata only, no evaluation); 0 if unknown."""
+    params = getattr(model, "parameters", None)
+    if not callable(params):
+        return 0
+    try:
+        flat = cast("list[tuple[str, mx.array]]", tree_flatten(params()))
+        return sum(int(leaf.nbytes) for _, leaf in flat if hasattr(leaf, "nbytes"))
+    except Exception:
+        return 0
+
+
+def _max_working_set_bytes() -> int:
+    """The device's recommended working-set size in bytes; 0 when not reported."""
+    try:
+        info = mx.device_info()
+    except Exception:
+        return 0
+    return int(info.get("max_recommended_working_set_size", 0) or 0)
+
+
 def _paired_logits_bytes(window: int, vocab: int) -> int:
     """Estimated transient bytes held by the paired fp32 logits for one chunk."""
     return _LOGITS_ARRAYS_PER_WINDOW * (window - 1) * int(vocab) * 4
@@ -77,6 +138,8 @@ def _preflight_logits_budget(
     *,
     method_ws_bytes: int = 0,
     control_bytes: int = 0,
+    resident_bytes: int = 0,
+    remedy: str | None = None,
 ) -> str | None:
     """Refuse windows whose paired-logits + method/control working-set estimate exceeds the cap.
 
@@ -91,9 +154,18 @@ def _preflight_logits_budget(
     prevent, which is exactly the pageable-allocation paging-storm path the ceiling exists to
     avoid.
 
+    ``resident_bytes`` (the model's parameter bytes) is checked separately: resident + estimate
+    must fit in the device working set less ``RESIDENT_HEADROOM_BYTES``.
+
     Skipped (warning path only) when the device reports no working-set size, since there is
     no cap to measure against.
     """
+    if window is not None and window > UNKNOWN_VOCAB_MAX_WINDOW and not vocab:
+        raise LogitsBudgetError(
+            f"chunk_length={window}: vocab_size is not derivable for this architecture, so a "
+            f"window above {UNKNOWN_VOCAB_MAX_WINDOW} cannot be gated; use --chunk-length "
+            f"{UNKNOWN_VOCAB_MAX_WINDOW} or smaller."
+        )
     if not vocab or not window:
         return (
             f"per-chunk paired fp32 logits budget is UNCHECKED (vocab_size={vocab!r}, "
@@ -102,13 +174,24 @@ def _preflight_logits_budget(
             "on an unfamiliar architecture."
         )
     est = _paired_logits_bytes(window, vocab) + method_ws_bytes + control_bytes
+    if remedy is None:
+        remedy = "Lower --chunk-length (halving it roughly halves the estimate)"
+        if control_bytes > 0:
+            remedy += " or drop --control"
+    max_ws = _max_working_set_bytes()
+    if max_ws and resident_bytes + est > max_ws - RESIDENT_HEADROOM_BYTES:
+        raise LogitsBudgetError(
+            f"chunk_length={window} at vocab_size={int(vocab)}: model weights "
+            f"{resident_bytes / 1024**3:.1f} GiB + per-chunk working set "
+            f"{est / 1024**3:.1f} GiB exceed the {(max_ws - RESIDENT_HEADROOM_BYTES) / 1024**3:.1f}"
+            f" GiB limit (device working set {max_ws / 1024**3:.1f} GiB less "
+            f"{RESIDENT_HEADROOM_BYTES / 1024**3:.0f} GiB headroom). {remedy}; "
+            "see docs/measurement-principles.md."
+        )
     wired_gb, _ = compute_safe_caps_gb()
     if wired_gb:
         gate = int(LOGITS_BUDGET_FRACTION * wired_gb * 1024**3)
         if est > gate:
-            remedy = "Lower --chunk-length (halving it roughly halves the estimate)"
-            if control_bytes > 0:
-                remedy += " or drop --control"
             raise LogitsBudgetError(
                 f"chunk_length={window} at vocab_size={int(vocab)}: paired fp32 logits peak ≈ "
                 f"{est / 1024**3:.1f} GiB per chunk, above the {gate / 1024**3:.1f} GiB "
@@ -132,13 +215,13 @@ def _kv_head_dim(model: object) -> int | None:
     path. Field names are llama-family-specific; unusual archs return None.
     """
     args = getattr(model, "args", None)
-    head_dim = getattr(args, "head_dim", None)
-    if head_dim:
-        return int(head_dim)
-    hidden = getattr(args, "hidden_size", None)
-    heads = getattr(args, "num_attention_heads", None)
-    if hidden and heads:
-        return int(hidden) // int(heads)
+    head_dim = _model_arg(args, "head_dim")
+    if isinstance(head_dim, int):
+        return head_dim
+    hidden = _model_arg(args, "hidden_size")
+    heads = _model_arg(args, "num_attention_heads")
+    if isinstance(hidden, int) and isinstance(heads, int):
+        return hidden // heads
     return None
 
 
@@ -276,12 +359,19 @@ def score_kv_config(
     quantize_start: int = 0,
     max_chunks: int | None = None,
     control: bool = False,
+    gate_remedy: str | None = None,
+    progress: ProgressFn | None = None,
 ) -> FidelityReport:
     """Score one KV config on an ALREADY-LOADED model (no load, no caps install).
 
     Shared by ``measure_kv_fidelity`` (load -> delegate) and the KV ``compare`` adapter
     (load once -> loop configs). Applies ``max_chunks`` to the provided corpus,
     so a caller-supplied corpus is capped identically to the weight probe.
+
+    ``progress`` receives ``chunk i/n`` lines about every tenth chunk (silent when ``None``).
+
+    ``gate_remedy`` overrides the remedy text of a memory-gate refusal for callers whose
+    command lacks the default's flags.
 
     ``control=True`` runs a third, quantizer-only forward per chunk (via
     ``method.control_method()``) so the report can separate quantizer error from
@@ -312,10 +402,10 @@ def score_kv_config(
     # whole point is running before cache/model allocations — see make_prompt_cache below, which
     # this precedes). Each of method_ws_bytes/control_bytes degrades to 0 (the 0.6.0 estimate)
     # when any one piece of geometry is unknown, rather than guessing.
-    gate_n_layers = getattr(args, "num_hidden_layers", None)
-    gate_n_kv = getattr(args, "num_key_value_heads", None) or getattr(
-        args, "num_attention_heads", None
-    )
+    gate_n_layers = _model_arg(args, "num_hidden_layers")
+    gate_n_kv = _model_arg(args, "num_key_value_heads") or _model_arg(args, "num_attention_heads")
+    gate_vocab = _model_arg(args, "vocab_size")
+    resident = model_resident_bytes(model)
     method_ws_bytes = 0
     control_bytes = 0
     if (
@@ -343,9 +433,11 @@ def score_kv_config(
             )
     budget_warning = _preflight_logits_budget(
         window,
-        getattr(args, "vocab_size", None),
+        gate_vocab if isinstance(gate_vocab, int) else None,
         method_ws_bytes=method_ws_bytes,
         control_bytes=control_bytes,
+        resident_bytes=resident,
+        remedy=gate_remedy,
     )
     if budget_warning is not None:
         probe_warnings.append(budget_warning)
@@ -400,7 +492,7 @@ def score_kv_config(
 
     mode = "stress" if quantize_start == 0 else "deployment"
     chunks = corpus.chunks[:max_chunks] if max_chunks is not None else corpus.chunks
-    vocab_size = getattr(getattr(model, "args", None), "vocab_size", None)
+    vocab_size = gate_vocab
     if isinstance(vocab_size, int) and vocab_size > 0 and chunks:
         max_id = int(mx.max(mx.stack([mx.max(ids) for ids in chunks])))
         if max_id >= vocab_size:
@@ -417,7 +509,8 @@ def score_kv_config(
     control_flips: list[mx.array] = []
     n_scored = 0
     measured_bpt: int | None = None
-    for ids in chunks:
+    for chunk_index, ids in enumerate(chunks, start=1):
+        report_chunk_progress(progress, chunk_index, len(chunks))
         if quantize_start > 0 and int(ids.size) < quantize_start + 2:
             continue  # too short to have a post-boundary position; skip
         ref_cache = make_prompt_cache(model)
@@ -502,6 +595,7 @@ def score_kv_config(
         flip_all = np.concatenate(
             [np.asarray(f.astype(mx.float32), dtype=np.float64) for f in control_flips]
         )
+        _require_finite("control-lane KL", kl_all, allow_inf=True)
         control_summary = summarize(kl_all)
         control_flip_rate = float(flip_all.mean())
         _check_exact_zero(
@@ -618,6 +712,8 @@ def measure_kv_fidelity(
     model_revision: str | None = None,
     chunk_length: int = 512,
     control: bool = False,
+    allow_custom_code: bool = False,
+    progress: ProgressFn | None = None,
 ) -> FidelityReport:
     """Measure how much KV-cache quantization costs, via teacher-forced paired scoring.
 
@@ -649,10 +745,17 @@ def measure_kv_fidelity(
             prefix and scores only the post-boundary region. See
             :func:`~mlx_quant_fidelity.probes.kv.score_kv_config`'s ``control`` docs.
 
+        allow_custom_code: Let a repo whose config.json names a ``model_file`` run its own
+            Python code on load (off by default; mlx-lm executes that file).
+        progress: Optional callback receiving `chunk i/n` lines about every tenth chunk.
+            Silent when None (the default).
+
     Returns:
         A :class:`~mlx_quant_fidelity.report.FidelityReport` with all metrics and provenance.
 
     Raises:
+        UntrustedModelCodeError: If the repo ships its own model code and
+            ``allow_custom_code`` is False.
         QuantizeStartError: If quantize_start is out of range for the corpus window.
         CacheNotQuantizableError: If the model's KV cache does not support quantization.
         ExactZeroError: If KLD and flip rate are exactly 0 (quantization did not engage).
@@ -697,6 +800,7 @@ def measure_kv_fidelity(
         raise CorpusError(f"max_chunks must be >= 1 (got {max_chunks}).")
     if corpus is not None and len(corpus.chunks) == 0:
         raise CorpusError("the provided corpus has no chunks; at least one is required.")
+    preload_check(model_id, model_revision, allow_custom_code=allow_custom_code)
     install_memory_caps()  # must precede model load
     _loaded = load(model_id, revision=model_revision)  # pragma: no cover
     model, tokenizer = _loaded[0], _loaded[1]  # pragma: no cover
@@ -721,4 +825,5 @@ def measure_kv_fidelity(
         quantize_start=quantize_start,
         max_chunks=max_chunks,
         control=control,
+        progress=progress,
     )

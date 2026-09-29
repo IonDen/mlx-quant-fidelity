@@ -262,7 +262,10 @@ def test_preflight_skips_when_size_unknown(monkeypatch):
     from mlx_quant_fidelity.probes import weights as w
 
     monkeypatch.setattr(w.mx, "device_info", lambda: {"max_recommended_working_set_size": 1})
-    _preflight_memory(quant_bytes=None, reference_bytes=14 * 1024**3)  # no raise (can't pre-flight)
+    # Spec change: an unknown size no longer skips silently; the caller gets a warning to surface.
+    warning = _preflight_memory(quant_bytes=None, reference_bytes=14 * 1024**3)
+    assert warning is not None
+    assert "memory pre-flight skipped" in warning
 
 
 # ---------------------------------------------------------------------------
@@ -278,7 +281,7 @@ def _corpus(n_chunks: int, chunk_len: int = 4) -> Corpus:
     return Corpus(chunks=chunks, provenance=prov)
 
 
-def _patch_loads(monkeypatch, ref_peak, quant_peak, *, calls, ref_quantized=False):
+def _patch_loads(monkeypatch, ref_peak, quant_peak, *, calls, ref_quantized=False, sizes=1000):
     """Patch weights.* so two fake models load with known configs; record call order.
 
     Returns ``(quant_fake, handed)``: the fake quantized-model instance, and a list that
@@ -291,7 +294,8 @@ def _patch_loads(monkeypatch, ref_peak, quant_peak, *, calls, ref_quantized=Fals
     from mlx_quant_fidelity.probes import weights as w
 
     monkeypatch.setattr(w, "install_memory_caps", lambda: calls.append("caps") or (0, 0))
-    monkeypatch.setattr(w, "_resolve_weight_bytes", lambda *a, **k: None)  # skip pre-flight
+    monkeypatch.setattr(w, "_resolve_weight_bytes", lambda *a, **k: sizes)
+    monkeypatch.setattr(w, "_hub_weight_bytes", lambda *a, **k: sizes)  # never reach the network
     ref_fake = _FakeWeightModel(ref_peak)
     quant_fake = _FakeWeightModel(quant_peak)
     # The fake models are plain objects, not nn.Modules — keep the real geometry/bpw helpers
@@ -317,6 +321,11 @@ def _patch_loads(monkeypatch, ref_peak, quant_peak, *, calls, ref_quantized=Fals
         },
     }
     toks = type("T", (), {"bos_token_id": 1, "eos_token_id": 2})()
+    monkeypatch.setattr(
+        w,
+        "preload_check",
+        lambda model, revision, *, allow_custom_code: cfgs["ref" if model == "ref" else "quant"],
+    )
 
     def fake_load(repo, **kw):
         if repo == "ref":
@@ -490,3 +499,175 @@ def test_gate_rejects_reference_quantized_without_bits():
     ref_bad = {"model_type": "llama", "vocab_size": 128, "quantization": {"group_size": 64}}
     with pytest.raises(ModelMismatchError, match="readable 'bits'"):
         _gate_configs(quant_config=_Q_NATIVE, reference_config=ref_bad)
+
+
+@pytest.mark.parametrize("bad_repo", ["ref", "quant"])
+def test_measure_weight_refuses_custom_code_in_either_repo_before_load(monkeypatch, bad_repo):
+    """Bug: only one of the two repos is checked (or the check runs after load), so the other
+    repo's model_file executes."""
+    import mlx_lm
+
+    from mlx_quant_fidelity.errors import UntrustedModelCodeError
+    from mlx_quant_fidelity.probes import _preload
+
+    def fake_read(model, revision=None):
+        return {"model_file": "m.py"} if model == bad_repo else {"model_type": "llama"}
+
+    monkeypatch.setattr(_preload, "read_model_config", fake_read)
+
+    def boom(*a, **k):
+        raise AssertionError("mlx_lm.load must not run")
+
+    monkeypatch.setattr(mlx_lm, "load", boom)
+    with pytest.raises(UntrustedModelCodeError, match="--allow-custom-code"):
+        measure_weight_fidelity("quant", "ref", corpus=_corpus(2))
+
+
+_GIB = 1024**3
+
+
+def test_gate_runs_before_any_load(monkeypatch):
+    """Bug: a llama-vs-qwen pair is only refused after both models were loaded (minutes and
+    tens of GB wasted, or a memory panic)."""
+    import mlx_lm
+
+    from mlx_quant_fidelity.probes import _preload
+
+    configs = {
+        "ref": {"model_type": "llama", "vocab_size": 3},
+        "quant": {
+            "model_type": "qwen2",
+            "vocab_size": 3,
+            "quantization": {"bits": 4, "group_size": 64},
+        },
+    }
+    monkeypatch.setattr(_preload, "read_model_config", lambda m, r=None: configs[m])
+
+    def boom(*a, **k):
+        raise AssertionError("loaded")
+
+    monkeypatch.setattr(mlx_lm, "load", boom)
+    with pytest.raises(ModelMismatchError, match="model_type mismatch"):
+        measure_weight_fidelity("quant", "ref", corpus=_corpus(2))
+
+
+def test_hub_weight_bytes_sums_root_model_safetensors_only(monkeypatch):
+    """Bug: an uncached repo has no size, so the pair is never pre-flighted; or the sum counts
+    a duplicate root checkpoint that mlx-lm never loads."""
+    import huggingface_hub
+
+    from mlx_quant_fidelity.probes.weights import _hub_weight_bytes
+
+    def sib(name, size):
+        return type("S", (), {"rfilename": name, "size": size})()
+
+    info = type(
+        "I",
+        (),
+        {
+            "siblings": [
+                sib("model-00001-of-00002.safetensors", 9_000_000_000),
+                sib("model-00002-of-00002.safetensors", 1_000_000_000),
+                sib("consolidated.safetensors", 5_000_000_000),
+                sib("sub/model.safetensors", 7_000_000_000),
+            ]
+        },
+    )()
+    seen = {}
+
+    class FakeApi:
+        def model_info(self, repo, **kw):
+            seen.update(repo=repo, **kw)
+            return info
+
+    monkeypatch.setattr(huggingface_hub, "HfApi", FakeApi)
+    assert _hub_weight_bytes("org/big", "rev1") == 10_000_000_000
+    assert seen == {"repo": "org/big", "revision": "rev1", "files_metadata": True}
+
+
+def test_hub_weight_bytes_none_on_error(monkeypatch):
+    import huggingface_hub
+
+    from mlx_quant_fidelity.probes.weights import _hub_weight_bytes
+
+    class Boom:
+        def model_info(self, *a, **k):
+            raise OSError("offline")
+
+    monkeypatch.setattr(huggingface_hub, "HfApi", Boom)
+    assert _hub_weight_bytes("org/x", None) is None
+
+
+def test_uncached_pair_is_preflighted_from_hub_metadata(monkeypatch):
+    """Bug: with nothing cached the size check is skipped, and two 20 GiB models load anyway."""
+    import mlx_lm
+
+    from mlx_quant_fidelity.probes import weights as w
+
+    calls: list[str] = []
+    _patch_loads(monkeypatch, 0, 1, calls=calls)
+    monkeypatch.setattr(w, "_resolve_weight_bytes", lambda *a, **k: None)
+    monkeypatch.setattr(w, "_hub_weight_bytes", lambda *a, **k: 20 * _GIB)
+    monkeypatch.setattr(
+        w.mx, "device_info", lambda: {"max_recommended_working_set_size": int(24.96 * _GIB)}
+    )
+    monkeypatch.setattr(
+        mlx_lm, "load", lambda *a, **k: (_ for _ in ()).throw(AssertionError("loaded"))
+    )
+    with pytest.raises(InsufficientMemoryError):
+        measure_weight_fidelity("quant", "ref", corpus=_corpus(2))
+
+
+def test_preflight_counts_logits_working_set(monkeypatch):
+    """Bug: the pair fits on weights alone but not once the per-chunk paired logits
+    (512 x 262144 vocab, ~3.5 GiB) are added; the weight-only check lets it through."""
+    from mlx_quant_fidelity.probes import weights as w
+    from mlx_quant_fidelity.probes.kv import _paired_logits_bytes
+
+    monkeypatch.setattr(
+        w.mx, "device_info", lambda: {"max_recommended_working_set_size": int(24.96 * _GIB)}
+    )
+    each = int(10.5 * _GIB)
+    assert _preflight_memory(quant_bytes=each, reference_bytes=each) is None  # weights fit
+    logits = _paired_logits_bytes(512, 262144)
+    with pytest.raises(InsufficientMemoryError):
+        _preflight_memory(quant_bytes=each, reference_bytes=each, logits_bytes=logits)
+
+
+def test_weight_probe_refuses_caller_corpus_over_max_chunk_length(monkeypatch):
+    """Bug: a caller corpus with a 8192-token window skips the ceiling the auto-loaded one obeys."""
+    from mlx_quant_fidelity.probes.kv import MAX_CHUNK_LENGTH
+
+    calls: list[str] = []
+    _patch_loads(monkeypatch, 0, 1, calls=calls)
+    prov = CorpusProvenance("x", "test", "t", 8192, 8192, "none", "drop", "raw", 8192)
+    corpus = Corpus(chunks=(mx.arange(4),), provenance=prov)
+    assert prov.chunk_length > MAX_CHUNK_LENGTH
+    with pytest.raises(CorpusError, match="MAX_CHUNK_LENGTH"):
+        measure_weight_fidelity("quant", "ref", corpus=corpus)
+    assert calls == []  # refused before caps/load
+
+
+def test_preflight_skip_surfaces_as_report_warning(monkeypatch):
+    """Bug: unknown model sizes skip the memory pre-flight silently; the report says nothing."""
+    calls: list[str] = []
+    from mlx_quant_fidelity.probes import weights as w
+
+    _patch_loads(monkeypatch, 0, 1, calls=calls)
+    monkeypatch.setattr(w, "_resolve_weight_bytes", lambda *a, **k: None)
+    monkeypatch.setattr(w, "_hub_weight_bytes", lambda *a, **k: None)
+    report = measure_weight_fidelity("quant", "ref", corpus=_corpus(2))
+    assert any("memory pre-flight skipped" in msg for msg in report.warnings)
+
+
+def test_measure_weight_reports_chunk_progress(monkeypatch, capsys):
+    """Reds if the weight chunk loop is silent (a long ladder looks hung)."""
+    calls: list[str] = []
+    _patch_loads(monkeypatch, 0, 1, calls=calls)
+    seen: list[str] = []
+    measure_weight_fidelity("quant", "ref", corpus=_corpus(3), progress=seen.append)
+    assert seen == ["chunk 1/3", "chunk 2/3", "chunk 3/3"]
+    measure_weight_fidelity("quant", "ref", corpus=_corpus(3))  # default: silent
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == ""

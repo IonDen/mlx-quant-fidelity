@@ -25,3 +25,23 @@ def test_summarize_pins_p99_distinct_from_max():
     assert s.max == 100.0
     assert math.isclose(s.p99, 1.99, abs_tol=1e-6)
     assert s.p99 < s.max
+
+
+def test_summarize_legal_inf_kl_gives_inf_tail_without_warning():
+    """Bug: numpy's linear percentile computes inf - inf * 0 on a small array with a legal +inf
+    KL (the documented zero-probability policy), returning p99=NaN and warning."""
+    import warnings
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        s = summarize(np.array([0.1, np.inf]))
+    assert s.p99 == float("inf")
+    assert s.max == float("inf")
+    assert s.mean == float("inf")
+
+
+def test_summarize_finite_input_is_unchanged_by_inf_handling():
+    s = summarize(np.array([1.0, 2.0, 3.0, 4.0]))
+    assert math.isclose(
+        s.p99, 3.97, abs_tol=1e-9
+    )  # linear interpolation, 0.99 * 3 = 2.97 -> 3 + 0.97*1

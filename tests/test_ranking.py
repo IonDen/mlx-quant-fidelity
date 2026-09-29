@@ -81,3 +81,20 @@ def test_budget_pick_excludes_dominated_qualifier():
     # The contract returns the cheapest *frontier* qualifier, so this is None — an
     # implementation that dropped the frontier filter would wrongly return "q4-bad".
     assert budget_pick([Q4, Q4_BAD], qualifying={"q4-bad"}) is None
+
+
+def test_budget_pick_never_picks_nan_point():
+    """Bug: a NaN-quality point is never dominated, lands on the frontier and is picked."""
+    import math
+
+    from mlx_quant_fidelity.ranking import RankPoint, budget_pick, dominated_by, pareto_frontier
+
+    points = [
+        RankPoint("2:64", math.nan, 1000),
+        RankPoint("4:64", 0.05, 2000),
+        RankPoint("8:64", 0.001, 4000),
+    ]
+    qualifying = {"2:64", "4:64", "8:64"}
+    assert budget_pick(points, qualifying=qualifying) == "4:64"
+    assert "2:64" not in pareto_frontier(points)
+    assert "2:64" not in dominated_by(points)

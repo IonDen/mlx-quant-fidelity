@@ -183,28 +183,68 @@ def test_compare_does_not_swallow_unexpected_valueerror():
         main(["compare", "weights", "a/x-4bit", "b/y-8bit", "--reference", "ref/repo"])
 
 
-def test_fetch_model_config_requests_config_json(monkeypatch, tmp_path):
-    """`_fetch_model_config` must request exactly 'config.json' — the sweep only needs the
-    architecture geometry (head_dim, n_layers, n_kv_heads), never the model weights.
-    """
+def test_sweep_reads_local_config_json(monkeypatch, tmp_path, capsys):
+    """Bug: --sweep on a local model directory asks the Hub for a repo named after the path."""
     import huggingface_hub
 
+    (tmp_path / "config.json").write_text(json.dumps(_SWEEP_CONFIG_JSON))
+
+    def boom(*a, **k):
+        raise AssertionError("hub must not be called for a local directory")
+
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", boom)
     captured = {}
-    fake_path = tmp_path / "config.json"
-    fake_path.write_text(json.dumps({"hidden_size": 512}))
 
-    def fake_hf_hub_download(repo_id, filename, **kwargs):
-        captured["repo_id"] = repo_id
-        captured["filename"] = filename
-        return str(fake_path)
+    def fake_compare(model, configs, **kw):
+        captured["configs"] = configs
+        return _fake_comparison("kv")
 
-    monkeypatch.setattr(huggingface_hub, "hf_hub_download", fake_hf_hub_download)
+    monkeypatch.setattr(cli, "compare_kv_fidelity", fake_compare)
+    assert main(["compare", "kv", str(tmp_path), "--sweep"]) == 0
+    assert len(captured["configs"]) == 10
 
-    result = cli._fetch_model_config("org/model")
 
-    assert captured["filename"] == "config.json"
-    assert captured["repo_id"] == "org/model"
-    assert result == {"hidden_size": 512}
+def test_sweep_config_fetch_passes_revision(monkeypatch):
+    """Bug: --sweep reads the default-branch config while the run measures --model-revision."""
+    seen = {}
+
+    def fake_read(model, revision=None):
+        seen["args"] = (model, revision)
+        return _SWEEP_CONFIG_JSON
+
+    monkeypatch.setattr(cli, "read_model_config", fake_read)
+    monkeypatch.setattr(cli, "compare_kv_fidelity", lambda *a, **k: _fake_comparison("kv"))
+    assert main(["compare", "kv", "org/m", "--sweep", "--model-revision", "abc"]) == 0
+    assert seen["args"] == ("org/m", "abc")
+
+
+def test_kv_refuses_custom_code_before_load(monkeypatch, capsys):
+    """Bug: a repo naming a model_file reaches mlx_lm.load, which executes it."""
+    import mlx_lm
+
+    from mlx_quant_fidelity.probes import _preload
+
+    monkeypatch.setattr(_preload, "read_model_config", lambda m, r=None: {"model_file": "m.py"})
+
+    def boom(*a, **k):
+        raise AssertionError("mlx_lm.load must not run")
+
+    monkeypatch.setattr(mlx_lm, "load", boom)
+    rc = main(["kv", "evil/repo"])
+    assert rc == 2
+    assert "--allow-custom-code" in capsys.readouterr().err
+
+
+def test_kv_allow_custom_code_flag_is_threaded(monkeypatch, capsys):
+    captured = {}
+
+    def fake_measure(model, **kw):
+        captured.update(kw)
+        raise cli.QuantFidelityError("stop")
+
+    monkeypatch.setattr(cli, "measure_kv_fidelity", fake_measure)
+    main(["kv", "m", "--allow-custom-code"])
+    assert captured["allow_custom_code"] is True
 
 
 # ── regression: compare kv --sweep + KV-byte budget filter ────────────────────
@@ -239,7 +279,9 @@ def test_cli_sweep_dispatches_generated_grid(monkeypatch, capsys):
         return _fake_comparison("kv")
 
     monkeypatch.setattr(cli, "compare_kv_fidelity", fake_compare)
-    monkeypatch.setattr(cli, "_fetch_model_config", lambda model_id: _SWEEP_CONFIG_JSON)
+    monkeypatch.setattr(
+        cli, "read_model_config", lambda model_id, revision=None: _SWEEP_CONFIG_JSON
+    )
     rc = main(["compare", "kv", "m", "--sweep"])
     assert rc == 0
     model, configs, kw = captured["args"]
@@ -250,7 +292,7 @@ def test_cli_sweep_dispatches_generated_grid(monkeypatch, capsys):
 
 
 def test_cli_sweep_head_dim_none_exits_2(monkeypatch, capsys):
-    monkeypatch.setattr(cli, "_fetch_model_config", lambda model_id: {})
+    monkeypatch.setattr(cli, "read_model_config", lambda model_id, revision=None: {})
     rc = main(["compare", "kv", "m", "--sweep"])
     assert rc == 2
     assert "head_dim" in capsys.readouterr().err.lower()
@@ -264,7 +306,9 @@ def test_cli_sweep_with_budget_filters_and_names_skips(monkeypatch, capsys):
         return _fake_comparison("kv")
 
     monkeypatch.setattr(cli, "compare_kv_fidelity", fake_compare)
-    monkeypatch.setattr(cli, "_fetch_model_config", lambda model_id: _SWEEP_CONFIG_JSON)
+    monkeypatch.setattr(
+        cli, "read_model_config", lambda model_id, revision=None: _SWEEP_CONFIG_JSON
+    )
     rc = main(["compare", "kv", "m", "--sweep", "--max-kv-bytes-per-token", "9000"])
     assert rc == 0
     _, configs, kw = captured["args"]
@@ -273,7 +317,9 @@ def test_cli_sweep_with_budget_filters_and_names_skips(monkeypatch, capsys):
 
 
 def test_cli_sweep_budget_below_two_kept_exits_2(monkeypatch, capsys):
-    monkeypatch.setattr(cli, "_fetch_model_config", lambda model_id: _SWEEP_CONFIG_JSON)
+    monkeypatch.setattr(
+        cli, "read_model_config", lambda model_id, revision=None: _SWEEP_CONFIG_JSON
+    )
     rc = main(["compare", "kv", "m", "--sweep", "--max-kv-bytes-per-token", "1"])
     assert rc == 2
     assert "max-kv-bytes-per-token" in capsys.readouterr().err.lower()
@@ -299,9 +345,92 @@ def test_cli_sweep_budget_with_incomplete_geometry_exits_2(monkeypatch, capsys):
     """head_dim is resolvable (explicit key) but n_layers/n_kv_heads are not; the budget
     can't be costed, so this must exit 2 rather than crash inside filter_configs_by_kv_budget.
     """
-    monkeypatch.setattr(cli, "_fetch_model_config", lambda model_id: {"head_dim": 64})
+    monkeypatch.setattr(cli, "read_model_config", lambda model_id, revision=None: {"head_dim": 64})
     rc = main(["compare", "kv", "m", "--sweep", "--max-kv-bytes-per-token", "9000"])
     assert rc == 2
     err = capsys.readouterr().err.lower()
     assert "max-kv-bytes-per-token" in err
     assert "num_hidden_layers" in err or "num_key_value_heads" in err
+
+
+@pytest.mark.parametrize(
+    ("extra", "expected"),
+    [([], 7200.0), (["--worker-timeout", "90"], 90.0), (["--worker-timeout", "0"], None)],
+)
+def test_compare_weights_worker_timeout_flag(monkeypatch, extra, expected):
+    """Reds if --worker-timeout is ignored, or 0 fails to disable the limit."""
+    captured = {}
+
+    def fake(quant_ids, reference, **kw):
+        captured.update(kw)
+        return _fake_comparison("weight")
+
+    monkeypatch.setattr(cli, "compare_weight_fidelity", fake)
+    assert cli.main(["compare", "weights", "a", "b", "--reference", "r", *extra]) == 0
+    assert captured["worker_timeout_s"] == expected
+
+
+def _failed_row(label):
+    from mlx_quant_fidelity.report import ComparisonTargetResult
+
+    return ComparisonTargetResult(label, "failed", None, None, None, "WorkerError", "boom")
+
+
+@pytest.mark.parametrize("mode", ["weights", "kv"])
+def test_compare_all_failed_exits_nonzero(monkeypatch, capsys, mode):
+    """Reds if a compare where every row failed still exits 0 (scripts read it as success)."""
+    import dataclasses
+
+    report = dataclasses.replace(
+        _fake_comparison("weight" if mode == "weights" else "kv"),
+        results=(_failed_row("a"), _failed_row("b")),
+    )
+    monkeypatch.setattr(cli, "compare_weight_fidelity", lambda *a, **k: report)
+    monkeypatch.setattr(cli, "compare_kv_fidelity", lambda *a, **k: report)
+    argv = (
+        ["compare", "weights", "a", "b", "--reference", "r"]
+        if mode == "weights"
+        else ["compare", "kv", "m", "--configs", "4:64,8:64"]
+    )
+    assert cli.main(argv) == 1
+    assert "boom" in capsys.readouterr().out  # the report is still printed to stdout
+
+
+def test_compare_with_one_ok_row_exits_zero(monkeypatch):
+    import dataclasses
+
+    from mlx_quant_fidelity.report import ComparisonTargetResult
+
+    ok = ComparisonTargetResult("a", "ok", None, None, None, None, None)
+    report = dataclasses.replace(_fake_comparison("kv"), results=(ok, _failed_row("b")))
+    monkeypatch.setattr(cli, "compare_kv_fidelity", lambda *a, **k: report)
+    assert cli.main(["compare", "kv", "m", "--configs", "4:64,8:64"]) == 0
+
+
+def test_compare_weights_reports_target_progress_on_stderr(monkeypatch, capsys):
+    """Reds if progress lands on stdout (corrupts the report) or is never wired to stderr."""
+
+    def fake(quant_ids, reference, *, progress=None, **kw):
+        assert progress is not None
+        progress("[1/2] a")
+        return _fake_comparison("weight")
+
+    monkeypatch.setattr(cli, "compare_weight_fidelity", fake)
+    assert cli.main(["compare", "weights", "a", "b", "--reference", "r", "--format", "json"]) == 0
+    captured = capsys.readouterr()
+    assert "[1/2] a" in captured.err
+    assert "[1/2]" not in captured.out
+    assert json.loads(captured.out)["mode"] == "weight"
+
+
+def test_compare_kv_reports_progress_on_stderr(monkeypatch, capsys):
+    def fake(model, configs, *, progress=None, **kw):
+        assert progress is not None
+        progress("[1/2] 4:64")
+        return _fake_comparison("kv")
+
+    monkeypatch.setattr(cli, "compare_kv_fidelity", fake)
+    assert cli.main(["compare", "kv", "m", "--configs", "4:64,8:64", "--format", "json"]) == 0
+    captured = capsys.readouterr()
+    assert "[1/2] 4:64" in captured.err
+    assert json.loads(captured.out)["mode"] == "kv"

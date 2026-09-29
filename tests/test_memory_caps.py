@@ -107,3 +107,17 @@ def test_install_memory_caps_pushes_strict_byte_caps_on_healthy_device(monkeypat
     assert seen["memory"] == 22 * 1024**3
     assert seen["wired"] < max_bytes  # the wired cap is strictly below the device max (the guard)
     assert seen["memory"] < max_bytes
+
+
+def test_install_memory_caps_sets_cache_limit(monkeypatch):
+    """Reds if install_memory_caps never bounds MLX's retained cache pool (default: ~device size)."""
+    monkeypatch.setattr(
+        _memory_caps.mx, "device_info", lambda: {"max_recommended_working_set_size": 25 * 1024**3}
+    )
+    monkeypatch.setattr(_memory_caps.mx, "set_wired_limit", lambda b: None)
+    monkeypatch.setattr(_memory_caps.mx, "set_memory_limit", lambda b: None)
+    seen: list[int] = []
+    monkeypatch.setattr(_memory_caps.mx, "set_cache_limit", seen.append)
+
+    assert _memory_caps.install_memory_caps() == (20, 22)
+    assert seen == [4 * 1024**3]

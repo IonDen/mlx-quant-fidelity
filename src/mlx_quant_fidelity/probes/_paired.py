@@ -2,16 +2,25 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import mlx.core as mx
 import numpy as np
 
-from mlx_quant_fidelity.errors import ExactZeroError
+from mlx_quant_fidelity.errors import ExactZeroError, NonFiniteMetricError
 from mlx_quant_fidelity.metrics import ScalarSummary, perplexity, summarize
 from mlx_quant_fidelity.metrics.flip import top_token_flips
 from mlx_quant_fidelity.metrics.kl import kl_divergence
 from mlx_quant_fidelity.metrics.perplexity import token_nll
+
+ProgressFn = Callable[[str], None]
+
+
+def report_chunk_progress(progress: ProgressFn | None, index: int, total: int) -> None:
+    """Emit ``chunk {index}/{total}`` (1-based) about every tenth chunk and on the last one."""
+    if progress is not None and (index % max(1, total // 10) == 0 or index == total):
+        progress(f"chunk {index}/{total}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,6 +49,23 @@ def _reduce_pair(
     return kl, flips, ref_nll, quant_nll
 
 
+def _require_finite(name: str, values: np.ndarray, *, allow_inf: bool = False) -> None:
+    """Raise NonFiniteMetricError on NaN (and on +/-inf unless ``allow_inf``).
+
+    A per-position KL of +inf is the documented zero-probability policy, so KL passes
+    ``allow_inf=True``; NLLs must be fully finite (they feed perplexity).
+    """
+    arr = np.asarray(values, dtype=np.float64)
+    bad = np.isnan(arr).any() if allow_inf else not np.isfinite(arr).all()
+    if bad:
+        raise NonFiniteMetricError(
+            f"{name} contains non-finite values (NaN"
+            + ("" if allow_inf else " or inf")
+            + "); a NaN would pass every threshold and could be ranked as a real "
+            "measurement. Likely an fp16 overflow in the forward pass or a third-party kernel."
+        )
+
+
 def _aggregate_chunks(
     kls: list[mx.array],
     flips: list[mx.array],
@@ -51,6 +77,9 @@ def _aggregate_chunks(
     flip_all = np.concatenate([np.asarray(f.astype(mx.float32), dtype=np.float64) for f in flips])
     ref_all = mx.concatenate(ref_nlls)
     quant_all = mx.concatenate(quant_nlls)
+    _require_finite("per-position KL", kl_all, allow_inf=True)
+    _require_finite("reference NLL", np.asarray(ref_all.astype(mx.float32)))
+    _require_finite("quantized NLL", np.asarray(quant_all.astype(mx.float32)))
     return _Aggregate(
         kl=summarize(kl_all),
         flip_rate=float(flip_all.mean()),

@@ -10,6 +10,7 @@ import mlx.core as mx
 DESIRED_WIRED_GB = 20
 DESIRED_MEMORY_GB = 22
 HEADROOM_GB = 2
+CACHE_LIMIT_GB = 4  # bounds MLX's retained buffer pool (counted by the watchdog)
 
 
 def _clamp_caps_gb(max_recommended_gb: int) -> tuple[int, int]:
@@ -62,6 +63,7 @@ def install_memory_caps() -> tuple[int, int]:
     try:
         mx.set_wired_limit(wired_gb * 1024**3)
         mx.set_memory_limit(memory_gb * 1024**3)
+        mx.set_cache_limit(CACHE_LIMIT_GB * 1024**3)
     except Exception:
         return (0, 0)
     return (wired_gb, memory_gb)

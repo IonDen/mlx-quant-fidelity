@@ -112,3 +112,11 @@ def test_tier_rank_rejects_unknown_verdict():
 
     with pytest.raises(ValueError, match="unknown verdict"):
         tier_rank("nonsense")
+
+
+def test_qualifies_rejects_nan_kl():
+    """Bug: `nan > max_kld` is False, so a NaN mean passes any --max-kld budget."""
+    from mlx_quant_fidelity.policy import qualifies
+
+    assert qualifies(kl_mean=float("nan"), verdict="good", max_kld=0.1, min_tier=None) is False
+    assert qualifies(kl_mean=float("nan"), verdict="good", max_kld=None, min_tier=None) is False

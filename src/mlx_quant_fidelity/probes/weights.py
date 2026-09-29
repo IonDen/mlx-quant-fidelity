@@ -18,7 +18,15 @@ from mlx_quant_fidelity.errors import (
     ModelMismatchError,
 )
 from mlx_quant_fidelity.policy import _WEIGHT_TIERS_v0_2_0, verdict_for
-from mlx_quant_fidelity.probes._paired import _aggregate_chunks, _check_exact_zero, _reduce_pair
+from mlx_quant_fidelity.probes._paired import (
+    ProgressFn,
+    _aggregate_chunks,
+    _check_exact_zero,
+    _reduce_pair,
+    report_chunk_progress,
+)
+from mlx_quant_fidelity.probes._preload import preload_check
+from mlx_quant_fidelity.probes.kv import MAX_CHUNK_LENGTH, _paired_logits_bytes
 from mlx_quant_fidelity.report import (
     METHOD_NOT_RECORDED_WARNING,  # re-exported: the standing caveat lives with the renderer
     WeightFidelityReport,
@@ -207,6 +215,7 @@ def _tokenizer_warnings(ref_tok: object, quant_tok: object) -> list[str]:
 
 
 _PREFLIGHT_HEADROOM_BYTES = 2 * 1024**3
+_DEFAULT_WINDOW = 512  # the auto-loaded WikiText-2 window (matches the kv probe's default)
 
 
 def _resolve_weight_bytes(repo: str, revision: str | None) -> int | None:
@@ -228,26 +237,63 @@ def _resolve_weight_bytes(repo: str, revision: str | None) -> int | None:
         return None
 
 
-def _preflight_memory(*, quant_bytes: int | None, reference_bytes: int | None) -> None:
-    """Raise InsufficientMemoryError if both models + headroom exceed the device working set.
+def _hub_weight_bytes(repo: str, revision: str | None) -> int | None:
+    """Sum the Hub repo's root `model*.safetensors` sizes from metadata (no download), or None.
 
-    Best-effort: skips silently when either size is unknown or the device reports no working set.
-    The wired cap does NOT bound two live, un-evictable models, so this byte check is the real guard.
+    For a repo that is not cached yet, so the memory pre-flight still has sizes before any
+    load. Mirrors :func:`_resolve_weight_bytes`'s glob (root `model*.safetensors` only — a
+    duplicate `consolidated.safetensors` is never loaded by mlx-lm). None on any error.
+    """
+    try:
+        from fnmatch import fnmatchcase
+
+        from huggingface_hub import HfApi
+
+        info = HfApi().model_info(repo, revision=revision, files_metadata=True)
+        total = sum(
+            int(sib.size)
+            for sib in (info.siblings or [])
+            if sib.size is not None
+            and "/" not in sib.rfilename
+            and fnmatchcase(sib.rfilename, "model*.safetensors")
+        )
+        return total or None
+    except Exception:
+        return None
+
+
+PREFLIGHT_SKIPPED_WARNING = (
+    "memory pre-flight skipped: model sizes unknown before load (not cached locally and the "
+    "Hub metadata was unavailable), so the pair's fit on this device was not checked up front."
+)
+
+
+def _preflight_memory(
+    *, quant_bytes: int | None, reference_bytes: int | None, logits_bytes: int = 0
+) -> str | None:
+    """Raise InsufficientMemoryError if both models + logits working set + headroom exceed the device.
+
+    Returns a warning string when either size is unknown (the check could not run, and the
+    caller must surface that); None when the check ran and passed or the device reports no
+    working set. The wired cap does NOT bound two live, un-evictable models, so this byte
+    check is the real guard.
     """
     if quant_bytes is None or reference_bytes is None:
-        return
+        return PREFLIGHT_SKIPPED_WARNING
     try:
         max_ws = int(mx.device_info().get("max_recommended_working_set_size", 0))
     except Exception:
-        return
+        return None
     if max_ws <= 0:
-        return
-    if quant_bytes + reference_bytes + _PREFLIGHT_HEADROOM_BYTES > max_ws:
+        return None
+    if quant_bytes + reference_bytes + logits_bytes + _PREFLIGHT_HEADROOM_BYTES > max_ws:
         raise InsufficientMemoryError(
             f"reference ({reference_bytes / 1e9:.1f} GB) + quant ({quant_bytes / 1e9:.1f} GB) + "
-            f"headroom exceed the device working set ({max_ws / 1e9:.1f} GB); "
-            "use smaller models or a larger machine."
+            f"per-chunk logits working set ({logits_bytes / 1e9:.1f} GB) + headroom exceed the "
+            f"device working set ({max_ws / 1e9:.1f} GB); "
+            "use smaller models, a smaller window, or a larger machine."
         )
+    return None
 
 
 def _score_weight_chunk(
@@ -273,6 +319,8 @@ def measure_weight_fidelity(
     max_chunks: int | None = None,
     quant_revision: str | None = None,
     reference_revision: str | None = None,
+    allow_custom_code: bool = False,
+    progress: ProgressFn | None = None,
 ) -> WeightFidelityReport:
     """Measure how much weight quantization costs: a quantized repo vs a reference repo.
 
@@ -292,6 +340,10 @@ def measure_weight_fidelity(
             and a caller-provided corpus).
         quant_revision: Optional git revision for the quantized repo.
         reference_revision: Optional git revision for the reference repo.
+        allow_custom_code: Let a repo whose config.json names a ``model_file`` run its own
+            Python code on load (off by default; mlx-lm executes that file). Checked for both.
+        progress: Optional callback receiving ``chunk i/n`` lines about every tenth chunk.
+            Silent when ``None`` (the default).
     """
     from mlx_lm import load
 
@@ -303,11 +355,37 @@ def measure_weight_fidelity(
         raise CorpusError(
             "every corpus chunk must have at least 2 tokens (one teacher-forced position)."
         )
-    install_memory_caps()  # before any model load
+    reference_config = preload_check(
+        reference_model_id, reference_revision, allow_custom_code=allow_custom_code
+    )
+    quant_config_pre = preload_check(
+        quant_model_id, quant_revision, allow_custom_code=allow_custom_code
+    )
+    # Comparability gate on the raw configs BEFORE any load. mlx-lm's `load_config` reads
+    # config.json verbatim, so model_type / vocab_size / quantization agree with the post-load
+    # config; the post-load gate below stays as the authoritative re-check.
+    _gate_configs(quant_config=quant_config_pre, reference_config=reference_config)
 
-    reference_bytes = _resolve_weight_bytes(reference_model_id, reference_revision)
-    quant_bytes = _resolve_weight_bytes(quant_model_id, quant_revision)
-    _preflight_memory(quant_bytes=quant_bytes, reference_bytes=reference_bytes)
+    window = corpus.provenance.chunk_length if corpus is not None else _DEFAULT_WINDOW
+    if window > MAX_CHUNK_LENGTH:
+        raise CorpusError(
+            f"corpus.provenance.chunk_length={window} exceeds MAX_CHUNK_LENGTH="
+            f"{MAX_CHUNK_LENGTH} (a hard safety ceiling — larger windows hold larger paired "
+            "fp32 logits per chunk and risk a kernel panic; see docs/measurement-principles.md)."
+        )
+
+    reference_bytes = _resolve_weight_bytes(reference_model_id, reference_revision) or (
+        _hub_weight_bytes(reference_model_id, reference_revision)
+    )
+    quant_bytes = _resolve_weight_bytes(quant_model_id, quant_revision) or (
+        _hub_weight_bytes(quant_model_id, quant_revision)
+    )
+    vocab = _top_or_text(reference_config, "vocab_size")
+    logits_bytes = _paired_logits_bytes(window, vocab) if isinstance(vocab, int) else 0
+    pre_warning = _preflight_memory(
+        quant_bytes=quant_bytes, reference_bytes=reference_bytes, logits_bytes=logits_bytes
+    )
+    install_memory_caps()  # before any model load
 
     ref_model, tokenizer, reference_config = load(  # type: ignore[misc]
         reference_model_id, revision=reference_revision, return_config=True
@@ -326,6 +404,8 @@ def measure_weight_fidelity(
         warnings.append(
             f"reference is itself {reference_bits}-bit, not full precision; drift is relative to it."
         )
+    if pre_warning is not None:
+        warnings.append(pre_warning)
     # re-resolve now that snapshots are cached, for the report (pre-flight may have seen None)
     quant_bytes = quant_bytes or _resolve_weight_bytes(quant_model_id, quant_revision)
     reference_bytes = reference_bytes or _resolve_weight_bytes(
@@ -345,7 +425,8 @@ def measure_weight_fidelity(
     flips: list[mx.array] = []
     ref_nlls: list[mx.array] = []
     quant_nlls: list[mx.array] = []
-    for ids in chunks:
+    for chunk_index, ids in enumerate(chunks, start=1):
+        report_chunk_progress(progress, chunk_index, len(chunks))
         kl, flip, ref_nll, quant_nll = _score_weight_chunk(ref_model, quant_model, ids)
         mx.eval(kl, flip, ref_nll, quant_nll)
         kls.append(kl)

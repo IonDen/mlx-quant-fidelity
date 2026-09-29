@@ -535,3 +535,138 @@ def test_kv_cli_model_revision_threads(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(cli, "measure_kv_fidelity", fake_measure)
     assert cli.main(["kv", "org/m", "--model-revision", "abc123"]) == 0
     assert captured["kw"]["model_revision"] == "abc123"
+
+
+def _hub_response(status: int):
+    import httpx
+
+    return httpx.Response(status, request=httpx.Request("GET", "https://huggingface.co/x"))
+
+
+@pytest.mark.parametrize(
+    "argv", [["kv", "no-such/model"], ["weights", "no-such/model", "--reference", "r"]]
+)
+def test_repo_not_found_is_a_user_error(monkeypatch, capsys, argv):
+    """Reds if a mistyped repo id prints 'internal error' / crashes instead of exit 2."""
+    from huggingface_hub.errors import RepositoryNotFoundError
+
+    def _raise(*_a, **_k):
+        raise RepositoryNotFoundError("404 Client Error", response=_hub_response(404))
+
+    monkeypatch.setattr(cli, "measure_kv_fidelity", _raise)
+    monkeypatch.setattr(cli, "measure_weight_fidelity", _raise)
+    assert cli.main(argv) == 2
+    err = capsys.readouterr().err
+    assert err.startswith("error: could not load 'no-such/model': 404 Client Error")
+    assert "typo, gated repo, or offline?" in err
+    assert "internal error" not in err
+
+
+@pytest.mark.parametrize("exc_name", ["HFValidationError", "LocalEntryNotFoundError"])
+def test_kv_hub_validation_and_offline_are_user_errors(monkeypatch, capsys, exc_name):
+    import huggingface_hub.errors as hub_errors
+
+    def _raise(*_a, **_k):
+        raise getattr(hub_errors, exc_name)("bad id\nsecond line")
+
+    monkeypatch.setattr(cli, "measure_kv_fidelity", _raise)
+    assert cli.main(["kv", "bad id"]) == 2
+    err = capsys.readouterr().err
+    assert "could not load 'bad id': bad id (typo" in err
+    assert "second line" not in err  # first line only
+
+
+def test_missing_local_path_is_a_user_error(monkeypatch, capsys):
+    def _raise(*_a, **_k):
+        raise FileNotFoundError("config.json not found")
+
+    monkeypatch.setattr(cli, "measure_kv_fidelity", _raise)
+    assert cli.main(["kv", "/no/such/dir"]) == 2
+    assert "could not load '/no/such/dir'" in capsys.readouterr().err
+
+
+def test_unrelated_exception_still_propagates(monkeypatch):
+    """The boundary is a whitelist: a genuine bug must not be dressed up as a user error."""
+
+    def _raise(*_a, **_k):
+        raise RuntimeError("real bug")
+
+    monkeypatch.setattr(cli, "measure_kv_fidelity", _raise)
+    with pytest.raises(RuntimeError, match="real bug"):
+        cli.main(["kv", "m"])
+
+
+def test_kv_cli_reports_chunk_progress_on_stderr(monkeypatch, capsys):
+    """Reds if `kv` prints nothing until the report, or leaks progress onto stdout."""
+
+    def fake(model, *, progress=None, **kw):
+        assert progress is not None
+        progress("chunk 1/1")
+        return _fake_report()
+
+    monkeypatch.setattr(cli, "measure_kv_fidelity", fake)
+    assert cli.main(["kv", "m", "--format", "json"]) == 0
+    captured = capsys.readouterr()
+    assert "chunk 1/1" in captured.err
+    assert json.loads(captured.out)["verdict"] == "marginal"  # stdout is the pure report
+
+
+def test_weights_cli_reports_chunk_progress_on_stderr(monkeypatch, capsys):
+    def fake(quant, reference, *, progress=None, **kw):
+        assert progress is not None
+        progress("chunk 1/1")
+        return _weight_report()
+
+    monkeypatch.setattr(cli, "measure_weight_fidelity", fake)
+    assert cli.main(["weights", "q", "--reference", "r", "--format", "json"]) == 0
+    captured = capsys.readouterr()
+    assert "chunk 1/1" in captured.err
+    json.loads(captured.out)
+
+
+def _all_actions(parser):
+    import argparse
+
+    yield from parser._actions
+    for action in parser._actions:
+        if isinstance(action, argparse._SubParsersAction):
+            for sub in action.choices.values():
+                yield from _all_actions(sub)
+
+
+def test_every_cli_option_has_help():
+    """Reds if any option or positional lacks help= (a bare `--flag` in --help explains nothing)."""
+    import argparse
+
+    captured: dict[str, argparse.ArgumentParser] = {}
+    real = argparse.ArgumentParser.parse_args
+
+    def spy(self, args=None, namespace=None):
+        captured.setdefault("root", self)
+        raise SystemExit(0)
+
+    argparse.ArgumentParser.parse_args = spy  # type: ignore[method-assign]
+    try:
+        cli.main(["kv", "m"])
+    except SystemExit:
+        pass
+    finally:
+        argparse.ArgumentParser.parse_args = real  # type: ignore[method-assign]
+    missing = [
+        a.option_strings or a.dest
+        for a in _all_actions(captured["root"])
+        if not isinstance(
+            a, (argparse._HelpAction, argparse._VersionAction, argparse._SubParsersAction)
+        )
+        and not a.help
+    ]
+    assert missing == []
+
+
+def test_compare_kv_menu_text_and_quant_revision_help(capsys):
+    with pytest.raises(SystemExit):
+        cli.main(["compare", "--help"])
+    assert "rank N KV-cache methods/configs on one model" in capsys.readouterr().out
+    with pytest.raises(SystemExit):
+        cli.main(["weights", "--help"])
+    assert "without an inline @revision" in " ".join(capsys.readouterr().out.split())

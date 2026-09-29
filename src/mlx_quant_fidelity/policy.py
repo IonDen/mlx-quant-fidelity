@@ -3,6 +3,7 @@
 A result is only "good" if the mean drift, the tail (p99), AND the flip rate are all low.
 """
 
+import math
 from dataclasses import dataclass
 
 
@@ -59,6 +60,8 @@ def qualifies(*, kl_mean: float, verdict: str, max_kld: float | None, min_tier: 
     `--max-kld` checks mean KLD only; `--min-tier` checks the full 3-threshold verdict
     (mean AND p99 AND flip), so a tail-bad target cannot pass a tier budget. See spec audit #2.
     """
+    if math.isnan(kl_mean):
+        return False  # NaN compares False against every bound and would otherwise pass
     if max_kld is not None and kl_mean > max_kld:
         return False
     return not (min_tier is not None and tier_rank(verdict) < tier_rank(min_tier))
