@@ -671,3 +671,13 @@ def test_measure_weight_reports_chunk_progress(monkeypatch, capsys):
     captured = capsys.readouterr()
     assert captured.out == ""
     assert captured.err == ""
+
+
+def test_weight_report_provenance_n_tokens_matches_scored_chunks(monkeypatch):
+    """Reds if max_chunks slices the chunks but the weight report keeps the full token count."""
+    calls: list[str] = []
+    _patch_loads(monkeypatch, ref_peak=0, quant_peak=1, calls=calls)
+    corpus = _corpus(5)  # 5 chunks x 4 tokens
+    report = measure_weight_fidelity("quant", "ref", corpus=corpus, max_chunks=2)
+    assert corpus.provenance.n_tokens == 20
+    assert report.corpus.n_tokens == 8

@@ -31,7 +31,12 @@ from mlx_quant_fidelity.probes.kv import (
     packed_width_mismatch,
     score_kv_config,
 )
-from mlx_quant_fidelity.probes.kv_methods import KVCacheMethod, StockKVMethod
+from mlx_quant_fidelity.probes.kv_methods import (
+    ControlLaneMethod,
+    KVCacheMethod,
+    StockKVMethod,
+    check_before_load,
+)
 from mlx_quant_fidelity.ranking import RankPoint, budget_pick, dominated_by, pareto_frontier
 from mlx_quant_fidelity.report import (
     ComparisonReport,
@@ -913,6 +918,21 @@ def compare_kv_fidelity(
 
     pending = [m for m in methods if _read_partial(m) is None]
 
+    # Model-free checks (parameters, installed runtime) before anything is fetched or loaded: a
+    # method that fails them becomes a failed row and never reaches the model.
+    runnable: list[KVCacheMethod] = []
+    for m in pending:
+        try:
+            check_before_load(m)
+        except QuantFidelityError as exc:
+            write_json_atomic(
+                out_dir / _kv_partial_filename(m),
+                {"status": "failed", "error_type": type(exc).__name__, "message": str(exc)},
+            )
+        else:
+            runnable.append(m)
+    pending = runnable
+
     n_layers: int | None = None
     n_kv_heads: int | None = None
     head_dim: int | None = None
@@ -932,11 +952,9 @@ def compare_kv_fidelity(
                 progress(f"[{method_index}/{len(pending)}] {method.label}")
             mx.reset_peak_memory()
             partial = out_dir / _kv_partial_filename(method)
-            # Only a method exposing `control_method` (currently stock) has a bundled path to
-            # separate from a quantizer-only one; a method that's already quantizer-only has no
-            # `control_method` attribute at all, so `getattr` (not a bare attribute access)
-            # is load-bearing here.
-            run_control = getattr(method, "control_method", None) is not None
+            # Only a method with a control lane (currently stock) has a bundled path to
+            # separate from a quantizer-only one.
+            run_control = isinstance(method, ControlLaneMethod)
             try:
                 fid_report = score_kv_config(
                     model,

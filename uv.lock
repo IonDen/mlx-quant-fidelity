@@ -931,7 +931,7 @@ requires-dist = [
     { name = "mlx", specifier = ">=0.21" },
     { name = "mlx-lm", specifier = ">=0.31.3" },
     { name = "numpy", specifier = ">=1.26" },
-    { name = "pyarrow", specifier = ">=14" },
+    { name = "pyarrow", specifier = ">=14.0.1" },
 ]
 
 [package.metadata.requires-dev]

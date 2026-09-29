@@ -94,7 +94,7 @@ def test_stock_check_bits_zero_is_a_clean_error_not_zero_division():
 
 def test_stock_check_rejects_non_divisor_group_size():
     with pytest.raises(CacheNotQuantizableError, match="does not divide"):
-        StockKVMethod(bits=4, group_size=48).check(head_dim=64, model_type="llama")
+        StockKVMethod(bits=4, group_size=128).check(head_dim=64, model_type="llama")
 
 
 def test_stock_check_warns_when_head_dim_unknown():
@@ -594,7 +594,7 @@ def test_affine_check_gates_divisibility_and_bits():
     from mlx_quant_fidelity.errors import CacheNotQuantizableError
 
     with pytest.raises(CacheNotQuantizableError, match="does not divide"):
-        AffineKVMethod(k_bits=8, v_bits=4, group_size=48).check(head_dim=64, model_type="llama")
+        AffineKVMethod(k_bits=8, v_bits=4, group_size=128).check(head_dim=64, model_type="llama")
     with pytest.raises(ValueError, match="k_bits"):
         AffineKVMethod(k_bits=5, v_bits=4)
     with pytest.raises(ValueError, match="v_bits"):
@@ -937,3 +937,122 @@ def test_working_set_bytes_hand_values():
         )
         == 76800
     )
+
+
+# --- validation before load, availability before load, package-rooted errors -----------------
+
+
+@pytest.mark.parametrize("group_size", [16, 0, -64])
+def test_stock_method_rejects_unsupported_group_size(group_size):
+    """Reds if StockKVMethod accepts a group size mx.quantize does not support (16, 0, -64)."""
+    with pytest.raises(CompareConfigError, match="group_size"):
+        StockKVMethod(bits=4, group_size=group_size)
+
+
+@pytest.mark.parametrize("group_size", [16, 0, -64])
+def test_affine_rejects_unsupported_group_size(group_size):
+    """Reds if AffineKVMethod keeps the old `> 0` check and lets 16 through."""
+    with pytest.raises(CompareConfigError, match="group_size"):
+        AffineKVMethod(k_bits=8, v_bits=4, group_size=group_size)
+
+
+@pytest.mark.parametrize("group_size", [32, 64, 128])
+def test_supported_group_sizes_construct(group_size):
+    assert StockKVMethod(bits=4, group_size=group_size).group_size == group_size
+    assert AffineKVMethod(k_bits=8, v_bits=4, group_size=group_size).group_size == group_size
+
+
+def test_stock_validate_before_load_rejects_unsupported_bits():
+    """Reds if bits=5 survives to the model load (check() needs a loaded model's head_dim)."""
+    with pytest.raises(CacheNotQuantizableError, match="kv_bits=5"):
+        StockKVMethod(bits=5, group_size=64).validate_before_load()
+    StockKVMethod(bits=4, group_size=64).validate_before_load()  # supported: no raise
+
+
+def test_method_constructor_errors_are_package_rooted():
+    """Reds if any constructor raises a bare ValueError instead of CompareConfigError."""
+    bad = [
+        lambda: StockKVMethod(bits=4, group_size=16),
+        lambda: AffineKVMethod(k_bits=9, v_bits=4),
+        lambda: AffineKVMethod(k_bits=8, v_bits=4, group_size=0),
+        lambda: TurboQuantKVMethod(bits=5),
+        lambda: TurboQuantKVMethod(bits=4, seed=0),
+        lambda: TurboQuantVOnlyKVMethod(v_bits=5),
+        lambda: TurboQuantVOnlyKVMethod(v_bits=4, seed=0),
+    ]
+    for build in bad:
+        with pytest.raises(CompareConfigError):
+            build()
+
+
+def test_parse_method_spec_errors_start_with_the_spec_not_a_flag():
+    """Reds if the parser hard-codes `--configs entry`, wrong for a `--kv-method` caller."""
+    for spec in ("affine:9:4", "turboquant:9", "nosuch:1", "stock:4", "affine:8"):
+        with pytest.raises(CompareConfigError) as excinfo:
+            parse_method_spec(spec)
+        assert str(excinfo.value).startswith(f"method spec {spec!r}"), str(excinfo.value)
+        assert "--configs" not in str(excinfo.value)
+
+
+def test_ensure_available_is_a_no_op_for_stock_and_affine():
+    StockKVMethod(bits=4, group_size=64).ensure_available()
+    AffineKVMethod(k_bits=8, v_bits=4).ensure_available()
+
+
+@pytest.mark.parametrize("method", [TurboQuantKVMethod(bits=4), TurboQuantVOnlyKVMethod(v_bits=4)])
+def test_turboquant_ensure_available_raises_when_port_missing(monkeypatch, method):
+    """Reds if availability is only discovered after the model load."""
+    monkeypatch.setitem(sys.modules, "turboquant_mlx", None)  # forces ImportError
+    with pytest.raises(MethodUnavailableError, match=TURBOQUANT_PINNED_COMMIT):
+        method.ensure_available()
+
+
+@pytest.mark.parametrize("method", [TurboQuantKVMethod(bits=4), TurboQuantVOnlyKVMethod(v_bits=4)])
+def test_turboquant_ensure_available_passes_with_the_pinned_fake_port(monkeypatch, method):
+    install_fake_port(monkeypatch)
+    monkeypatch.setattr(
+        "mlx_quant_fidelity.probes.kv_methods._turboquant_direct_url",
+        lambda: json.dumps(
+            {
+                "url": "https://github.com/arozanov/turboquant-mlx",
+                "vcs_info": {"commit_id": TURBOQUANT_PINNED_COMMIT},
+            }
+        ),
+    )
+    method.ensure_available()
+
+
+@pytest.mark.parametrize(
+    "direct_url",
+    [
+        None,
+        json.dumps({"url": "file:///tmp/x", "dir_info": {}}),
+        json.dumps({"url": "https://github.com/someone/turboquant-mlx", "vcs_info": {}}),
+    ],
+)
+def test_squatter_refused_without_import(monkeypatch, direct_url):
+    """Reds if a non-arozanov distribution is imported (executing its code) before refusal."""
+    monkeypatch.delitem(sys.modules, "turboquant_mlx", raising=False)
+    monkeypatch.setattr(
+        "mlx_quant_fidelity.probes.kv_methods._turboquant_direct_url", lambda: direct_url
+    )
+    real_import = __import__
+
+    def guarded(name, *a, **k):
+        if name.split(".")[0] == "turboquant_mlx":
+            raise AssertionError("turboquant_mlx was imported before the provenance refusal")
+        return real_import(name, *a, **k)
+
+    monkeypatch.setattr("builtins.__import__", guarded)
+    with pytest.raises(MethodUnavailableError, match=TURBOQUANT_PINNED_COMMIT):
+        TurboQuantKVMethod(bits=4).ensure_available()
+    assert "turboquant_mlx" not in sys.modules
+
+
+def test_control_lane_protocol_is_structural():
+    """Reds if ControlLaneMethod stops matching by `control_method` (stock) or matches others."""
+    from mlx_quant_fidelity.probes.kv_methods import ControlLaneMethod
+
+    assert isinstance(StockKVMethod(bits=4, group_size=64), ControlLaneMethod)
+    assert not isinstance(AffineKVMethod(k_bits=8, v_bits=4), ControlLaneMethod)
+    assert not isinstance(TurboQuantKVMethod(bits=4), ControlLaneMethod)

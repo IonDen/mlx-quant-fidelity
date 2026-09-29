@@ -34,7 +34,7 @@ dependencies = [
   "mlx-lm>=0.31.3",
   "numpy>=1.26",
   "huggingface-hub>=0.24",
-  "pyarrow>=14",
+  "pyarrow>=14.0.1",
 ]
 
 [project.scripts]

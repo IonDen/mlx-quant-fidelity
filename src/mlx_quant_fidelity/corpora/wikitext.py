@@ -8,7 +8,7 @@ carried in CorpusProvenance so reports never imply cross-tool comparability.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 import mlx.core as mx
 
@@ -19,13 +19,16 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
 _WIKITEXT2_REPO = "Salesforce/wikitext"
+# Commit of Salesforce/wikitext the corpus is fetched at (unchanged since 2024-01-04); a moving
+# branch would let the scored text change under an unchanged report.
+_WIKITEXT2_REVISION = "b08601e04326c79dfdd32d625aee71d232d685c3"
 _WIKITEXT2_FILE = "wikitext-2-raw-v1/test-00000-of-00001.parquet"
 
 
 class _TokenizerProtocol(Protocol):  # pragma: no cover - structural type, never instantiated
     """Minimal protocol for tokenizers accepted by :func:`load_wikitext2`."""
 
-    def encode(self, text: str) -> list[int]:
+    def encode(self, text: str, **kwargs: Any) -> list[int]:
         """Encode text to a list of integer token IDs."""
         ...
 
@@ -64,7 +67,23 @@ def chunk_token_ids(
     return chunks
 
 
-def load_wikitext2(  # pragma: no cover
+def _bos_policy(tokenizer: _TokenizerProtocol) -> str:
+    """``"first-chunk"`` when the tokenizer's default encode prepends a special token, else ``"none"``.
+
+    The corpus is encoded once with the tokenizer's defaults and then chunked, so a tokenizer
+    that adds BOS (Llama-3) puts it at the start of chunk 0 only. Detected by comparing the
+    default encoding of a probe string with the ``add_special_tokens=False`` one; a tokenizer
+    whose ``encode`` does not accept the keyword is recorded as ``"none"``.
+    """
+    try:
+        with_special = tokenizer.encode("a")
+        without_special = tokenizer.encode("a", add_special_tokens=False)
+    except TypeError:
+        return "none"
+    return "first-chunk" if len(with_special) > len(without_special) else "none"
+
+
+def load_wikitext2(
     tokenizer: _TokenizerProtocol,
     *,
     chunk_length: int = 512,
@@ -99,9 +118,11 @@ def load_wikitext2(  # pragma: no cover
     except ImportError as exc:  # pragma: no cover - hard dep, defensive
         raise CorpusError("huggingface-hub is required to load WikiText-2") from exc
 
-    path = hf_hub_download(_WIKITEXT2_REPO, _WIKITEXT2_FILE, repo_type="dataset")
+    path = hf_hub_download(
+        _WIKITEXT2_REPO, _WIKITEXT2_FILE, repo_type="dataset", revision=_WIKITEXT2_REVISION
+    )
     text = _read_parquet_text(path)
-    token_ids = tokenizer.encode(text)
+    token_ids = tokenizer.encode(text)  # tokenizer defaults; see _bos_policy
     chunks = chunk_token_ids(
         token_ids, chunk_length=chunk_length, drop_final_partial=drop_final_partial
     )
@@ -113,11 +134,12 @@ def load_wikitext2(  # pragma: no cover
         tokenizer_id=tokenizer_id if tokenizer_id is not None else tokenizer.name_or_path,
         chunk_length=chunk_length,
         stride=chunk_length,
-        bos_policy="none",
+        bos_policy=_bos_policy(tokenizer),
         final_chunk_policy="drop" if drop_final_partial else "keep",
         normalization="raw",
         # n_tokens is computed from the FINAL (post-max_chunks) chunks only
         n_tokens=sum(int(c.size) for c in chunks),
+        dataset_revision=_WIKITEXT2_REVISION,
     )
     return Corpus(chunks=tuple(chunks), provenance=provenance)
 

@@ -32,6 +32,19 @@ NEW_KEYS = {
     "kv_layers_quantized",
     "kv_layers_skipped",
 }
+# The nested corpus dict gains these additive keys, at their pre-existing-report default.
+CORPUS_NEW_KEYS = {"dataset_revision"}
+
+
+def _assert_unchanged_but_for_corpus_keys(legacy, now):
+    """Every legacy value re-renders identically; the corpus dict only gains CORPUS_NEW_KEYS."""
+    for key in legacy:
+        if key == "corpus":
+            assert set(now[key]) - set(legacy[key]) == CORPUS_NEW_KEYS
+            assert all(now[key][k] is None for k in CORPUS_NEW_KEYS)
+            assert {k: v for k, v in now[key].items() if k in legacy[key]} == legacy[key]
+        else:
+            assert now[key] == legacy[key], key
 
 
 def test_the_glob_finds_the_committed_kv_samples():
@@ -59,8 +72,7 @@ def test_json_rerender_adds_exactly_the_method_and_footing_keys(path):
     assert now["kv_layers_total"] is None
     assert now["kv_layers_quantized"] is None
     assert now["kv_layers_skipped"] is None
-    for key in legacy:
-        assert now[key] == legacy[key], key
+    _assert_unchanged_but_for_corpus_keys(legacy, now)
 
 
 def test_badge_sample_matches_committed():
@@ -112,5 +124,4 @@ def test_weight_json_rerender_adds_exactly_the_geometry_keys(path):
     now = json.loads(render_json(weight_report_from_dict(legacy)))
     assert set(now) - set(legacy) == WEIGHT_NEW_KEYS
     assert all(now[k] is None for k in WEIGHT_NEW_KEYS)
-    for key in legacy:
-        assert now[key] == legacy[key], key
+    _assert_unchanged_but_for_corpus_keys(legacy, now)

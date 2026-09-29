@@ -945,3 +945,35 @@ def test_weight_table_prints_each_distinct_warning_once_and_keeps_the_full_foote
         "> Weight compare reloads the reference once per target — N targets ≈ Nx a "
         "single `weights` run. Fidelity is corpus- and context-length-specific."
     ) in md
+
+
+def test_comparison_markdown_bundled_kl_follows_drift_footing_not_method_name() -> None:
+    """Reds if the 'bundled KL' column keys off kv_method == 'stock': a custom-named method
+    whose report says drift_footing='bundled' must still show its native number."""
+    import dataclasses
+
+    custom = dataclasses.replace(
+        _kv_report_stock_with_control(), kv_method="custom", drift_footing="bundled"
+    )
+    result = _kv_target_result(
+        "custom:1", custom, quality=0.08, cost=9216, ranked_kl=0.08, ranked_verdict="marginal"
+    )
+    report = ComparisonReport(
+        mode="kv",
+        reference=None,
+        model="org/m",
+        corpus=None,
+        quantize_start=0,
+        quantize_mode="stress",
+        budget=None,
+        results=(result,),
+        frontier=("custom:1",),
+        dominated=(),
+        budget_pick=None,
+        mlx_version="0.21",
+        mlx_lm_version="0.31.3",
+    )
+    md = render_comparison_markdown(report)
+    row = next(line for line in md.splitlines() if "| `custom:1` |" in line)
+    cells = [c.strip() for c in row.strip().strip("|").split("|")]
+    assert cells[5] == "0.1500", f"bundled KL: {cells}"

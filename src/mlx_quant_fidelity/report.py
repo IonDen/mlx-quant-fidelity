@@ -270,10 +270,17 @@ def render_markdown(report: FidelityReport) -> str:
     c = report.corpus
     group = "—" if report.kv_group_size is None else str(report.kv_group_size)
     method_tag = "" if report.kv_method == "stock" else f" via {report.kv_method}"
+    partial_title = (
+        f" (partial: {report.kv_layers_quantized}/{report.kv_layers_total} layers)"
+        if report.kv_partial
+        else ""
+    )
+    partial_verdict = " (partial coverage)" if report.kv_partial else ""
     lines = [
-        f"# KV-fidelity: `{report.model_id}` @ {method_bits_text(report)} (group {group}){method_tag}",
+        f"# KV-fidelity: `{report.model_id}` @ {method_bits_text(report)} (group {group})"
+        f"{method_tag}{partial_title}",
         "",
-        f"**Verdict:** {report.verdict} · **mode:** {report.quantize_mode} "
+        f"**Verdict:** {report.verdict}{partial_verdict} · **mode:** {report.quantize_mode} "
         f"(quantize_start={report.quantize_start})",
         "",
         "| metric | value |",
@@ -515,7 +522,7 @@ def render_comparison_markdown(report: ComparisonReport) -> str:
             verdict = r.ranked_verdict if r.ranked_verdict is not None else r.report.verdict
             bundled = (
                 f"{r.report.kl.mean:.4f}"
-                if r.ranked_kl is not None and getattr(r.report, "kv_method", None) == "stock"
+                if r.ranked_kl is not None and getattr(r.report, "drift_footing", None) == "bundled"
                 else "—"
             )
             resident = _human_bytes(getattr(r.report, "working_set_bytes_per_token", None))

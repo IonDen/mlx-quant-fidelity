@@ -11,6 +11,7 @@ import mlx.core as mx
 from mlx.utils import tree_flatten
 
 from mlx_quant_fidelity._memory_caps import device_string, install_memory_caps
+from mlx_quant_fidelity.corpora.provenance import scored_provenance
 from mlx_quant_fidelity.errors import (
     CorpusError,
     ExactZeroError,  # noqa: F401 — re-exported for callers
@@ -461,7 +462,7 @@ def measure_weight_fidelity(
         perplexity_delta=agg.perplexity_quant - agg.perplexity_ref,
         n_positions=agg.n_positions,
         n_chunks=len(chunks),
-        corpus=corpus.provenance,
+        corpus=scored_provenance(corpus, len(chunks)),
         mlx_version=importlib.metadata.version("mlx"),
         mlx_lm_version=importlib.metadata.version("mlx-lm"),
         peak_memory_bytes=int(mx.get_peak_memory()),

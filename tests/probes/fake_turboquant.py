@@ -4,6 +4,7 @@ Lets the adapter's wiring run offline. ``state`` stores uint32 packed codes + fp
 real byte geometry so the behavioural contract (bytes == formula) is satisfiable by the fake.
 """
 
+import json
 import sys
 import types
 
@@ -254,6 +255,19 @@ def install_fake_port(
     vonly_mod = types.ModuleType("turboquant_mlx.v_only_cache")
     vonly_mod.VOnlyTurboQuantCache = vonly_cls
     monkeypatch.setitem(sys.modules, "turboquant_mlx", pkg)
+    # The adapter refuses to import the port unless its install record is a git install of the
+    # arozanov repo (a PyPI squatter must never be imported), so the fake needs a matching record
+    # or every fake-port test would fail in a checkout without the real port (--hide-port / CI).
+    # A test that patches `_turboquant_direct_url` itself after this call still wins.
+    monkeypatch.setattr(
+        "mlx_quant_fidelity.probes.kv_methods._turboquant_direct_url",
+        lambda: json.dumps(
+            {
+                "url": "https://github.com/arozanov/turboquant-mlx",
+                "vcs_info": {"vcs": "git", "commit_id": "6e928d715595dee9f6b6cc3968baa44e1f408d28"},
+            }
+        ),
+    )
     if no_cache_module:
         monkeypatch.delitem(sys.modules, "turboquant_mlx.cache", raising=False)
     else:

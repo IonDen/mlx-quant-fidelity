@@ -87,3 +87,12 @@ def test_weight_badge_uses_mixed_label_for_mixed_reports():
     )
     assert badge_for_report(mixed)["message"].split(" · ")[1] == "mixed 4/5-bit"
     assert badge_for_report(_weight_report())["message"].split(" · ")[1] == "4-bit"
+
+
+def test_badge_marks_partial_coverage():
+    """Reds if a 4-of-26-layer hybrid measurement renders like a whole-model number."""
+    partial = dataclasses.replace(
+        _fake_report(), kv_partial=True, kv_layers_total=26, kv_layers_quantized=4
+    )
+    assert "partial 4/26 layers" in badge_for_report(partial)["message"]
+    assert "partial" not in badge_for_report(_fake_report())["message"]

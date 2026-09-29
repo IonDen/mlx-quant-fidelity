@@ -32,6 +32,10 @@ def badge_for_report(report: "FidelityReport | WeightFidelityReport") -> dict[st
         )
         if report.kv_method != "stock":
             message = f"{message} · {report.kv_method}"
+        if report.kv_partial:
+            message = (
+                f"{message} · partial {report.kv_layers_quantized}/{report.kv_layers_total} layers"
+            )
     else:
         label = "Weight fidelity"
         message = f"{report.verdict} · {weight_bits_text(report)} · {corpus.name}/{corpus.chunk_length} · provisional"
