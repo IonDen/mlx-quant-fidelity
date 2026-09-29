@@ -3,6 +3,42 @@
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.0] - 2026-09-29
+
+A hardening release. The memory guards now account for everything a run holds, the tool refuses repos that would execute their own code, a NaN can no longer be ranked as a result, and the common mistakes (a mistyped repo, a missing extra, a bad group size) fail before a model loads, with a clear message. Measured numbers are unchanged: every committed sample renders the same report as before.
+
+### Added
+
+- `--allow-custom-code` on `kv`, `weights`, `compare kv` and `compare weights` (Python: `allow_custom_code=True`). mlx-lm executes the Python file a repo's `config.json` names under `model_file` when it loads the model. The tool now reads `config.json` first, refuses such a repo unless you opt in, and loads the model at exactly the commit whose config it checked.
+- A memory watchdog in the CLI and in the `compare weights` worker. It polls MLX's active plus cached memory and exits with code 3 once the total crosses the device's memory size less 4 GiB. It is not started by the Python API.
+- `compare weights --worker-timeout SECONDS` (default 21600, six hours; `0` turns it off). A worker that runs past it is recorded as a failed row instead of blocking the run.
+- Progress lines on stderr: `kv` and `weights` print every tenth chunk of the corpus, and `compare` prints one line per target or config. Standard output still carries only the report. The Python functions take an optional `progress` callback and stay silent without one.
+- `dataset_revision` in the corpus provenance. WikiText-2 is now fetched at a pinned dataset revision, the same file every earlier report was scored on.
+- Help text for every CLI option.
+- `pytest --emulate-small-device` runs the default suite as if on a device with a 4.7 GiB working set, the size CI's macOS runners report, so a test that only passes on a large machine fails locally too.
+
+### Changed
+
+- The KV memory gate counts the model's own weights and KV caches. A window is refused when the weights, the per-chunk working set and the caches would not fit in the device working set less 2 GiB, in addition to the existing logits check. The model is loaded lazily, so this check runs before its weights are read into memory. A large bf16 model at a long window used to pass the gate on the logits alone.
+- Geometry for wrapper architectures (the ones that keep `vocab_size` and layer counts under `text_config`) is read from there, so the memory gate and the corpus vocabulary check apply to them. When the vocabulary cannot be derived at all, windows above 512 are refused instead of running unchecked.
+- The weights probe reads both `config.json` files before loading either model. A mismatched pair is refused at that point, and the memory pre-flight sizes a repo that is not cached yet from Hub metadata and includes the per-chunk logits. If the sizes still cannot be determined, the report says the pre-flight was skipped. A window above 4096 is refused on the weights probe too.
+- A NaN KL or a non-finite NLL raises `NonFiniteMetricError` instead of producing a report. Ranking ignores a NaN point, so it can no longer sit on the frontier or be picked by `--max-kld`. An infinite KL, the documented zero-probability case, stays legal, and its p99 now reads as infinite instead of NaN on a small corpus.
+- Group sizes other than 32, 64 and 128 are refused when the method is built, and unsupported stock bit widths are refused before the model loads. Previously both failed after a full download. Method constructors raise `CompareConfigError`, which is still a `ValueError`.
+- A missing or wrong TurboQuant install is detected before the model loads. An install that is not an https git install of the GitHub repository (a PyPI package of the same name, an editable or SSH clone, a fork) is refused, a commit other than the pinned one is measured with a note in the report, and the tool checks this before it imports the port anywhere, including when `compare kv` resumes saved results.
+- A report measured on a subset of a hybrid model's layers says so in the badge (`partial 4/26 layers`), the Markdown title and the verdict line.
+- A missing, gated or mistyped repo, no network, or a `config.json` that is not a JSON object is reported as a user error (exit code 2) naming the repo, instead of an internal error. In Python this is `ModelNotAccessibleError`. `compare` exits 1 when no row was measured. `compare weights` validates `--max-chunks` before starting any worker.
+- `compare weights` measures a target again if its saved result is a failure, instead of replaying the failure on every rerun. Saved results also record the mlx and mlx-lm versions, so a result measured under another version is recomputed, and they are written atomically. Saved `compare weights` and `compare kv` results from 0.9.x are measured again once after upgrading.
+- `compare kv --sweep` reads a local model directory's `config.json` and honors `--model-revision`.
+- A `compare kv` refusal from the memory gate names the knob `compare kv` actually has (`--chunk-length`).
+- Corpus provenance records `bos_policy: "first-chunk"` when the tokenizer adds a BOS token at the start, and counts only the chunks actually scored when `max_chunks` trims a supplied corpus. The KV probe refuses a chunk shorter than two tokens, as the weights probe already did.
+- `pyarrow>=14.0.1`, excluding a release with a known unsafe-deserialization flaw in its Parquet reader.
+- CI runs on Python 3.11, 3.12 and 3.13, installs from the lockfile, and pins every action to a commit.
+
+### Notes
+
+- The committed Llama samples record `bos_policy: "none"`, but their chunk 0 did start with the tokenizer's BOS token. The recorded field was wrong, not the measurement; the sample files are kept as published.
+- Exit codes: 0 success, 1 a `compare` run with no measured row (or an unexpected internal error), 2 a user error, 3 the memory watchdog.
+
 ## [0.9.0] - 2026-09-06
 
 The `kv` probe measures hybrid attention models — full-attention layers interleaved with sliding-window or state-space layers — on the layers whose cache can be quantized, instead of refusing the whole model.

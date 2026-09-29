@@ -54,6 +54,8 @@ That model at 8-bit KV clears the good tier on this corpus. Apple Silicon, Pytho
 - `--quantize-start N` — `0` for stress mode, the default; any N above 0 for deployment mode.
 - `--format json|md|badge` — `md` by default. `json` is the machine-readable form the reports under [`_artifacts/samples/`](_artifacts/samples) are written in, and `badge` works on `weights` as well as `kv`. The two `compare` subcommands take `json` and `md` only.
 - `repo@revision` on `weights` and `compare weights` pins a Hugging Face revision inline; an inline pin wins over `--quant-revision` / `--reference-revision`. `kv` and `compare kv` keep `--model-revision`.
+- `--allow-custom-code` — let a repo whose `config.json` names a `model_file` run that file. mlx-lm executes it on load, so the tool refuses such a repo unless you pass this flag. Only use it for repos you trust.
+- `--worker-timeout SECONDS` — `compare weights` only: the wall-clock limit for each target's worker, default 21600 (six hours; `0` turns it off). A worker that runs over it becomes a failed row; raise the limit for full-corpus runs on large models.
 
 Both cost something to run. The quickstart pulls roughly 1.8 GB of weights plus the corpus on first use, and a wider window costs memory rather than time: the 4096-token run further down peaks at 13.53 GiB, so it will not fit a 16 GB machine. [docs/measurement-principles.md](docs/measurement-principles.md#drift-by-position-depth) lists the measured peak for every window length and explains the pre-flight that refuses one too large for your device.
 
@@ -94,7 +96,7 @@ Prints one shields.io line for your model card. Green, yellow, or red, with the 
 ![KV fidelity](https://img.shields.io/badge/KV_fidelity-good_%C2%B7_8--bit_%C2%B7_wikitext--2--raw%2F512_%C2%B7_stress-brightgreen)
 ```
 
-Green for `good`, yellow for `marginal`, red for `bad`. Threshold values and the color map are in [docs/threshold-policy.md](docs/threshold-policy.md).
+Green for `good`, yellow for `marginal`, red for `bad`. Threshold values and the color map are in [docs/threshold-policy.md](docs/threshold-policy.md). A hybrid model measured on only some of its layers carries `partial 4/26 layers` in the badge message, so the badge can't be read as covering the whole cache.
 
 ## What it found
 
@@ -213,7 +215,9 @@ The KV probe is not tied to mlx-lm's cache. `--kv-method turboquant` measures th
 [TurboQuant-MLX](https://github.com/arozanov/turboquant-mlx) uniform-bit cache on the same
 paired, teacher-forced, full-vocabulary yardstick, and `compare kv` ranks it against the stock
 configurations memory-normalized. Install the pinned port first — the PyPI package named
-`turboquant-mlx` is unrelated:
+`turboquant-mlx` is unrelated. The tool checks the install record before importing the port and accepts
+only an https git install of this repository (a different commit is measured with a note in the
+report); a PyPI, editable, SSH or fork install is refused on purpose:
 
 ```bash
 pip install "turboquant-mlx @ git+https://github.com/arozanov/turboquant-mlx@6e928d715595dee9f6b6cc3968baa44e1f408d28"
@@ -271,7 +275,7 @@ Stress mode (`--quantize-start 0`, the default) quantizes from token 0 — the h
 
 A run that returns exactly zero drift raises instead of reporting a silent "perfect fidelity." That almost always means quantization never engaged, not that it was free.
 
-The weight probe works the same way with two models instead of two caches: a quantized repo and a reference repo, scored on the same corpus tokens. A compatibility gate refuses a mismatched pair before loading, and a memory pre-flight refuses a pair too large for the device rather than risking a kernel panic.
+The weight probe works the same way with two models instead of two caches: a quantized repo and a reference repo, scored on the same corpus tokens. Both `config.json` files are read before either model loads: a mismatched pair (a different architecture or vocabulary, or a "quantized" repo whose config declares no quantization) is refused there. A memory pre-flight then sizes the two models, from the local cache or from Hub metadata for a repo you haven't downloaded yet, adds the per-chunk logits, and refuses a pair too large for the device rather than risking a kernel panic. When neither source gives a size, the run goes ahead and the report says the pre-flight was skipped.
 
 See [docs/measurement-principles.md](docs/measurement-principles.md) for the zero-probability policy, the exact-zero guard, and how perplexity delta relates to mean KLD.
 
@@ -303,7 +307,34 @@ report = measure_weight_fidelity(
 print(report.kl.mean, report.flip_rate, report.verdict)
 ```
 
-`compare_kv_fidelity` and `compare_weight_fidelity` back the two `compare` subcommands and return a `ComparisonReport`.
+Pass a method object to measure a cache other than mlx-lm's stock one. TurboQuant needs the pinned install described under [Measuring a third-party cache](#measuring-a-third-party-cache); `AffineKVMethod` needs nothing extra.
+
+```python
+from mlx_quant_fidelity import AffineKVMethod, TurboQuantKVMethod, measure_kv_fidelity
+
+report = measure_kv_fidelity(
+    "mlx-community/Llama-3.2-1B-Instruct-4bit",
+    method=TurboQuantKVMethod(bits=4, seed=42),  # or AffineKVMethod(k_bits=8, v_bits=4)
+)
+print(report.kv_method, report.kl.mean, report.drift_footing)
+```
+
+`compare_kv_fidelity` and `compare_weight_fidelity` back the two `compare` subcommands and return a `ComparisonReport`. None of the Python functions print progress unless you pass a `progress` callback, and none of them start the memory watchdog described below.
+
+## Exit codes and safety
+
+| code | meaning |
+|---|---|
+| 0 | the report was printed |
+| 1 | `compare` measured no row at all (the report is still printed), or an unexpected internal error |
+| 2 | a user error: a bad option, a missing or gated repo, no network, a refused configuration, or a refused measurement (a NaN metric, an exact-zero result) |
+| 3 | the memory watchdog stopped the run |
+
+Every command reads the model's `config.json` before loading any weights. mlx-lm runs the Python file a repo names under `model_file` when it loads the model, so a repo whose config names one is refused unless you pass `--allow-custom-code`, and the model is then loaded at exactly the commit whose `config.json` was checked. (Custom tokenizer code is a separate case that transformers handles itself: it refuses to run it without your confirmation.) Invalid method parameters and a missing TurboQuant install are also caught at this point, before a download starts.
+
+`compare` records a target it cannot read as a failed row and carries on with the rest. A shared reference it cannot read (`compare weights`), or an unreadable model (`compare kv`), is exit 2, since no row could be measured.
+
+Every entry point, the Python API included, caps MLX's wired memory and its buffer cache (4 GiB) before loading. The CLI also runs a watchdog that exits with code 3 once MLX's active plus cached memory passes the device's memory size less 4 GiB. That ceiling is only a backstop. The pre-flight gates described in [docs/measurement-principles.md](docs/measurement-principles.md#memory-guards) are what should refuse an oversized run before it starts. Long runs print progress to stderr; standard output carries only the report.
 
 ## Further reading
 
@@ -313,7 +344,7 @@ print(report.kl.mean, report.flip_rate, report.verdict)
 
 ## Status
 
-0.9.0, released on PyPI as `mlx-quant-fidelity`. The `kv` probe now measures hybrid attention models — full-attention layers interleaved with sliding-window or state-space layers — on the layers whose cache can be quantized, instead of refusing the whole model; the report records how many layers were measured and which were skipped. Threshold validation and MLA coverage are on the [roadmap](ROADMAP.md).
+0.10.0, released on PyPI as `mlx-quant-fidelity`. A hardening release: the memory guards count model weights and run before the weights probe loads anything, repos that would execute their own code are refused unless you opt in, and bad parameters fail before a download starts. Measured numbers are unchanged from 0.9.0. Threshold validation and MLA coverage are on the [roadmap](ROADMAP.md).
 
 ## License
 
