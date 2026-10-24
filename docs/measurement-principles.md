@@ -79,6 +79,24 @@ Perplexity delta is a related but distinct signal: it scores the realized next c
 
 In the mlx-lm 0.31.x path used by the current reports, the quantized run composes attention from two `mx.quantized_matmul` calls against packed Keys and Values. The reference uses standard SDPA. The measured drift bundles the quantizer's numerical error with the different attention path's numerics. That is the real end-to-end cost of running the model, but the report says so rather than attributing everything to the quantizer alone. See [docs/ranking-principles.md](ranking-principles.md) for how this interacts with Pareto ranking.
 
+## Reading these numbers next to llama.cpp's
+
+If you have measured a GGUF with llama.cpp's `--kl-divergence`, you will want to know how this tool's numbers differ. At a 512-token window the setup matches in four ways: the KL runs from the reference to the quantized model, neither tool truncates the distribution to a top-k, chunks do not overlap, and a final partial chunk is dropped.
+
+Three differences change the number.
+
+llama.cpp scores only the second half of each chunk, starting at [`n_ctx/2`](https://github.com/ggml-org/llama.cpp/blob/df9beac7153166550571c70cc667f270b745da49/tools/perplexity/perplexity.cpp#L1771). That is 255 of the 511 predicted positions in a 512-token chunk. This tool scores all 511 in its default stress mode and in the weight probe, so the early positions stay in. The stress-mode depth buckets in "Drift by position depth" show that early regime. Deployment mode scores only the positions after the quantization boundary.
+
+llama.cpp also [replaces the first token of every chunk with BOS](https://github.com/ggml-org/llama.cpp/blob/df9beac7153166550571c70cc667f270b745da49/tools/perplexity/perplexity.cpp#L1798-L1799) when the model's vocabulary adds one. This tool does not insert a BOS. It keeps the one the tokenizer adds, at the start of the first chunk only, and records which case applied as `bos_policy` (`first-chunk` or `none`).
+
+Finally, llama.cpp's base file [stores each position's log-probabilities as 16-bit integers](https://github.com/ggml-org/llama.cpp/blob/df9beac7153166550571c70cc667f270b745da49/tools/perplexity/perplexity.cpp#L93-L100) with a per-row scale, and only entries with a base [log-probability above −16](https://github.com/ggml-org/llama.cpp/blob/df9beac7153166550571c70cc667f270b745da49/tools/perplexity/perplexity.cpp#L229) enter the sum. This tool keeps fp32 logits over the whole vocabulary and applies no cutoff.
+
+None of these effects has been measured here, so this document gives no size for any of them.
+
+Matching all three settings would still not make a GGUF number and an MLX number a pair. A GGUF and an MLX checkpoint are converted and quantized by different tools, and llama.cpp tokenizes with the vocabulary stored in the GGUF, so neither the reference weights, the quantized weights nor the token stream is guaranteed to be the same. The two numbers are not one experiment with a single thing changed. This tool compares MLX configurations with each other on one fixed chunking contract. It makes no claim across tools and has no mode that imitates llama.cpp.
+
+Other tools have made other choices. [`sammcj/mlx-kld`](https://github.com/sammcj/mlx-kld/blob/3b84048a8f1b73c00e2de073127d4229c42ffa9f/mlx_kld/compare.py) copies the half-chunk skip in its long mode only (`score_start = n_ctx // 2` in `_prepare_streamed_chunks`).
+
 ## What the weight report can and cannot say about the method
 
 A weight-fidelity report describes the geometry of the model it loaded, not the recipe that produced it. mlx-lm's quantizers all write the same kind of `quantization` block into `config.json`: a top-level `bits` and `group_size` (and sometimes `mode`), plus optional per-module entries — a dict of `bits`/`group_size` for a module quantized differently, `True` for a module quantized at the top-level defaults, `False` for one left alone. Repos written by the current `mlx_lm.convert` carry the block twice, under `quantization` and `quantization_config`; repos written by other mlx-lm tools or older conversions, including the ladder's `-4bit-AWQ` repo, carry only `quantization`, and the probe reads `quantization` first either way. Nothing in that block says whether the scales were learned (`mlx_lm.dwq`), the weights pre-scaled (`mlx_lm.awq`), or the per-layer bit widths chosen by sensitivity (`mlx_lm.dynamic_quant`): a repo published as DWQ has a config indistinguishable from a plain 4-bit one, and a repo published as AWQ simply lists every module with the geometry it ended up with. The report therefore never labels a method. The repo id may say `-DWQ`; the tool did not check that, and says so in a standing note.
