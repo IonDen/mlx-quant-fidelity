@@ -340,7 +340,7 @@ Every entry point, the Python API included, caps MLX's wired memory and its buff
 
 - [Low-bit KV caches on MLX: what exists and what is missing](https://ineshin.space/papers/low-bit-kv-caches-on-mlx-what-exists-and-what-is-missing/) — surveys mlx-lm's shipped cache, the measured 8-bit and 4-bit fidelity cost, KIVI and KVQuant-style alternatives, and the remaining MLX layout and kernel gaps.
 - [How to measure what quantization actually costs](https://ineshin.space/papers/how-to-measure-what-quantization-actually-costs/) — the methods companion: teacher-forced paired scoring, streaming full-vocabulary KL on a 32 GB machine, the guards that keep a harness from passing by doing nothing, and where the verdict thresholds honestly come from.
-- [What an MLX quantized repository does and does not tell you](https://ineshin.space/papers/what-an-mlx-quantized-repository-does-and-does-not-tell-you/) — the plain and DWQ 4-bit Qwen3-0.6B repos have byte-identical configs, effective bits per weight run above the nominal width, and on that pair six fidelity metrics split two against four.
+- [What an MLX quantized repository does and does not tell you](https://github.com/IonDen/mlx-quant-fidelity/blob/main/docs/papers/what-an-mlx-quantized-repository-does-and-does-not-tell-you.md) — the plain and DWQ 4-bit Qwen3-0.6B repos have byte-identical configs, effective bits per weight run above the nominal width, and on that pair six fidelity metrics split two against four.
 - More writing at [ineshin.space](https://ineshin.space).
 
 ## Status
