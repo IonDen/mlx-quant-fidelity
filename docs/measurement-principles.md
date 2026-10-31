@@ -125,7 +125,36 @@ This is a partial measurement, and what it corresponds to in mlx-lm depends on w
 
 Partial coverage runs in stress mode only. Deployment mode converts the whole stored prefix at the boundary, which fails on a sliding-window layer, so a partial model is refused there rather than measured. The quantizer-only control lane is refused for the same reason. It runs in the `kv` command; `compare kv` does not rank a partial model, because a partial cache's cost is not comparable to a fully-quantized one on the same frontier.
 
-MLA models (DeepSeek and similar) are not partial: they store their compressed latent in a plain `KVCache`, so the probe measures them through the standard path. Whether a drift number on that compressed latent means the same thing as one on raw keys and values is a separate question, still open.
+MLA models (DeepSeek and similar) are not partial. What their cache stores, and what the probe can do with it, is covered in [the next section](#mla-models-and-what-their-cache-stores).
+
+## MLA models and what their cache stores
+
+Multi-head latent attention (MLA) models such as DeepSeek's do not cache per-head keys and values the way multi-head and grouped-query models do. They project the hidden state down to a compressed latent and rebuild keys and values from it. What ends up in the cache depends on how the model code is written, and mlx-lm 0.31.3 has two layouts.
+
+`deepseek_v2` rebuilds the keys and values first and caches the expanded per-head tensors in a plain `KVCache`: K at 192 dimensions per head (128 plus 64 of rotary) and V at 128. To the cache these look like any other model's keys and values, so mlx-lm's quantized cache and the other methods run on them unchanged. `deepseek_v3`, and the model types that reuse its code, cache a pair instead, `(kv_latent, k_pe)`: the compressed latent and the rotary key.
+
+**Expanded keys and values.** On `mlx-community/DeepSeek-V2-Lite-Chat-4bit-mlx` (stress mode, 100 chunks of 512 tokens) the cost is an ordinary KV-quantization cost, measured the usual way:
+
+| method | cost | KL mean | KL p99 | flip | bundled KL | verdict |
+|---|---|---|---|---|---|---|
+| `4:64` | 62.2 KB | 0.2760 | 2.4097 | 0.2237 | 0.2763 | bad |
+| `affine:8:4` | 89.9 KB | 0.0199 | 0.2136 | 0.0606 | — | bad |
+| `8:64` | 117.5 KB | 0.0055 | 0.0618 | 0.0304 | 0.0055 | marginal |
+
+All three are on the frontier. The committed report is `_artifacts/samples/compare/kv-deepseek-v2-lite-methods.md`, and it carries the notes about measured bytes per token differing from the analytic figure that the ranking uses. The rows tell you what quantizing the expanded keys and values costs on this model and corpus. They say nothing about a model that caches a latent.
+
+**The latent.** On `deepseek_v3` the stock quantized cache does not run. Its attention expects plain arrays back from the cache, and a quantized cache hands back tuples of packed arrays and scales instead. Attention fails on the first forward with an `AttributeError` at `mlx_lm/models/deepseek_v3.py:147` (measured on `mlx-community/Moonlight-16B-A3B-Instruct-4-bit`, mlx-lm 0.31.3). The probe therefore refuses a model whose attention cannot run on the chosen cache before it scores anything. The message names the model type and points at a dequantize-on-fetch method, which stores the latent quantized but hands attention full-precision arrays.
+
+**What does run.** The `affine` method is such a method. On Moonlight (27 layers, `deepseek_v3`) it ran end to end on the latent cache. Over 64 synthetic tokens (`mx.arange(1, 65) % vocab`, batch 1, no tokenizer):
+
+| method | KL mean | KL median | KL max |
+|---|---|---|---|
+| `affine:8:8` | 0.0020 | 0.0009 | 0.0127 |
+| `affine:4:4` | 0.0985 | 0.0922 | 0.3507 |
+
+Logits stayed finite, and the reference run used a plain `KVCache`. These numbers show that the cache runs and that the 4-bit setting drifts further than the 8-bit one. Sixty-four arbitrary token ids are not a corpus, so take no quality figure from them. `scripts/spike_mla_latent_cache.py` reproduces the check.
+
+**How to read a latent-cache number.** In MLA the latent is shared: the keys and the values are both rebuilt from it, so a quantization error in the latent reaches both. In a multi-head or grouped-query cache the errors in K and V enter attention separately, and the KV methods here treat them that way. A KL measured on a latent cache is therefore not comparable byte for byte with a KL measured on an MHA or GQA model's keys and values, even at the same bit width, and it is not comparable with the expanded-cache rows above either. The tool has not measured a latent cache on a corpus yet, so it makes no claim about what an MLA model's latent costs at 8 or 4 bits. What it covers today is expanded-cache MLA models (the table above) and a refusal, with a pointer to a dequantize-on-fetch method, for models whose cache cannot be quantized by mlx-lm's own cache.
 
 ## Measuring a third-party cache
 

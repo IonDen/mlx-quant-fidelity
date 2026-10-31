@@ -3,6 +3,28 @@
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.0] - 2026-10-31
+
+A coverage release. Two new committed comparisons extend the measured set: five Qwen3-4B-Instruct-2507 repos scored against their bf16 reference, and three KV methods on DeepSeek-V2-Lite-Chat. The methodology document gains a section on MLA models, and a model whose attention cannot run on the chosen KV cache is now refused before any scoring starts. Several checks also move earlier, so an incomplete download, a shadowed TurboQuant install or a tokenizer that would run its own code stops a run before it begins.
+
+### Added
+
+- A committed Qwen3-4B-Instruct-2507 weight ladder, `_artifacts/samples/compare/weight-qwen3-4b-2507-ladder.{md,json}`: five repos against `mlx-community/Qwen3-4B-Instruct-2507-bf16`, 100 chunks of 512 tokens. Mean KL runs from 0.1106 for `-4bit` to 0.0017 for `-8bit`. The `-4bit-DWQ-2510` repo (0.0638) beats `-4bit` at the same 4.50 bits per weight and size, and `-5.0bpw-dynamic` (0.0478) is dominated by `-DDWQ` (0.0401). The two mixed-precision repos are reported by measured geometry.
+- A committed DeepSeek-V2-Lite-Chat KV comparison, `_artifacts/samples/compare/kv-deepseek-v2-lite-methods.{md,json}`: `4:64` (mean KL 0.2760), `affine:8:4` (0.0199) and `8:64` (0.0055), all on the frontier.
+- A section in `docs/measurement-principles.md` on MLA models: the two cache layouts in mlx-lm 0.31.3, what the DeepSeek-V2-Lite numbers mean, why a latent cache is not comparable to a keys-and-values cache, and what has and has not been measured. `scripts/spike_mla_latent_cache.py` reproduces the latent-cache check described there.
+- A section in `docs/measurement-principles.md` on reading these numbers next to llama.cpp's.
+- Comparison reports can be read back from their JSON.
+- The committed Qwen2.5-0.5B KV sample is re-measured: bundled KL is unchanged (2.0531, 1.0966 and 0.0336 for `4:64`, `4:32` and `8:64`), and the ranking now uses quantizer-only drift (2.0549, 1.0898, 0.0330), with the `bundled KL` and `resident +/token` columns the other KV samples carry.
+
+### Changed
+
+- A model whose attention cannot run on the chosen KV cache is refused before scoring, with a message that names the model type and points at a dequantize-on-fetch method. Before, mlx-lm's quantized cache on a `deepseek_v3` model failed on the first forward pass with an `AttributeError`.
+- `--allow-custom-code` now also governs a tokenizer's own code. A repo whose tokenizer needs custom code is refused with exit code 2 unless you pass it.
+- A repo with a partial snapshot, where only some of its weight files are present, is caught by the memory pre-flight instead of being measured as if it were whole.
+- A `turboquant_mlx` module that shadows the pinned port is refused before it is imported.
+- The standing note on weight reports now says the recipe that produced a quantization is not recorded in a form the tool can check, and that the report describes the loaded geometry, not the method.
+- CI also checks the built source distribution.
+
 ## [0.10.0] - 2026-09-29
 
 A hardening release. The memory guards now account for everything a run holds, the tool refuses repos that would execute their own code, a NaN can no longer be ranked as a result, and the common mistakes (a mistyped repo, a missing extra, a bad group size) fail before a model loads, with a clear message. Measured numbers are unchanged: every committed sample renders the same report as before.
