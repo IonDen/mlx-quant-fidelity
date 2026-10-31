@@ -14,6 +14,8 @@ from mlx_quant_fidelity.metrics import kl_divergence
 from mlx_quant_fidelity.probes.kv import _score_chunk, measure_kv_fidelity
 
 MODEL = "mlx-community/Llama-3.2-1B-Instruct-4bit"  # match the spike's model
+# Cached pin (the committed sample's `model_revision`); `main` has no cached refs/main offline.
+MODEL_REVISION = "08231374eeacb049a0eade7922910865b8fce912"
 
 
 def _tiny_corpus(tok, *, chunk_length: int = 64, n_chunks: int = 2, repeats: int = 40) -> Corpus:
@@ -44,7 +46,7 @@ def test_full_vs_full_is_exactly_zero():
     from mlx_lm import load
     from mlx_lm.models.cache import make_prompt_cache
 
-    model, tok = load(MODEL)
+    model, tok = load(MODEL, revision=MODEL_REVISION)
     ids = mx.array(tok.encode("Teacher forcing keeps both runs on identical tokens." * 5)[:128])
     a = model(ids[None], cache=make_prompt_cache(model))[0].astype(mx.float32)
     b = model(ids[None], cache=make_prompt_cache(model))[0].astype(mx.float32)
@@ -58,10 +60,16 @@ def test_stress_quantization_engages():
     """QuantizedKVCache from token 0 produces non-zero KLD and valid flip_rate."""
     from mlx_lm import load
 
-    _model, tok = load(MODEL)
+    _model, tok = load(MODEL, revision=MODEL_REVISION)
     del _model
     mx.clear_cache()
-    report = measure_kv_fidelity(MODEL, kv_bits=4, quantize_start=0, corpus=_tiny_corpus(tok))
+    report = measure_kv_fidelity(
+        MODEL,
+        kv_bits=4,
+        quantize_start=0,
+        corpus=_tiny_corpus(tok),
+        model_revision=MODEL_REVISION,
+    )
     assert report.kl.mean > 0.01  # spike measured ~0.083 for 4-bit; 0.01 is a safe non-flaky floor
     assert report.peak_memory_bytes > 0
 
@@ -91,7 +99,7 @@ def test_deployment_post_boundary_matches_stress(method_name):
     )
     if method_name == "turboquant":
         port_or_skip(method)
-    model, tok = load(MODEL)
+    model, tok = load(MODEL, revision=MODEL_REVISION)
     corpus = _tiny_corpus(tok, chunk_length=64, n_chunks=2)
     stress = score_kv_config(model, corpus, model_id=MODEL, method=method, quantize_start=0)
     mx.clear_cache()
@@ -146,7 +154,7 @@ def test_corrupted_cache_kld_rises_and_control_is_zero():
     from mlx_lm import load
     from mlx_lm.models.cache import KVCache, make_prompt_cache
 
-    model, tok = load(MODEL)
+    model, tok = load(MODEL, revision=MODEL_REVISION)
     ids = mx.array(tok.encode("Proves the quantized cache is consumed." * 8)[:128])
     n_layers = len(make_prompt_cache(model))
 

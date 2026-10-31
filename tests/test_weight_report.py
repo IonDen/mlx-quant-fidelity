@@ -231,10 +231,14 @@ def test_weight_from_dict_legacy_dict_yields_none_fields():
 
 
 @pytest.mark.parametrize(
-    "bad", [[[4, 64]], [["4", 64, 1]], [[True, 64, 1]], "4-64-1", [[4, 64, 1, 9]]]
+    "bad", [[[4, 64]], [["4", 64, 1]], [[True, 64, 1]], "4-64-1", [[4, 64, 1, 9]], [4]]
 )
 def test_weight_from_dict_rejects_malformed_geometry(bad):
-    """Reds if geometry is passed through unvalidated (a frozen dataclass checks nothing)."""
+    """Reds if geometry is passed through unvalidated (a frozen dataclass checks nothing).
+
+    `[4]` isolates the per-element list check: without it `len(4)` raises a TypeError that
+    surfaces as the generic "malformed" error, which does not name `quant_geometry`.
+    """
     from mlx_quant_fidelity.errors import ReportSchemaError
 
     d = json.loads(render_json(_measured()))

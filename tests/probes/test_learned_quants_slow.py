@@ -90,7 +90,10 @@ def test_dwq_repo_measures_as_uniform_4bit_indistinguishable_from_plain():
     assert report.quant_n_full_precision == 0
     assert 4.49 < report.quant_bits_per_weight < 4.51
     assert METHOD_NOT_RECORDED_WARNING in report.warnings
-    assert 0.0 < report.kl.mean < 5.0
+    # Exact-zero guard only: reds if the quantized model never reached the forward (KL 0). No
+    # upper bound: the committed 0.3539 is a 100x512 WikiText number, and this two-chunk
+    # repeated-sentence corpus has no measured value to anchor a factor to.
+    assert report.kl.mean > 0.0
 
 
 @pytest.mark.slow
@@ -117,3 +120,52 @@ def test_awq_repo_measures_mixed_group_sizes_and_matches_mlx_lm_bits_per_weight(
         / report.quant_model_bytes
         < 0.01
     )
+
+
+REF_4B = ("mlx-community/Qwen3-4B-Instruct-2507-bf16", "f9e77d4283734966e9cd641bf35547f0cff5d427")
+DYNAMIC_4B = (
+    "mlx-community/Qwen3-4B-Instruct-2507-5.0bpw-dynamic",
+    "6bd1669a2ed4f8f47a7a1fa6038c14fb2bbea608",
+)
+
+
+@pytest.fixture
+def hub_offline(monkeypatch):
+    """Hub offline mode for this test only, so an uncached snapshot fails instead of downloading.
+
+    huggingface_hub 1.19 reads the env var once at import into `constants.HF_HUB_OFFLINE`, and
+    `is_offline_mode()` returns that attribute at call time; both are set.
+    """
+    import huggingface_hub.constants as hub_constants
+
+    monkeypatch.setenv("HF_HUB_OFFLINE", "1")
+    monkeypatch.setattr(hub_constants, "HF_HUB_OFFLINE", True)
+
+
+@pytest.mark.slow
+def test_dynamic_repo_measures_mixed_4_5_bit(hub_offline):
+    """Reds if a dynamic repo reads as uniform (precision taken from the config's single `bits`
+    instead of the loaded modules), if a per-bit module count is lost or merged, or if the
+    bits/weight numerator drifts from the measured 5.0046, or a third geometry appears.
+
+    The live report's `quant_geometry` is a tuple of `(bits, group_size, n_modules)` tuples,
+    sorted ascending (`probes.weights.Geometry`); the JSON sample stores the same as lists.
+
+    Expected values are the committed 2026-10-24 measurement at these pins
+    (`_artifacts/samples/compare/weight-qwen3-4b-2507-ladder.json`). Geometry and bits/weight
+    depend on the weights only, so two WikiText chunks pin them as well as 100 do; no KL is
+    pinned. Offline: every snapshot, and the WikiText parquet, must already be cached.
+    """
+    mx.reset_peak_memory()
+    report = measure_weight_fidelity(
+        DYNAMIC_4B[0],
+        REF_4B[0],
+        max_chunks=2,
+        quant_revision=DYNAMIC_4B[1],
+        reference_revision=REF_4B[1],
+    )
+    assert report.quant_geometry == ((4, 64, 109), (5, 64, 144))
+    assert report.quant_precision == "mixed"
+    assert abs(report.quant_bits_per_weight - 5.0046) <= 0.01
+    # committed peak 12.58 GB at 100 chunks; reds if the pair stops fitting the device
+    assert report.peak_memory_bytes < int(mx.device_info()["max_recommended_working_set_size"])
