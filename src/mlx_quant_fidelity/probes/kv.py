@@ -24,6 +24,7 @@ from mlx_quant_fidelity.errors import (
     CompareConfigError,
     CorpusError,
     LogitsBudgetError,
+    QuantFidelityError,
     QuantizeStartError,
 )
 from mlx_quant_fidelity.metrics import bucket_by_depth, kl_divergence, summarize, top_token_flips
@@ -37,7 +38,7 @@ from mlx_quant_fidelity.probes._paired import (
     _require_finite,
     report_chunk_progress,
 )
-from mlx_quant_fidelity.probes._preload import preload_check
+from mlx_quant_fidelity.probes._preload import load_checked, preload_check
 from mlx_quant_fidelity.probes.kv_methods import (
     ControlLaneMethod,
     PartialCoverageMethod,
@@ -424,6 +425,92 @@ def _gate_extra_bytes(
     return method_ws_bytes, control_bytes, cache_bytes
 
 
+# The exception types a forward raises when its attention cannot consume what the cache
+# returns. Measured: AttributeError ("'tuple' object has no attribute 'swapaxes'",
+# mlx_lm/models/deepseek_v3.py on QuantizedKVCache, 2026-10-24). TypeError (an op's binding
+# refusing a packed tuple) and NotImplementedError (an unimplemented cache path) are the same
+# family. RuntimeError stays in for the partial smoke's established contract, but a memory,
+# GPU-execution or Metal setup failure (a kernel or library that cannot be built or loaded) is
+# never a mismatch; the markers are matched case-insensitively. ValueError is left out: the one
+# known ValueError mismatch (mlx-lm's packed-width bug) is translated by the method's guard, and
+# any other ValueError propagates as itself.
+_CACHE_MISMATCH_ERRORS = (AttributeError, TypeError, RuntimeError)
+_NOT_A_MISMATCH_MARKERS = (
+    "memory",
+    "alloc",
+    "command buffer",
+    "metal::",
+    "unable to build",
+    "unable to load",
+)
+
+
+def _is_cache_mismatch(exc: Exception) -> bool:
+    """True when ``exc`` from the smoke forward means "this cache cannot run this attention"."""
+    if isinstance(exc, QuantFidelityError) or not isinstance(exc, _CACHE_MISMATCH_ERRORS):
+        return False
+    if isinstance(exc, RuntimeError):  # NotImplementedError included
+        text = str(exc).lower()
+        return not any(marker in text for marker in _NOT_A_MISMATCH_MARKERS)
+    return True
+
+
+def _run_smoke(model: object, cache: list[object]) -> None:
+    """The scoring shape in miniature: a two-token prefill, then a one-token decode on ``cache``.
+
+    L > 1 takes an attention's prefill path with a causal mask (mlx-lm builds no mask for one
+    token) and L == 1 its decode path, here at a non-zero offset; deepseek_v3 branches on
+    exactly that. One ``mx.eval`` per forward, so a failure surfaces at the step that caused it.
+    """
+    mx.eval(model(mx.array([[0, 0]]), cache=cache))  # type: ignore[operator]
+    mx.eval(model(mx.array([[0]]), cache=cache))  # type: ignore[operator]
+
+
+def _runs_on_full_precision(model: object) -> bool:
+    """Whether the smoke runs on the model's own full-precision caches (a fresh set)."""
+    try:
+        _run_smoke(model, make_prompt_cache(model))
+    except Exception:
+        return False
+    finally:
+        mx.clear_cache()
+    return True
+
+
+def _smoke_forward(model: object, cache: list[object], message: str) -> None:
+    """Run the smoke on ``cache``; a cache mismatch becomes CacheNotQuantizableError.
+
+    A mismatch-shaped failure is confirmed first: the same smoke must run on the model's own
+    full-precision cache, or the model (not the cache) is what fails and the original error
+    propagates unchanged. Anything else (memory, Metal setup, a bad shard, a package error)
+    propagates unchanged too.
+    """
+    try:
+        _run_smoke(model, cache)
+    except Exception as exc:
+        if not _is_cache_mismatch(exc) or not _runs_on_full_precision(model):
+            raise
+        raise CacheNotQuantizableError(f"{message}: {type(exc).__name__}: {exc}") from exc
+
+
+def _uniform_mismatch_message(method: KVCacheMethod, model_type: str) -> str:
+    """The refusal text for a uniform cache the attention cannot run on.
+
+    Only the stock cache (the one with a quantizer-only control lane) gets the hint to try a
+    dequantize-on-fetch method; any other method is that kind of method already.
+    """
+    if isinstance(method, ControlLaneMethod):
+        return (
+            f"this model's attention (model_type {model_type!r}) does not run on the "
+            f"{method.name!r} method's quantized KV cache; a dequantize-on-fetch method hands "
+            "the attention plain arrays and may run it: try `affine:<k>:<v>` or `turboquant`"
+        )
+    return (
+        f"the attention did not run on this method's cache (method {method.name!r}, "
+        f"model_type {model_type!r})"
+    )
+
+
 def _resolve_partial_coverage(
     model: object,
     method: KVCacheMethod,
@@ -431,16 +518,22 @@ def _resolve_partial_coverage(
     quantize_start: int,
     control_m: KVCacheMethod | None,
     probe_warnings: list[str],
+    model_type: str = "unknown",
 ) -> tuple[int, LayerCoverage | None]:
-    """Probe the cache once: layer count, capability gate, and per-layer partial coverage.
+    """Probe the cache once: layer count, capability gate, partial coverage, smoke forward.
 
     A hybrid model passes ``probe_capability`` as long as ONE layer is quantizable, so this
     records which layers to quantize (stock only; quantizer-only methods do not implement the
-    capability). A partial model is refused in deployment mode and with a control lane, and is
-    smoke-tested with a one-token forward on the mixed cache; the coverage note is appended
-    to ``probe_warnings``. ``make_prompt_cache`` is called through the module global so tests
-    that monkeypatch ``kv.make_prompt_cache`` keep binding.
+    capability). A partial model is refused in deployment mode and with a control lane; the
+    coverage note is appended to ``probe_warnings``. Every run then gets ONE smoke (a two-token
+    prefill, then a one-token decode) on the cache it will score (the mixed cache for a partial
+    model, the method's uniform cache otherwise), so an attention that cannot consume that cache
+    is refused with CacheNotQuantizableError before any chunk is scored. The smoke cache is
+    dropped and MLX's buffer cache cleared on every path; on a refusal the error's traceback
+    holds it until the caller handles the error.
     """
+    # make_prompt_cache is looked up as this module's global at call time (here and in the
+    # smoke's full-precision re-run), so a monkeypatched kv.make_prompt_cache keeps binding.
     probe_cache = make_prompt_cache(model)
     n_layers = len(probe_cache)
     method.probe_capability(probe_cache)
@@ -467,16 +560,29 @@ def _resolve_partial_coverage(
         probe_warnings.append(partial_coverage.note())
         # Fail fast on an architecture whose forward cannot consume a mixed quantized /
         # full-precision cache: probe_capability only proves each layer quantizes in isolation,
-        # not that the model runs over the heterogeneous list. A one-token forward here turns a
-        # mid-loop crash into a clean, package-rooted error before any chunk is scored.
-        smoke_cache = method.make_partial_cache(make_prompt_cache(model), partial_coverage)
-        try:
-            mx.eval(model(mx.array([[0]]), cache=smoke_cache))  # type: ignore[operator]
-        except Exception as exc:
-            raise CacheNotQuantizableError(
-                "this model's forward does not run on a mixed quantized/full-precision KV cache "
-                f"(partial coverage): {exc}"
-            ) from exc
+        # not that the model runs over the heterogeneous list. The smoke below (a two-token
+        # prefill, then a one-token decode on the same cache) turns a mid-loop crash into a
+        # clean, package-rooted error before any chunk is scored.
+        smoke_message = (
+            "this model's forward does not run on a mixed quantized/full-precision KV cache "
+            f"(partial coverage, model_type {model_type!r})"
+        )
+    else:
+        # The uniform cache can fail the same way: deepseek_v3 caches its latent and calls
+        # .swapaxes on what QuantizedKVCache returns (a packed tuple), so mlx-lm's stock cache
+        # dies on the first forward while a dequantize-on-fetch cache runs.
+        smoke_message = _uniform_mismatch_message(method, model_type)
+    # Under the method's guard, like every scored forward, so a crash the method already
+    # translates (the stock packed-width belt) surfaces with its own message.
+    smoke_cache: list[object] | None = None
+    try:
+        with method.guard():
+            if partial_coverage is not None and isinstance(method, PartialCoverageMethod):
+                smoke_cache = method.make_partial_cache(make_prompt_cache(model), partial_coverage)
+            else:
+                smoke_cache = method.make_cache(n_layers=n_layers)
+            _smoke_forward(model, smoke_cache, smoke_message)
+    finally:
         del smoke_cache
         mx.clear_cache()
     return n_layers, partial_coverage
@@ -679,6 +785,7 @@ def score_kv_config(
         quantize_start=quantize_start,
         control_m=control_m,
         probe_warnings=probe_warnings,
+        model_type=model_type,
     )
 
     mode = "stress" if quantize_start == 0 else "deployment"
@@ -879,8 +986,8 @@ def measure_kv_fidelity(
         quantize_start: 0 = stress mode (default); ``1 ≤ N ≤ chunk_length-2`` = deployment
             mode (first N positions computed with a full-precision cache, then the stored prefix
             converts too; metrics cover the post-boundary region).
-        corpus: Pre-built corpus to score. If None, WikiText-2 test split is fetched (requires
-            network access and the ``--run-network`` marker in tests). ``chunk_length`` must be
+        corpus: Pre-built corpus to score. If None, the WikiText-2 test split is fetched, which
+            requires network access (it fetches the corpus from the Hub). ``chunk_length`` must be
             left at its default when a corpus is supplied — the corpus already fixes its window.
             ``corpus.provenance.chunk_length`` is still checked against ``MAX_CHUNK_LENGTH``
             (the safety ceiling applies to every window, not only the auto-loaded one).
@@ -899,7 +1006,8 @@ def measure_kv_fidelity(
             :func:`~mlx_quant_fidelity.probes.kv.score_kv_config`'s ``control`` docs.
 
         allow_custom_code: Let a repo whose config.json names a ``model_file`` run its own
-            Python code on load (off by default; mlx-lm executes that file).
+            Python code on load (off by default; mlx-lm executes that file), and let a tokenizer
+            that ships its own code load it.
         progress: Optional callback receiving `chunk i/n` lines about every tenth chunk.
             Silent when None (the default).
 
@@ -966,8 +1074,12 @@ def measure_kv_fidelity(
     # lazy=True: mlx-lm's eager load evaluates every parameter before returning, which would
     # make the "weights alone exceed" refusal in score_kv_config fire after they are resident.
     # model_resident_bytes reads nbytes metadata; the first forward materialises the weights.
-    _loaded = load(  # pragma: no cover
-        model_id, revision=checked.load_revision(model_revision), lazy=True
+    _loaded = load_checked(  # pragma: no cover
+        load,
+        model_id,
+        allow_custom_code=allow_custom_code,
+        revision=checked.load_revision(model_revision),
+        lazy=True,
     )
     model, tokenizer = _loaded[0], _loaded[1]  # pragma: no cover
 

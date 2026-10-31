@@ -6,11 +6,13 @@ Stock mlx-lm ``QuantizedKVCache`` is the reference implementation; third-party c
 """
 
 import importlib.metadata
+import importlib.util
 import json
 import types
 from collections.abc import Callable, Iterator
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Protocol, runtime_checkable
 
 import mlx.core as mx
@@ -651,6 +653,32 @@ def _turboquant_direct_url() -> str | None:
         return None
 
 
+def _turboquant_distribution_files() -> frozenset[Path]:
+    """The resolved paths of every file the ``turboquant-mlx`` distribution lists (its RECORD).
+
+    Empty when the distribution is absent or lists no files, so nothing can match it.
+    """
+    try:
+        dist = importlib.metadata.distribution("turboquant-mlx")
+    except importlib.metadata.PackageNotFoundError:
+        return frozenset()
+    return frozenset(Path(str(dist.locate_file(f))).resolve() for f in dist.files or ())
+
+
+def _turboquant_module_origin() -> Path | None:
+    """Where ``import turboquant_mlx`` would load from, found without importing it.
+
+    ``find_spec`` on a top-level name consults the finders only; it runs no package code.
+    """
+    try:
+        spec = importlib.util.find_spec("turboquant_mlx")
+    except (ImportError, ValueError):
+        return None
+    if spec is None or spec.origin is None:
+        return None
+    return Path(spec.origin).resolve()
+
+
 def _turboquant_installed() -> bool:
     """Whether any ``turboquant-mlx`` distribution is installed (right or wrong one)."""
     try:
@@ -665,11 +693,14 @@ def _canonical_source_url(url: object) -> str:
 
 
 def _import_turboquant() -> types.ModuleType:
-    """Import ``turboquant_mlx``, first checking the distribution is a git install of the port.
+    """Import ``turboquant_mlx`` after two checks that run no package code.
 
-    The PyPI name is an unrelated squatter whose import would run its code, so the install
-    record (``direct_url.json``) is read BEFORE importing: it must be a VCS install from
-    arozanov/turboquant-mlx. Any commit of that repository is accepted here; a commit other
+    The PyPI name is an unrelated squatter whose import would run its code, so BEFORE importing:
+    the install record (``direct_url.json``) must be a VCS install from arozanov/turboquant-mlx,
+    and the module ``import turboquant_mlx`` would load must be one of that distribution's own
+    files (not another package or a local ``turboquant_mlx/`` directory earlier on
+    ``sys.path``). This guards against the squatter and accidental shadowing; it does not
+    verify the source code. Any commit of that repository is accepted here; a commit other
     than the pinned one is measured with a report note (see ``_pin_mismatch_note``).
     """
     raw = _turboquant_direct_url()
@@ -693,6 +724,18 @@ def _import_turboquant() -> types.ModuleType:
             "accepted (a commit other than the pinned one is measured with a report note); "
             "editable, ssh and fork installs are refused on purpose. Install the pinned "
             f"port: {TURBOQUANT_INSTALL_HINT}"
+        )
+    origin = _turboquant_module_origin()
+    if origin is None:
+        raise MethodUnavailableError(
+            f"turboquant_mlx is not installed. Install the pinned port: {TURBOQUANT_INSTALL_HINT}"
+        )
+    if origin not in _turboquant_distribution_files():
+        raise MethodUnavailableError(
+            f"turboquant_mlx resolves to {origin}, which is not a file of the installed "
+            "turboquant-mlx distribution (another package or a local turboquant_mlx/ directory "
+            "shadows it), so it was not imported. Remove the shadowing module or run from "
+            f"another directory; the pinned port installs with: {TURBOQUANT_INSTALL_HINT}"
         )
     try:
         import turboquant_mlx

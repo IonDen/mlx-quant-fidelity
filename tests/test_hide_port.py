@@ -177,3 +177,28 @@ def test_lane_hides_the_distribution_metadata_too(request, monkeypatch):
 
     install_fake_port(monkeypatch)
     assert TurboQuantKVMethod(bits=4).provenance()["dist_version"] == "unknown"
+
+
+def test_apply_hide_port_also_masks_distribution_from_name(monkeypatch):
+    """Bug: --hide-port leaks the port through Distribution.from_name, so
+    `importlib.metadata.metadata("turboquant-mlx")` (which calls it directly, not through
+    `distribution`) still reads the locally installed port. Both monkeypatches go first so
+    teardown restores the stdlib even though the helper reassigns the attributes itself."""
+
+    class _FakeDist:
+        def __init__(self, name):
+            self.metadata = {"Name": name}
+
+    monkeypatch.setattr(importlib.metadata, "distribution", lambda name: _FakeDist(name))
+    monkeypatch.setattr(
+        importlib.metadata.Distribution, "from_name", classmethod(lambda cls, name: _FakeDist(name))
+    )
+    apply_hide_port(hide_port=True, run_slow=False, modules={}, set_exit_code=lambda c: None)
+
+    for hidden in ("turboquant-mlx", "turboquant_mlx", "TurboQuant-MLX"):
+        with pytest.raises(importlib.metadata.PackageNotFoundError):
+            importlib.metadata.Distribution.from_name(hidden)
+        with pytest.raises(importlib.metadata.PackageNotFoundError):
+            importlib.metadata.metadata(hidden)
+    assert importlib.metadata.metadata("mlx-lm") == {"Name": "mlx-lm"}
+    assert importlib.metadata.PathDistribution.from_name("mlx-lm").metadata == {"Name": "mlx-lm"}

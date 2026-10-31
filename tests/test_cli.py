@@ -798,3 +798,32 @@ def test_kv_flag_path_errors_name_the_offending_flag_first(capsys, argv, prefix)
     with no hint which command-line flag to change."""
     assert cli.main(argv) == 2
     assert capsys.readouterr().err.startswith(prefix)
+
+
+def test_cli_kv_tokenizer_remote_code_without_opt_in_exits_2(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Bug: a repo whose tokenizer needs remote code escapes `kv` as transformers' bare
+    ValueError (an internal error, exit 1) rather than the opt-in refusal (exit 2). The fake
+    load raises the installed transformers' own refusal unless the tokenizer is trusted."""
+    import mlx_lm
+    from transformers import dynamic_module_utils as dmu
+
+    from mlx_quant_fidelity.probes import kv as kv_probe
+    from mlx_quant_fidelity.probes._preload import PreloadResult
+
+    def tokenizer_refusing_load(repo: str, **kw: object) -> object:
+        config = kw.get("tokenizer_config") or {}
+        trusted = isinstance(config, dict) and config.get("trust_remote_code") is True
+        return dmu.resolve_trust_remote_code(
+            trusted, repo, has_local_code=False, has_remote_code=True
+        )
+
+    monkeypatch.setattr(kv_probe, "preload_check", lambda *a, **k: PreloadResult({}, None))
+    monkeypatch.setattr(kv_probe, "install_memory_caps", lambda: (0, 0))
+    monkeypatch.setattr(mlx_lm, "load", tokenizer_refusing_load)
+    rc = cli.main(["kv", "org/remote-tok"])
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "tokenizer" in err
+    assert "--allow-custom-code" in err

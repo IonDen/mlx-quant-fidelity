@@ -23,7 +23,7 @@ from mlx_quant_fidelity.errors import (
 )
 from mlx_quant_fidelity.policy import VALID_VERDICTS, qualifies, verdict_for
 from mlx_quant_fidelity.probes._paired import ProgressFn
-from mlx_quant_fidelity.probes._preload import preload_check
+from mlx_quant_fidelity.probes._preload import load_checked, preload_check
 from mlx_quant_fidelity.probes.kv import (
     MAX_CHUNK_LENGTH,
     _kv_head_dim,
@@ -682,16 +682,21 @@ def _kv_partial_filename(method: KVCacheMethod) -> str:
     return f"{method.label.replace(':', '_')}.json"
 
 
-def _load_model(model_id: str, revision: str | None) -> tuple[object, object]:  # pragma: no cover
+def _load_model(  # pragma: no cover
+    model_id: str, revision: str | None, *, allow_custom_code: bool = False
+) -> tuple[object, object]:
     """Load model weights from a HuggingFace repo. Returns (model, tokenizer).
 
     Both objects come from the same revision-pinned load call so the corpus tokenizer
-    is guaranteed to match the loaded model weights.
+    is guaranteed to match the loaded model weights. A tokenizer that ships its own code is
+    refused (UntrustedModelCodeError) unless ``allow_custom_code``.
     """
     from mlx_lm import load
 
     # lazy=True so the resident-size gate sees the weights before they are materialised.
-    loaded = load(model_id, revision=revision, lazy=True)
+    loaded = load_checked(
+        load, model_id, allow_custom_code=allow_custom_code, revision=revision, lazy=True
+    )
     return loaded[0], loaded[1]
 
 
@@ -930,7 +935,9 @@ def compare_kv_fidelity(
         checked = preload_check(model_id, model_revision, allow_custom_code=allow_custom_code)
         caps_note = caps_warning(install_memory_caps())
         # Load exactly the commit that was checked, not a re-resolved branch head.
-        model, tokenizer = _load_model(model_id, checked.load_revision(model_revision))
+        model, tokenizer = _load_model(
+            model_id, checked.load_revision(model_revision), allow_custom_code=allow_custom_code
+        )
         n_layers, n_kv_heads, head_dim = _kv_dims(model)
         corpus = _load_corpus_for_kv(tokenizer, model_id, max_chunks, chunk_length=chunk_length)
         for method_index, method in enumerate(pending, start=1):

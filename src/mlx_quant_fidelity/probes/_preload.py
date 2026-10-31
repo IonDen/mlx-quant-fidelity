@@ -7,8 +7,10 @@ gate. Keep this module free of MLX imports: it must run before anything touches 
 """
 
 import json
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from mlx_quant_fidelity.errors import ModelNotAccessibleError, UntrustedModelCodeError
 
@@ -113,3 +115,28 @@ def preload_check(model: str, revision: str | None, *, allow_custom_code: bool) 
     config, resolved = _fetch_config(model, revision)
     refuse_custom_code(config, model=model, allow_custom_code=allow_custom_code)
     return PreloadResult(config=config, revision=resolved)
+
+
+# Both refusals transformers raises (as ValueError) for remote code without trust_remote_code:
+# the explicit `trust_remote_code=False` path and the prompt-timeout / no-TTY path.
+_REMOTE_CODE_REFUSAL = "trust_remote_code=True"
+
+
+def load_checked(
+    load: Callable[..., Any], model: str, *, allow_custom_code: bool, **kwargs: Any
+) -> Any:
+    """Call mlx-lm's ``load`` with the tokenizer's remote code governed by ``allow_custom_code``.
+
+    Passes ``tokenizer_config={"trust_remote_code": allow_custom_code}`` so transformers never
+    prompts, and turns its refusal into UntrustedModelCodeError when no opt-in was given.
+    """
+    try:
+        return load(model, tokenizer_config={"trust_remote_code": allow_custom_code}, **kwargs)
+    except ValueError as exc:
+        if allow_custom_code or _REMOTE_CODE_REFUSAL not in str(exc):
+            raise
+        raise UntrustedModelCodeError(
+            f"{model} ships its own tokenizer code, which transformers would run on load. "
+            "Re-run with --allow-custom-code (Python: allow_custom_code=True) only if you "
+            "trust this repo."
+        ) from exc
