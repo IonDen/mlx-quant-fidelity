@@ -89,6 +89,13 @@ def test_weight_badge_uses_mixed_label_for_mixed_reports():
     assert badge_for_report(_weight_report())["message"].split(" · ")[1] == "4-bit"
 
 
+def test_weight_badge_says_unknown_bits_when_nothing_is_recorded():
+    """Reds if a report with no nominal bits and no measured geometry interpolates the missing
+    value (`None-bit`) instead of the literal `?-bit`."""
+    unknown = dataclasses.replace(_weight_report(), quant_bits=None)
+    assert badge_for_report(unknown)["message"].split(" · ")[1] == "?-bit"
+
+
 def test_badge_marks_partial_coverage():
     """Reds if a 4-of-26-layer hybrid measurement renders like a whole-model number."""
     partial = dataclasses.replace(

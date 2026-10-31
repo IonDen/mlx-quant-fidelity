@@ -4,6 +4,7 @@
   "corpus": {
     "bos_policy": "none",
     "chunk_length": 512,
+    "dataset_revision": "b08601e04326c79dfdd32d625aee71d232d685c3",
     "final_chunk_policy": "drop",
     "n_tokens": 51200,
     "name": "wikitext-2-raw",
@@ -34,13 +35,24 @@
       "point": {
         "cost_bytes": 3840,
         "label": "4:32",
-        "quality": 1.0966457424523506
+        "quality": 1.0898405764304961
       },
+      "ranked_footing": "quantizer_only",
+      "ranked_kl": 1.0898405764304961,
+      "ranked_verdict": "bad",
       "report": {
         "cache_supported": true,
+        "control_flip_rate": 0.4694911937377691,
+        "control_kl": {
+          "max": 14.436991691589355,
+          "mean": 1.0898405764304961,
+          "median": 0.7089881598949432,
+          "p99": 5.849795088768008
+        },
         "corpus": {
           "bos_policy": "none",
           "chunk_length": 512,
+          "dataset_revision": "b08601e04326c79dfdd32d625aee71d232d685c3",
           "final_chunk_policy": "drop",
           "n_tokens": 51200,
           "name": "wikitext-2-raw",
@@ -50,6 +62,7 @@
           "tokenizer_id": "mlx-community/Qwen2.5-0.5B-Instruct-4bit"
         },
         "device": "Apple M1 Max, 32 GB",
+        "drift_footing": "bundled",
         "flip_rate": 0.4701761252446184,
         "kl": {
           "max": 14.67402172088623,
@@ -117,20 +130,35 @@
         ],
         "kv_bits": 4,
         "kv_group_size": 32,
+        "kv_layers_quantized": null,
+        "kv_layers_skipped": null,
+        "kv_layers_total": null,
+        "kv_method": "stock",
+        "kv_method_params": {
+          "bits": 4,
+          "group_size": 32
+        },
+        "kv_method_provenance": {
+          "package": "mlx-lm",
+          "version": "0.31.3"
+        },
+        "kv_partial": false,
+        "measured_kv_bytes_per_token": 3840,
         "mlx_lm_version": "0.31.3",
         "mlx_version": "0.31.2",
         "model_id": "mlx-community/Qwen2.5-0.5B-Instruct-4bit",
         "model_revision": "a5339a4131f135d0fdc6a5c8b5bbed2753bbe0f3",
         "n_chunks": 100,
         "n_positions": 51100,
-        "peak_memory_bytes": 2464096976,
+        "peak_memory_bytes": 2309217550,
         "perplexity_delta": 43.25422677420008,
         "perplexity_quant": 66.39656560552942,
         "perplexity_ref": 23.142338831329344,
         "quantize_mode": "stress",
         "quantize_start": 0,
         "verdict": "bad",
-        "warnings": []
+        "warnings": [],
+        "working_set_bytes_per_token": 0
       },
       "status": "ok"
     },
@@ -142,13 +170,24 @@
       "point": {
         "cost_bytes": 3456,
         "label": "4:64",
-        "quality": 2.0531492808233915
+        "quality": 2.054871208076019
       },
+      "ranked_footing": "quantizer_only",
+      "ranked_kl": 2.054871208076019,
+      "ranked_verdict": "bad",
       "report": {
         "cache_supported": true,
+        "control_flip_rate": 0.625440313111546,
+        "control_kl": {
+          "max": 17.338459014892578,
+          "mean": 2.054871208076019,
+          "median": 1.6663092374801636,
+          "p99": 7.6896254110336395
+        },
         "corpus": {
           "bos_policy": "none",
           "chunk_length": 512,
+          "dataset_revision": "b08601e04326c79dfdd32d625aee71d232d685c3",
           "final_chunk_policy": "drop",
           "n_tokens": 51200,
           "name": "wikitext-2-raw",
@@ -158,6 +197,7 @@
           "tokenizer_id": "mlx-community/Qwen2.5-0.5B-Instruct-4bit"
         },
         "device": "Apple M1 Max, 32 GB",
+        "drift_footing": "bundled",
         "flip_rate": 0.6250489236790606,
         "kl": {
           "max": 17.261520385742188,
@@ -225,20 +265,35 @@
         ],
         "kv_bits": 4,
         "kv_group_size": 64,
+        "kv_layers_quantized": null,
+        "kv_layers_skipped": null,
+        "kv_layers_total": null,
+        "kv_method": "stock",
+        "kv_method_params": {
+          "bits": 4,
+          "group_size": 64
+        },
+        "kv_method_provenance": {
+          "package": "mlx-lm",
+          "version": "0.31.3"
+        },
+        "kv_partial": false,
+        "measured_kv_bytes_per_token": 3456,
         "mlx_lm_version": "0.31.3",
         "mlx_version": "0.31.2",
         "model_id": "mlx-community/Qwen2.5-0.5B-Instruct-4bit",
         "model_revision": "a5339a4131f135d0fdc6a5c8b5bbed2753bbe0f3",
         "n_chunks": 100,
         "n_positions": 51100,
-        "peak_memory_bytes": 2463973429,
+        "peak_memory_bytes": 2463747348,
         "perplexity_delta": 148.23682941032652,
         "perplexity_quant": 171.37916824165586,
         "perplexity_ref": 23.142338831329344,
         "quantize_mode": "stress",
         "quantize_start": 0,
         "verdict": "bad",
-        "warnings": []
+        "warnings": [],
+        "working_set_bytes_per_token": 0
       },
       "status": "ok"
     },
@@ -250,13 +305,24 @@
       "point": {
         "cost_bytes": 6528,
         "label": "8:64",
-        "quality": 0.033580854313654304
+        "quality": 0.033045790356670934
       },
+      "ranked_footing": "quantizer_only",
+      "ranked_kl": 0.033045790356670934,
+      "ranked_verdict": "bad",
       "report": {
         "cache_supported": true,
+        "control_flip_rate": 0.08620352250489237,
+        "control_kl": {
+          "max": 18.25400161743164,
+          "mean": 0.033045790356670934,
+          "median": 0.011895285919308662,
+          "p99": 0.32773767471313503
+        },
         "corpus": {
           "bos_policy": "none",
           "chunk_length": 512,
+          "dataset_revision": "b08601e04326c79dfdd32d625aee71d232d685c3",
           "final_chunk_policy": "drop",
           "n_tokens": 51200,
           "name": "wikitext-2-raw",
@@ -266,6 +332,7 @@
           "tokenizer_id": "mlx-community/Qwen2.5-0.5B-Instruct-4bit"
         },
         "device": "Apple M1 Max, 32 GB",
+        "drift_footing": "bundled",
         "flip_rate": 0.0862426614481409,
         "kl": {
           "max": 18.29922103881836,
@@ -333,20 +400,35 @@
         ],
         "kv_bits": 8,
         "kv_group_size": 64,
+        "kv_layers_quantized": null,
+        "kv_layers_skipped": null,
+        "kv_layers_total": null,
+        "kv_method": "stock",
+        "kv_method_params": {
+          "bits": 8,
+          "group_size": 64
+        },
+        "kv_method_provenance": {
+          "package": "mlx-lm",
+          "version": "0.31.3"
+        },
+        "kv_partial": false,
+        "measured_kv_bytes_per_token": 6528,
         "mlx_lm_version": "0.31.3",
         "mlx_version": "0.31.2",
         "model_id": "mlx-community/Qwen2.5-0.5B-Instruct-4bit",
         "model_revision": "a5339a4131f135d0fdc6a5c8b5bbed2753bbe0f3",
         "n_chunks": 100,
         "n_positions": 51100,
-        "peak_memory_bytes": 2465473220,
+        "peak_memory_bytes": 2465062668,
         "perplexity_delta": 0.6229315761060086,
         "perplexity_quant": 23.765270407435352,
         "perplexity_ref": 23.142338831329344,
         "quantize_mode": "stress",
         "quantize_start": 0,
         "verdict": "bad",
-        "warnings": []
+        "warnings": [],
+        "working_set_bytes_per_token": 0
       },
       "status": "ok"
     }

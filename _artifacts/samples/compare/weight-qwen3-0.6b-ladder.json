@@ -93,7 +93,7 @@
         "verdict": "bad",
         "warnings": [
           "Assumes both repos share a tokenizer; only vocab_size (and bos/eos ids) were checked \u2014 a divergent token map would be measured as quant drift.",
-          "Quantization method is not recorded in the repo config \u2014 mlx-lm's DWQ, AWQ and dynamic quantizers write a quantization block that records only geometry (bits, group sizes, per-module overrides), never the recipe. This report describes the geometry of the loaded model, not the method that produced it."
+          "The recipe that produced this quantization is not recorded in a form this tool can check: mlx-lm's DWQ, AWQ and dynamic quantizers write a quantization block that records only geometry (bits, group sizes, per-module overrides), never the recipe. This report describes the geometry of the loaded model, not the method that produced it."
         ]
       },
       "status": "ok"
@@ -163,7 +163,7 @@
         "verdict": "bad",
         "warnings": [
           "Assumes both repos share a tokenizer; only vocab_size (and bos/eos ids) were checked \u2014 a divergent token map would be measured as quant drift.",
-          "Quantization method is not recorded in the repo config \u2014 mlx-lm's DWQ, AWQ and dynamic quantizers write a quantization block that records only geometry (bits, group sizes, per-module overrides), never the recipe. This report describes the geometry of the loaded model, not the method that produced it."
+          "The recipe that produced this quantization is not recorded in a form this tool can check: mlx-lm's DWQ, AWQ and dynamic quantizers write a quantization block that records only geometry (bits, group sizes, per-module overrides), never the recipe. This report describes the geometry of the loaded model, not the method that produced it."
         ]
       },
       "status": "ok"
@@ -238,7 +238,7 @@
         "verdict": "marginal",
         "warnings": [
           "Assumes both repos share a tokenizer; only vocab_size (and bos/eos ids) were checked \u2014 a divergent token map would be measured as quant drift.",
-          "Quantization method is not recorded in the repo config \u2014 mlx-lm's DWQ, AWQ and dynamic quantizers write a quantization block that records only geometry (bits, group sizes, per-module overrides), never the recipe. This report describes the geometry of the loaded model, not the method that produced it."
+          "The recipe that produced this quantization is not recorded in a form this tool can check: mlx-lm's DWQ, AWQ and dynamic quantizers write a quantization block that records only geometry (bits, group sizes, per-module overrides), never the recipe. This report describes the geometry of the loaded model, not the method that produced it."
         ]
       },
       "status": "ok"
@@ -308,7 +308,7 @@
         "verdict": "marginal",
         "warnings": [
           "Assumes both repos share a tokenizer; only vocab_size (and bos/eos ids) were checked \u2014 a divergent token map would be measured as quant drift.",
-          "Quantization method is not recorded in the repo config \u2014 mlx-lm's DWQ, AWQ and dynamic quantizers write a quantization block that records only geometry (bits, group sizes, per-module overrides), never the recipe. This report describes the geometry of the loaded model, not the method that produced it."
+          "The recipe that produced this quantization is not recorded in a form this tool can check: mlx-lm's DWQ, AWQ and dynamic quantizers write a quantization block that records only geometry (bits, group sizes, per-module overrides), never the recipe. This report describes the geometry of the loaded model, not the method that produced it."
         ]
       },
       "status": "ok"
@@ -378,7 +378,7 @@
         "verdict": "good",
         "warnings": [
           "Assumes both repos share a tokenizer; only vocab_size (and bos/eos ids) were checked \u2014 a divergent token map would be measured as quant drift.",
-          "Quantization method is not recorded in the repo config \u2014 mlx-lm's DWQ, AWQ and dynamic quantizers write a quantization block that records only geometry (bits, group sizes, per-module overrides), never the recipe. This report describes the geometry of the loaded model, not the method that produced it."
+          "The recipe that produced this quantization is not recorded in a form this tool can check: mlx-lm's DWQ, AWQ and dynamic quantizers write a quantization block that records only geometry (bits, group sizes, per-module overrides), never the recipe. This report describes the geometry of the loaded model, not the method that produced it."
         ]
       },
       "status": "ok"

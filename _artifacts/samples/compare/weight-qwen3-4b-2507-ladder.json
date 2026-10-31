@@ -1,0 +1,405 @@
+{
+  "budget": null,
+  "budget_pick": null,
+  "corpus": {
+    "bos_policy": "none",
+    "chunk_length": 512,
+    "dataset_revision": "b08601e04326c79dfdd32d625aee71d232d685c3",
+    "final_chunk_policy": "drop",
+    "n_tokens": 51200,
+    "name": "wikitext-2-raw",
+    "normalization": "raw",
+    "split": "test",
+    "stride": 512,
+    "tokenizer_id": "mlx-community/Qwen3-4B-Instruct-2507-bf16"
+  },
+  "dominated": [
+    [
+      "mlx-community/Qwen3-4B-Instruct-2507-4bit",
+      "mlx-community/Qwen3-4B-Instruct-2507-4bit-DWQ-2510"
+    ],
+    [
+      "mlx-community/Qwen3-4B-Instruct-2507-5.0bpw-dynamic",
+      "mlx-community/Qwen3-4B-Instruct-2507-DDWQ"
+    ]
+  ],
+  "frontier": [
+    "mlx-community/Qwen3-4B-Instruct-2507-4bit-DWQ-2510",
+    "mlx-community/Qwen3-4B-Instruct-2507-DDWQ",
+    "mlx-community/Qwen3-4B-Instruct-2507-8bit"
+  ],
+  "mlx_lm_version": "0.31.3",
+  "mlx_version": "0.31.2",
+  "mode": "weight",
+  "model": null,
+  "quantize_mode": null,
+  "quantize_start": null,
+  "reference": "mlx-community/Qwen3-4B-Instruct-2507-bf16",
+  "results": [
+    {
+      "error_type": null,
+      "excluded_reason": null,
+      "label": "mlx-community/Qwen3-4B-Instruct-2507-4bit",
+      "message": null,
+      "point": {
+        "cost_bytes": 2263022417,
+        "label": "mlx-community/Qwen3-4B-Instruct-2507-4bit",
+        "quality": 0.11057638950787395
+      },
+      "ranked_footing": null,
+      "ranked_kl": null,
+      "ranked_verdict": null,
+      "report": {
+        "corpus": {
+          "bos_policy": "none",
+          "chunk_length": 512,
+          "dataset_revision": "b08601e04326c79dfdd32d625aee71d232d685c3",
+          "final_chunk_policy": "drop",
+          "n_tokens": 51200,
+          "name": "wikitext-2-raw",
+          "normalization": "raw",
+          "split": "test",
+          "stride": 512,
+          "tokenizer_id": "mlx-community/Qwen3-4B-Instruct-2507-bf16"
+        },
+        "device": "Apple M1 Max, 32 GB",
+        "flip_rate": 0.1716829745596869,
+        "kl": {
+          "max": 9.883784294128418,
+          "mean": 0.11057638950787395,
+          "median": 0.0754992850124836,
+          "p99": 0.7044725197553643
+        },
+        "mlx_lm_version": "0.31.3",
+        "mlx_version": "0.31.2",
+        "n_chunks": 100,
+        "n_positions": 51100,
+        "peak_memory_bytes": 12639449881,
+        "per_layer": false,
+        "perplexity_delta": 1.062774963406163,
+        "perplexity_quant": 14.14373438825852,
+        "perplexity_ref": 13.080959424852358,
+        "quant_bits": 4,
+        "quant_bits_per_weight": 4.500560626944995,
+        "quant_geometry": [
+          [
+            4,
+            64,
+            253
+          ]
+        ],
+        "quant_group_size": 64,
+        "quant_mode": "affine",
+        "quant_model_bytes": 2263022417,
+        "quant_model_id": "mlx-community/Qwen3-4B-Instruct-2507-4bit",
+        "quant_n_full_precision": 0,
+        "quant_precision": "uniform",
+        "quant_revision": "50d427756c6b1b2fe0c0a10f67fbda1fc8e82c1b",
+        "reference_bits": null,
+        "reference_model_bytes": 8044981893,
+        "reference_model_id": "mlx-community/Qwen3-4B-Instruct-2507-bf16",
+        "reference_revision": "f9e77d4283734966e9cd641bf35547f0cff5d427",
+        "verdict": "marginal",
+        "warnings": [
+          "Assumes both repos share a tokenizer; only vocab_size (and bos/eos ids) were checked \u2014 a divergent token map would be measured as quant drift.",
+          "The recipe that produced this quantization is not recorded in a form this tool can check: mlx-lm's DWQ, AWQ and dynamic quantizers write a quantization block that records only geometry (bits, group sizes, per-module overrides), never the recipe. This report describes the geometry of the loaded model, not the method that produced it."
+        ]
+      },
+      "status": "ok"
+    },
+    {
+      "error_type": null,
+      "excluded_reason": null,
+      "label": "mlx-community/Qwen3-4B-Instruct-2507-4bit-DWQ-2510",
+      "message": null,
+      "point": {
+        "cost_bytes": 2263022417,
+        "label": "mlx-community/Qwen3-4B-Instruct-2507-4bit-DWQ-2510",
+        "quality": 0.06381588426201311
+      },
+      "ranked_footing": null,
+      "ranked_kl": null,
+      "ranked_verdict": null,
+      "report": {
+        "corpus": {
+          "bos_policy": "none",
+          "chunk_length": 512,
+          "dataset_revision": "b08601e04326c79dfdd32d625aee71d232d685c3",
+          "final_chunk_policy": "drop",
+          "n_tokens": 51200,
+          "name": "wikitext-2-raw",
+          "normalization": "raw",
+          "split": "test",
+          "stride": 512,
+          "tokenizer_id": "mlx-community/Qwen3-4B-Instruct-2507-bf16"
+        },
+        "device": "Apple M1 Max, 32 GB",
+        "flip_rate": 0.11808219178082192,
+        "kl": {
+          "max": 7.985499382019043,
+          "mean": 0.06381588426201311,
+          "median": 0.031954897567629814,
+          "p99": 0.5718618887662893
+        },
+        "mlx_lm_version": "0.31.3",
+        "mlx_version": "0.31.2",
+        "n_chunks": 100,
+        "n_positions": 51100,
+        "peak_memory_bytes": 12484308471,
+        "per_layer": false,
+        "perplexity_delta": 0.8132326802648091,
+        "perplexity_quant": 13.894192105117167,
+        "perplexity_ref": 13.080959424852358,
+        "quant_bits": 4,
+        "quant_bits_per_weight": 4.500560626944995,
+        "quant_geometry": [
+          [
+            4,
+            64,
+            253
+          ]
+        ],
+        "quant_group_size": 64,
+        "quant_mode": "affine",
+        "quant_model_bytes": 2263022417,
+        "quant_model_id": "mlx-community/Qwen3-4B-Instruct-2507-4bit-DWQ-2510",
+        "quant_n_full_precision": 0,
+        "quant_precision": "uniform",
+        "quant_revision": "c073725c8ac051eabad9d64f4dcd3019d1072559",
+        "reference_bits": null,
+        "reference_model_bytes": 8044981893,
+        "reference_model_id": "mlx-community/Qwen3-4B-Instruct-2507-bf16",
+        "reference_revision": "f9e77d4283734966e9cd641bf35547f0cff5d427",
+        "verdict": "marginal",
+        "warnings": [
+          "Assumes both repos share a tokenizer; only vocab_size (and bos/eos ids) were checked \u2014 a divergent token map would be measured as quant drift.",
+          "The recipe that produced this quantization is not recorded in a form this tool can check: mlx-lm's DWQ, AWQ and dynamic quantizers write a quantization block that records only geometry (bits, group sizes, per-module overrides), never the recipe. This report describes the geometry of the loaded model, not the method that produced it."
+        ]
+      },
+      "status": "ok"
+    },
+    {
+      "error_type": null,
+      "excluded_reason": null,
+      "label": "mlx-community/Qwen3-4B-Instruct-2507-DDWQ",
+      "message": null,
+      "point": {
+        "cost_bytes": 2513288145,
+        "label": "mlx-community/Qwen3-4B-Instruct-2507-DDWQ",
+        "quality": 0.04007666018290657
+      },
+      "ranked_footing": null,
+      "ranked_kl": null,
+      "ranked_verdict": null,
+      "report": {
+        "corpus": {
+          "bos_policy": "none",
+          "chunk_length": 512,
+          "dataset_revision": "b08601e04326c79dfdd32d625aee71d232d685c3",
+          "final_chunk_policy": "drop",
+          "n_tokens": 51200,
+          "name": "wikitext-2-raw",
+          "normalization": "raw",
+          "split": "test",
+          "stride": 512,
+          "tokenizer_id": "mlx-community/Qwen3-4B-Instruct-2507-bf16"
+        },
+        "device": "Apple M1 Max, 32 GB",
+        "flip_rate": 0.09201565557729942,
+        "kl": {
+          "max": 8.515007972717285,
+          "mean": 0.04007666018290657,
+          "median": 0.01959817949682474,
+          "p99": 0.3424567565321943
+        },
+        "mlx_lm_version": "0.31.3",
+        "mlx_version": "0.31.2",
+        "n_chunks": 100,
+        "n_positions": 51100,
+        "peak_memory_bytes": 13044674424,
+        "per_layer": true,
+        "perplexity_delta": 0.2545454965065268,
+        "perplexity_quant": 13.335504921358885,
+        "perplexity_ref": 13.080959424852358,
+        "quant_bits": 4,
+        "quant_bits_per_weight": 4.998296035211115,
+        "quant_geometry": [
+          [
+            4,
+            64,
+            165
+          ],
+          [
+            6,
+            64,
+            88
+          ]
+        ],
+        "quant_group_size": 64,
+        "quant_mode": "affine",
+        "quant_model_bytes": 2513288145,
+        "quant_model_id": "mlx-community/Qwen3-4B-Instruct-2507-DDWQ",
+        "quant_n_full_precision": 0,
+        "quant_precision": "mixed",
+        "quant_revision": "88033de44951ebedb96e0adb68cc037443aab93a",
+        "reference_bits": null,
+        "reference_model_bytes": 8044981893,
+        "reference_model_id": "mlx-community/Qwen3-4B-Instruct-2507-bf16",
+        "reference_revision": "f9e77d4283734966e9cd641bf35547f0cff5d427",
+        "verdict": "marginal",
+        "warnings": [
+          "Assumes both repos share a tokenizer; only vocab_size (and bos/eos ids) were checked \u2014 a divergent token map would be measured as quant drift.",
+          "The recipe that produced this quantization is not recorded in a form this tool can check: mlx-lm's DWQ, AWQ and dynamic quantizers write a quantization block that records only geometry (bits, group sizes, per-module overrides), never the recipe. This report describes the geometry of the loaded model, not the method that produced it."
+        ]
+      },
+      "status": "ok"
+    },
+    {
+      "error_type": null,
+      "excluded_reason": null,
+      "label": "mlx-community/Qwen3-4B-Instruct-2507-5.0bpw-dynamic",
+      "message": null,
+      "point": {
+        "cost_bytes": 2516442069,
+        "label": "mlx-community/Qwen3-4B-Instruct-2507-5.0bpw-dynamic",
+        "quality": 0.04778206519558268
+      },
+      "ranked_footing": null,
+      "ranked_kl": null,
+      "ranked_verdict": null,
+      "report": {
+        "corpus": {
+          "bos_policy": "none",
+          "chunk_length": 512,
+          "dataset_revision": "b08601e04326c79dfdd32d625aee71d232d685c3",
+          "final_chunk_policy": "drop",
+          "n_tokens": 51200,
+          "name": "wikitext-2-raw",
+          "normalization": "raw",
+          "split": "test",
+          "stride": 512,
+          "tokenizer_id": "mlx-community/Qwen3-4B-Instruct-2507-bf16"
+        },
+        "device": "Apple M1 Max, 32 GB",
+        "flip_rate": 0.10211350293542075,
+        "kl": {
+          "max": 9.198845863342285,
+          "mean": 0.04778206519558268,
+          "median": 0.02509702928364277,
+          "p99": 0.35576286852359806
+        },
+        "mlx_lm_version": "0.31.3",
+        "mlx_version": "0.31.2",
+        "n_chunks": 100,
+        "n_positions": 51100,
+        "peak_memory_bytes": 12582129767,
+        "per_layer": true,
+        "perplexity_delta": 0.41761878392912344,
+        "perplexity_quant": 13.498578208781481,
+        "perplexity_ref": 13.080959424852358,
+        "quant_bits": 4,
+        "quant_bits_per_weight": 5.004568641829198,
+        "quant_geometry": [
+          [
+            4,
+            64,
+            109
+          ],
+          [
+            5,
+            64,
+            144
+          ]
+        ],
+        "quant_group_size": 64,
+        "quant_mode": "affine",
+        "quant_model_bytes": 2516442069,
+        "quant_model_id": "mlx-community/Qwen3-4B-Instruct-2507-5.0bpw-dynamic",
+        "quant_n_full_precision": 0,
+        "quant_precision": "mixed",
+        "quant_revision": "6bd1669a2ed4f8f47a7a1fa6038c14fb2bbea608",
+        "reference_bits": null,
+        "reference_model_bytes": 8044981893,
+        "reference_model_id": "mlx-community/Qwen3-4B-Instruct-2507-bf16",
+        "reference_revision": "f9e77d4283734966e9cd641bf35547f0cff5d427",
+        "verdict": "marginal",
+        "warnings": [
+          "Assumes both repos share a tokenizer; only vocab_size (and bos/eos ids) were checked \u2014 a divergent token map would be measured as quant drift.",
+          "The recipe that produced this quantization is not recorded in a form this tool can check: mlx-lm's DWQ, AWQ and dynamic quantizers write a quantization block that records only geometry (bits, group sizes, per-module overrides), never the recipe. This report describes the geometry of the loaded model, not the method that produced it."
+        ]
+      },
+      "status": "ok"
+    },
+    {
+      "error_type": null,
+      "excluded_reason": null,
+      "label": "mlx-community/Qwen3-4B-Instruct-2507-8bit",
+      "message": null,
+      "point": {
+        "cost_bytes": 4274158989,
+        "label": "mlx-community/Qwen3-4B-Instruct-2507-8bit",
+        "quality": 0.0017249491516757043
+      },
+      "ranked_footing": null,
+      "ranked_kl": null,
+      "ranked_verdict": null,
+      "report": {
+        "corpus": {
+          "bos_policy": "none",
+          "chunk_length": 512,
+          "dataset_revision": "b08601e04326c79dfdd32d625aee71d232d685c3",
+          "final_chunk_policy": "drop",
+          "n_tokens": 51200,
+          "name": "wikitext-2-raw",
+          "normalization": "raw",
+          "split": "test",
+          "stride": 512,
+          "tokenizer_id": "mlx-community/Qwen3-4B-Instruct-2507-bf16"
+        },
+        "device": "Apple M1 Max, 32 GB",
+        "flip_rate": 0.020919765166340507,
+        "kl": {
+          "max": 0.5712161660194397,
+          "mean": 0.0017249491516757043,
+          "median": 0.0010995096527040005,
+          "p99": 0.010195616949349692
+        },
+        "mlx_lm_version": "0.31.3",
+        "mlx_version": "0.31.2",
+        "n_chunks": 100,
+        "n_positions": 51100,
+        "peak_memory_bytes": 14495244634,
+        "per_layer": false,
+        "perplexity_delta": 0.01487862550270691,
+        "perplexity_quant": 13.095838050355065,
+        "perplexity_ref": 13.080959424852358,
+        "quant_bits": 8,
+        "quant_bits_per_weight": 8.500365626268476,
+        "quant_geometry": [
+          [
+            8,
+            64,
+            253
+          ]
+        ],
+        "quant_group_size": 64,
+        "quant_mode": "affine",
+        "quant_model_bytes": 4274158989,
+        "quant_model_id": "mlx-community/Qwen3-4B-Instruct-2507-8bit",
+        "quant_n_full_precision": 0,
+        "quant_precision": "uniform",
+        "quant_revision": "0e42af58449718de7931ee04f28191fbe6c43a56",
+        "reference_bits": null,
+        "reference_model_bytes": 8044981893,
+        "reference_model_id": "mlx-community/Qwen3-4B-Instruct-2507-bf16",
+        "reference_revision": "f9e77d4283734966e9cd641bf35547f0cff5d427",
+        "verdict": "good",
+        "warnings": [
+          "Assumes both repos share a tokenizer; only vocab_size (and bos/eos ids) were checked \u2014 a divergent token map would be measured as quant drift.",
+          "The recipe that produced this quantization is not recorded in a form this tool can check: mlx-lm's DWQ, AWQ and dynamic quantizers write a quantization block that records only geometry (bits, group sizes, per-module overrides), never the recipe. This report describes the geometry of the loaded model, not the method that produced it."
+        ]
+      },
+      "status": "ok"
+    }
+  ]
+}
