@@ -1,7 +1,7 @@
 """Real-port oracles for TurboQuantKVMethod (mlx-community/Llama-3.2-1B-Instruct-4bit).
 
-``@pytest.mark.slow``; run with ``--run-slow`` on the main thread. DO NOT run in CI or in a subagent.
-Requires the pinned port. Install it with ``uv sync --group turboquant`` (or the pinned pip line
+``@pytest.mark.slow``; run with ``--run-slow`` on the main thread. DO NOT run in CI or in an
+unattended job. Requires the pinned port. Install it with ``uv sync --group turboquant`` (or the pinned pip line
 in the README); note a plain ``uv run``/``uv sync`` without the group removes a manually
 pip-installed port and these tests then skip. Skips when the port is absent; tests that need no
 port run regardless.
@@ -16,7 +16,7 @@ Recorded values (main-thread run 2026-08-24, M1 Max 32 GB, mlx 0.31.2, port 0.3.
 import mlx.core as mx
 import pytest
 from tests.probes.port_skip import port_or_skip
-from tests.probes.test_kv_oracles import MODEL, _tiny_corpus
+from tests.probes.test_kv_oracles import MODEL, MODEL_REVISION, _tiny_corpus
 
 from mlx_quant_fidelity.errors import ExactZeroError
 from mlx_quant_fidelity.probes.kv import score_kv_config
@@ -40,7 +40,7 @@ def _port_or_skip():
 def loaded():
     from mlx_lm import load
 
-    return load(MODEL)
+    return load(MODEL, revision=MODEL_REVISION)
 
 
 @pytest.fixture(scope="module")
@@ -206,8 +206,8 @@ def test_deployment_three_chunks_peak_under_cap(loaded_with_port):
 # both built on plain mx.quantize/mx.dequantize), so they use the module-scoped `loaded`
 # fixture rather than `loaded_with_port`. Measured values recorded in each docstring below
 # (main-thread run 2026-08-26, M1 Max 32 GB, Llama-3.2-1B-Instruct-4bit, tiny corpus
-# chunk_length=64) -- this file's module docstring already says "DO NOT run in CI or in a
-# subagent", so the implementing session did not execute --run-slow itself.
+# chunk_length=64). As the module docstring says, they run with --run-slow on the main thread,
+# never in CI or an unattended job.
 
 
 def test_stock_control_lane_produces_quantizer_only_drift(loaded):
@@ -319,10 +319,9 @@ def test_affine_consumption_oracle_corruption_raises_kl(loaded, monkeypatch):
 # ---------------------------------------------------------------------------
 #
 # Needs the real port's ``v_only_cache`` module specifically (not just ``cache``), so these use
-# a dedicated ``loaded_with_vonly_port`` fixture rather than ``loaded_with_port``. This file's
-# module docstring already says "DO NOT run in CI or in a subagent" and "run with --run-slow on
-# the main thread" -- the implementing session did not execute --run-slow itself; the controller
-# ran this lane 2026-08-26 (M1 Max 32 GB, Llama-3.2-1B-Instruct-4bit, tiny corpus) -- 3/3 passed
+# a dedicated ``loaded_with_vonly_port`` fixture rather than ``loaded_with_port``. As the module
+# docstring says, they run with --run-slow on the main thread, never in CI or an unattended job.
+# This lane ran 2026-08-26 (M1 Max 32 GB, Llama-3.2-1B-Instruct-4bit, tiny corpus) -- 3/3 passed
 # in 2.15s, and the measured values are recorded in each test's docstring below.
 
 

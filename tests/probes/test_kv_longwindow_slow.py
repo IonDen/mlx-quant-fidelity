@@ -2,7 +2,7 @@
 
 ``@pytest.mark.slow`` and ``@pytest.mark.network`` — downloads and loads a real model. Skipped
 by default; run with ``--run-slow --run-network`` on the MAIN THREAD only.
-DO NOT run in CI or in a subagent.
+DO NOT run in CI or in an unattended job.
 
 Same pinned revision as ``scripts/spike_long_window_memory.py``, the reproducer this test
 pins one lane of.

@@ -1,7 +1,7 @@
 """Real-model confirmation for per-layer partial KV coverage (0053).
 
-``@pytest.mark.slow``; run with ``--run-slow`` on the main thread (needs a model download). Skips
-if the model is not cached. Uses ``mlx-community/gemma-3-1b-it-4bit`` — a genuine sliding/full
+``@pytest.mark.slow``; run with ``--run-slow`` on the main thread (needs a model download).
+Uses ``mlx-community/gemma-3-1b-it-4bit`` — a genuine sliding/full
 hybrid (``gemma3_text``, ``sliding_window_pattern=6`` over 26 layers), so ``make_prompt_cache``
 returns a mix of ``KVCache`` (quantizable) and ``RotatingKVCache`` (skipped). Confirms the probe
 measures the quantizable layers, reports the partial coverage, and carries the hypothetical-partial
@@ -20,13 +20,15 @@ from mlx_quant_fidelity.probes.kv_methods import StockKVMethod
 pytestmark = pytest.mark.slow
 
 HYBRID_MODEL = "mlx-community/gemma-3-1b-it-4bit"
+# Cached pin: offline, an unpinned `main` has no cached refs/main to resolve to.
+HYBRID_REVISION = "2d44e83dc9e80843d22fb941d3d699a0b1351aa6"
 
 
 @pytest.fixture(scope="module")
 def loaded_hybrid():
     from mlx_lm import load
 
-    return load(HYBRID_MODEL)
+    return load(HYBRID_MODEL, revision=HYBRID_REVISION)
 
 
 def test_partial_coverage_on_real_hybrid(loaded_hybrid):
