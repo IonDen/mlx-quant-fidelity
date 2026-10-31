@@ -4,11 +4,16 @@ Lets the adapter's wiring run offline. ``state`` stores uint32 packed codes + fp
 real byte geometry so the behavioural contract (bytes == formula) is satisfiable by the fake.
 """
 
+import importlib.machinery
 import json
 import sys
 import types
+from pathlib import Path
 
 import mlx.core as mx
+
+# The file the fake module claims to load from, and the one file its fake distribution lists.
+FAKE_PORT_ORIGIN = Path(__file__).resolve()
 
 
 def _packed_dim(head_dim, bits):
@@ -224,6 +229,11 @@ def install_fake_port(
     ``sys.modules["turboquant_mlx.v_only_cache"].VOnlyTurboQuantCache``.
     """
     pkg = types.ModuleType("turboquant_mlx")
+    # The gate's origin check reads `sys.modules[...].__spec__.origin` and the distribution's
+    # file list; both point at the same file, as they would for the genuine pinned install.
+    pkg.__spec__ = importlib.machinery.ModuleSpec(
+        "turboquant_mlx", None, origin=str(FAKE_PORT_ORIGIN)
+    )
     if not no_version:
         pkg.__version__ = version
     if bad_trim:
@@ -267,6 +277,10 @@ def install_fake_port(
                 "vcs_info": {"vcs": "git", "commit_id": "6e928d715595dee9f6b6cc3968baa44e1f408d28"},
             }
         ),
+    )
+    monkeypatch.setattr(
+        "mlx_quant_fidelity.probes.kv_methods._turboquant_distribution_files",
+        lambda: frozenset({FAKE_PORT_ORIGIN}),
     )
     if no_cache_module:
         monkeypatch.delitem(sys.modules, "turboquant_mlx.cache", raising=False)

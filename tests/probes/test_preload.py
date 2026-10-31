@@ -218,3 +218,170 @@ def test_non_utf8_config_is_a_model_not_accessible_error(tmp_path):
     (tmp_path / "config.json").write_bytes(b'{"model_type": "\xff\xfe"}')
     with pytest.raises(ModelNotAccessibleError):
         _preload.read_model_config(str(tmp_path))
+
+
+# ---------------------------------------------------------------------------
+# Tokenizer remote code (transformers' trust_remote_code), at every load site
+# ---------------------------------------------------------------------------
+
+
+def _remote_code_error(kind: str) -> ValueError:
+    """The ValueError the installed transformers raises for a tokenizer that needs remote code.
+
+    ``refused``: ``trust_remote_code=False`` was passed (what the probes pass without the opt-in).
+    ``timeout``: nothing was passed and the interactive prompt timed out or had no TTY (what
+    mlx-lm's bare ``load`` hits).
+    """
+    from transformers import dynamic_module_utils as dmu
+
+    try:
+        if kind == "refused":
+            dmu.resolve_trust_remote_code(
+                False, "org/name", has_local_code=False, has_remote_code=True
+            )
+        else:
+            dmu._raise_timeout_error(None, None)
+    except ValueError as exc:
+        return exc
+    raise AssertionError("transformers did not refuse remote code")  # pragma: no cover
+
+
+class _StopError(Exception):
+    pass
+
+
+def _tokenizer_gated_load(seen: dict[str, object], *, kind: str = "refused"):
+    """A fake mlx_lm.load that behaves like transformers' AutoTokenizer for a remote-code repo:
+    it refuses unless ``tokenizer_config`` trusts remote code, else stops the run."""
+
+    def fake_load(repo, **kw):
+        seen.update(kw)
+        if (kw.get("tokenizer_config") or {}).get("trust_remote_code") is not True:
+            raise _remote_code_error(kind)
+        raise _StopError
+
+    return fake_load
+
+
+def _stub_kv_before_load(monkeypatch):
+    from mlx_quant_fidelity.probes import kv as kv_mod
+
+    monkeypatch.setattr(kv_mod, "preload_check", lambda *a, **k: _preload.PreloadResult({}, None))
+    monkeypatch.setattr(kv_mod, "install_memory_caps", lambda: (0, 0))
+
+
+def _stub_weights_before_load(monkeypatch):
+    from mlx_quant_fidelity.probes import weights as w
+
+    cfg = {"model_type": "llama", "vocab_size": 3, "quantization": {"bits": 4, "group_size": 64}}
+    monkeypatch.setattr(w, "preload_check", lambda *a, **k: _preload.PreloadResult(cfg, None))
+    monkeypatch.setattr(w, "install_memory_caps", lambda: (0, 0))
+    monkeypatch.setattr(w, "_resolve_weight_bytes", lambda *a, **k: 1000)
+    monkeypatch.setattr(w, "_hub_weight_bytes", lambda *a, **k: 1000)
+
+
+def _run_site(site: str, *, allow_custom_code: bool) -> None:
+    from tests.factories import make_corpus
+
+    from mlx_quant_fidelity.probes import kv as kv_mod
+    from mlx_quant_fidelity.probes import weights as w
+    from mlx_quant_fidelity.runners import compare as cmp
+
+    corpus = make_corpus(n_chunks=2, chunk_length=4, tokenizer_id="org/m-bf16")
+    if site == "kv":
+        kv_mod.measure_kv_fidelity("org/name", corpus=corpus, allow_custom_code=allow_custom_code)
+    elif site == "weights":
+        w.measure_weight_fidelity(
+            "org/quant", "org/ref", corpus=corpus, allow_custom_code=allow_custom_code
+        )
+    else:
+        cmp._load_model("org/name", "rev", allow_custom_code=allow_custom_code)
+
+
+_SITES = ["kv", "weights", "compare-kv"]
+
+
+@pytest.mark.parametrize("site", _SITES)
+@pytest.mark.parametrize("kind", ["refused", "timeout"])
+def test_tokenizer_remote_code_without_opt_in_is_untrusted_model_code(monkeypatch, site, kind):
+    """Bug: a repo whose tokenizer needs remote code escapes the load as a bare transformers
+    ValueError (the CLI's internal error, exit 1) instead of the opt-in refusal (exit 2)."""
+    import mlx_lm
+
+    _stub_kv_before_load(monkeypatch)
+    _stub_weights_before_load(monkeypatch)
+    seen: dict[str, object] = {}
+    monkeypatch.setattr(mlx_lm, "load", _tokenizer_gated_load(seen, kind=kind))
+    with pytest.raises(UntrustedModelCodeError, match="--allow-custom-code") as exc:
+        _run_site(site, allow_custom_code=False)
+    assert "tokenizer" in str(exc.value)
+    assert isinstance(exc.value.__cause__, ValueError)
+
+
+@pytest.mark.parametrize("site", _SITES)
+@pytest.mark.parametrize("allow", [False, True])
+def test_every_load_site_passes_the_opt_in_to_the_tokenizer(monkeypatch, site, allow):
+    """Bug: a load site calls mlx_lm.load without tokenizer_config, so --allow-custom-code never
+    reaches AutoTokenizer (opt-in ignored) and, without it, transformers prompts on a TTY."""
+    import mlx_lm
+
+    _stub_kv_before_load(monkeypatch)
+    _stub_weights_before_load(monkeypatch)
+    received: list[object] = []
+
+    def recording_load(repo, **kw):
+        received.append(kw.get("tokenizer_config", "<not passed>"))
+        if repo == "org/ref":  # the weights probe loads the reference first, then the quant
+            return object(), object(), {"model_type": "llama", "vocab_size": 3}
+        raise _StopError
+
+    monkeypatch.setattr(mlx_lm, "load", recording_load)
+    with pytest.raises(_StopError):
+        _run_site(site, allow_custom_code=allow)
+    expected_loads = 2 if site == "weights" else 1
+    assert received == [{"trust_remote_code": allow}] * expected_loads
+
+
+def test_opted_in_tokenizer_code_loads(monkeypatch):
+    """With the opt-in the remote-code tokenizer loads: the gated fake gets past AutoTokenizer
+    (and stops the run there) instead of refusing."""
+    import mlx_lm
+
+    from mlx_quant_fidelity.runners import compare as cmp
+
+    seen: dict[str, object] = {}
+    monkeypatch.setattr(mlx_lm, "load", _tokenizer_gated_load(seen))
+    with pytest.raises(_StopError):
+        cmp._load_model("org/name", "rev", allow_custom_code=True)
+
+
+def test_other_load_value_errors_are_not_reported_as_untrusted_code(monkeypatch):
+    """Bug: the refusal mapping catches every ValueError from load, so an unrelated load failure
+    tells the user to re-run with --allow-custom-code."""
+    import mlx_lm
+
+    from mlx_quant_fidelity.runners import compare as cmp
+
+    def bad_load(repo, **kw):
+        raise ValueError("Model type foo not supported.")
+
+    monkeypatch.setattr(mlx_lm, "load", bad_load)
+    with pytest.raises(ValueError, match="foo not supported") as exc:
+        cmp._load_model("org/name", "rev", allow_custom_code=False)
+    assert not isinstance(exc.value, UntrustedModelCodeError)
+
+
+def test_opted_in_remote_code_error_is_not_reworded_as_a_missing_opt_in(monkeypatch):
+    """Bug: with --allow-custom-code already passed, a remote-code error from transformers is
+    still reported as "re-run with --allow-custom-code", which the user already did."""
+    import mlx_lm
+
+    from mlx_quant_fidelity.runners import compare as cmp
+
+    def still_refusing(repo, **kw):
+        raise _remote_code_error("refused")
+
+    monkeypatch.setattr(mlx_lm, "load", still_refusing)
+    with pytest.raises(ValueError, match="trust_remote_code=True") as exc:
+        cmp._load_model("org/name", "rev", allow_custom_code=True)
+    assert not isinstance(exc.value, UntrustedModelCodeError)
