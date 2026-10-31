@@ -11,6 +11,6 @@
 
 > Note: Assumes both repos share a tokenizer; only vocab_size (and bos/eos ids) were checked — a divergent token map would be measured as quant drift.
 
-> Note: Quantization method is not recorded in the repo config — mlx-lm's DWQ, AWQ and dynamic quantizers write a quantization block that records only geometry (bits, group sizes, per-module overrides), never the recipe. This report describes the geometry of the loaded model, not the method that produced it.
+> Note: The recipe that produced this quantization is not recorded in a form this tool can check: mlx-lm's DWQ, AWQ and dynamic quantizers write a quantization block that records only geometry (bits, group sizes, per-module overrides), never the recipe. This report describes the geometry of the loaded model, not the method that produced it.
 
 > Weight compare reloads the reference once per target — N targets ≈ Nx a single `weights` run. Fidelity is corpus- and context-length-specific.

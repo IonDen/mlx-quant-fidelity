@@ -1,0 +1,77 @@
+{
+  "caps_gb": {
+    "cache": 4,
+    "memory": 22,
+    "wired": 20
+  },
+  "checked_revision": "8503ff1a2065f57fc9dc8fb95fabd864849c0744",
+  "complete": true,
+  "conditions": {
+    "affine_4_4": {
+      "cache_types": [
+        "_AffineCache"
+      ],
+      "error_message": null,
+      "error_type": null,
+      "frame": null,
+      "kl_max": 0.35065677762031555,
+      "kl_mean": 0.09853431424562586,
+      "kl_median": 0.0922451838850975,
+      "logits_finite": true,
+      "method": "affine:4:4",
+      "status": "ok"
+    },
+    "affine_8_8": {
+      "cache_types": [
+        "_AffineCache"
+      ],
+      "error_message": null,
+      "error_type": null,
+      "frame": null,
+      "kl_max": 0.012715885415673256,
+      "kl_mean": 0.001989726128044822,
+      "kl_median": 0.0008830678707454354,
+      "logits_finite": true,
+      "method": "affine:8:8",
+      "status": "ok"
+    },
+    "reference": {
+      "cache_types": [
+        "KVCache"
+      ],
+      "error_message": null,
+      "error_type": null,
+      "frame": null,
+      "kl_max": null,
+      "kl_mean": null,
+      "kl_median": null,
+      "logits_finite": true,
+      "status": "ok"
+    },
+    "stock_4_64": {
+      "cache_types": [
+        "QuantizedKVCache"
+      ],
+      "error_message": "'tuple' object has no attribute 'swapaxes'",
+      "error_type": "AttributeError",
+      "frame": "mlx_lm/models/deepseek_v3.py:147 in __call__",
+      "kl_max": null,
+      "kl_mean": null,
+      "kl_median": null,
+      "status": "error"
+    }
+  },
+  "device": "Apple M1 Max, 32 GB",
+  "input": "synthetic: mx.arange(1, 65) % vocab, batch 1 (no tokenizer)",
+  "load_seconds": 1.4071017079986632,
+  "mlx_lm_version": "0.31.3",
+  "mlx_version": "0.31.2",
+  "model": "mlx-community/Moonlight-16B-A3B-Instruct-4-bit",
+  "model_type": "deepseek_v3",
+  "n_layers": 27,
+  "peak_memory_bytes": 9204980756,
+  "revision": "8503ff1a2065f57fc9dc8fb95fabd864849c0744",
+  "tokens": 64,
+  "vocab_size": 163840,
+  "wall_seconds": 2.621283125001355
+}
