@@ -1,0 +1,443 @@
+{
+  "budget": null,
+  "budget_pick": null,
+  "corpus": {
+    "bos_policy": "first-chunk",
+    "chunk_length": 512,
+    "dataset_revision": "b08601e04326c79dfdd32d625aee71d232d685c3",
+    "final_chunk_policy": "drop",
+    "n_tokens": 51200,
+    "name": "wikitext-2-raw",
+    "normalization": "raw",
+    "split": "test",
+    "stride": 512,
+    "tokenizer_id": "mlx-community/DeepSeek-V2-Lite-Chat-4bit-mlx"
+  },
+  "dominated": [],
+  "frontier": [
+    "4:64",
+    "affine:8:4",
+    "8:64"
+  ],
+  "mlx_lm_version": "0.31.3",
+  "mlx_version": "0.31.2",
+  "mode": "kv",
+  "model": "mlx-community/DeepSeek-V2-Lite-Chat-4bit-mlx",
+  "quantize_mode": "stress",
+  "quantize_start": 0,
+  "reference": null,
+  "results": [
+    {
+      "error_type": null,
+      "excluded_reason": null,
+      "label": "8:64",
+      "message": null,
+      "point": {
+        "cost_bytes": 117504,
+        "label": "8:64",
+        "quality": 0.005542094610261212
+      },
+      "ranked_footing": "quantizer_only",
+      "ranked_kl": 0.005542094610261212,
+      "ranked_verdict": "marginal",
+      "report": {
+        "cache_supported": true,
+        "control_flip_rate": 0.030430528375733856,
+        "control_kl": {
+          "max": 3.293532609939575,
+          "mean": 0.005542094610261212,
+          "median": 0.0016760891885496676,
+          "p99": 0.06180748451501141
+        },
+        "corpus": {
+          "bos_policy": "first-chunk",
+          "chunk_length": 512,
+          "dataset_revision": "b08601e04326c79dfdd32d625aee71d232d685c3",
+          "final_chunk_policy": "drop",
+          "n_tokens": 51200,
+          "name": "wikitext-2-raw",
+          "normalization": "raw",
+          "split": "test",
+          "stride": 512,
+          "tokenizer_id": "mlx-community/DeepSeek-V2-Lite-Chat-4bit-mlx"
+        },
+        "device": "Apple M1 Max, 32 GB",
+        "drift_footing": "bundled",
+        "flip_rate": 0.030410958904109588,
+        "kl": {
+          "max": 3.293532609939575,
+          "mean": 0.0055407219268929515,
+          "median": 0.0016760891885496676,
+          "p99": 0.06180748451501141
+        },
+        "kl_by_depth": [
+          {
+            "end": 63,
+            "kl_mean": 0.0059310528440589564,
+            "kl_p99": 0.06779849849641331,
+            "n_positions": 6300,
+            "start": 0
+          },
+          {
+            "end": 127,
+            "kl_mean": 0.007137096408208081,
+            "kl_p99": 0.06577229358255875,
+            "n_positions": 6400,
+            "start": 63
+          },
+          {
+            "end": 191,
+            "kl_mean": 0.0053593961838114094,
+            "kl_p99": 0.05798497088253507,
+            "n_positions": 6400,
+            "start": 127
+          },
+          {
+            "end": 255,
+            "kl_mean": 0.005136239397473861,
+            "kl_p99": 0.054370098784565925,
+            "n_positions": 6400,
+            "start": 191
+          },
+          {
+            "end": 319,
+            "kl_mean": 0.005935741144216802,
+            "kl_p99": 0.06710569903254514,
+            "n_positions": 6400,
+            "start": 255
+          },
+          {
+            "end": 383,
+            "kl_mean": 0.004958169332872257,
+            "kl_p99": 0.06494558535516273,
+            "n_positions": 6400,
+            "start": 319
+          },
+          {
+            "end": 447,
+            "kl_mean": 0.005054420069646276,
+            "kl_p99": 0.06120749760419143,
+            "n_positions": 6400,
+            "start": 383
+          },
+          {
+            "end": 511,
+            "kl_mean": 0.004819758955436685,
+            "kl_p99": 0.059941484183073115,
+            "n_positions": 6400,
+            "start": 447
+          }
+        ],
+        "kv_bits": 8,
+        "kv_group_size": 64,
+        "kv_layers_quantized": null,
+        "kv_layers_skipped": null,
+        "kv_layers_total": null,
+        "kv_method": "stock",
+        "kv_method_params": {
+          "bits": 8,
+          "group_size": 64
+        },
+        "kv_method_provenance": {
+          "package": "mlx-lm",
+          "version": "0.31.3"
+        },
+        "kv_partial": false,
+        "measured_kv_bytes_per_token": 146880,
+        "mlx_lm_version": "0.31.3",
+        "mlx_version": "0.31.2",
+        "model_id": "mlx-community/DeepSeek-V2-Lite-Chat-4bit-mlx",
+        "model_revision": "a33a8ad64477b9ca7a65b6dc1d8c06c997f87216",
+        "n_chunks": 100,
+        "n_positions": 51100,
+        "peak_memory_bytes": 10837977202,
+        "perplexity_delta": 0.014844410636259298,
+        "perplexity_quant": 11.708602295474128,
+        "perplexity_ref": 11.693757884837868,
+        "quantize_mode": "stress",
+        "quantize_start": 0,
+        "verdict": "marginal",
+        "warnings": [
+          "measured KV bytes/token 146880 differs from the analytic 117504 for method 'stock' (ranking uses the analytic figure; a scale/bias dtype other than fp16/bf16 is the usual cause)."
+        ],
+        "working_set_bytes_per_token": 0
+      },
+      "status": "ok"
+    },
+    {
+      "error_type": null,
+      "excluded_reason": null,
+      "label": "4:64",
+      "message": null,
+      "point": {
+        "cost_bytes": 62208,
+        "label": "4:64",
+        "quality": 0.2760486951216631
+      },
+      "ranked_footing": "quantizer_only",
+      "ranked_kl": 0.2760486951216631,
+      "ranked_verdict": "bad",
+      "report": {
+        "cache_supported": true,
+        "control_flip_rate": 0.22371819960861056,
+        "control_kl": {
+          "max": 13.750375747680664,
+          "mean": 0.2760486951216631,
+          "median": 0.1354246363043785,
+          "p99": 2.4096990752220155
+        },
+        "corpus": {
+          "bos_policy": "first-chunk",
+          "chunk_length": 512,
+          "dataset_revision": "b08601e04326c79dfdd32d625aee71d232d685c3",
+          "final_chunk_policy": "drop",
+          "n_tokens": 51200,
+          "name": "wikitext-2-raw",
+          "normalization": "raw",
+          "split": "test",
+          "stride": 512,
+          "tokenizer_id": "mlx-community/DeepSeek-V2-Lite-Chat-4bit-mlx"
+        },
+        "device": "Apple M1 Max, 32 GB",
+        "drift_footing": "bundled",
+        "flip_rate": 0.22383561643835617,
+        "kl": {
+          "max": 13.750375747680664,
+          "mean": 0.27626001999855887,
+          "median": 0.13522665202617645,
+          "p99": 2.4098174571991025
+        },
+        "kl_by_depth": [
+          {
+            "end": 63,
+            "kl_mean": 0.27527257433528357,
+            "kl_p99": 2.2875115489959725,
+            "n_positions": 6300,
+            "start": 0
+          },
+          {
+            "end": 127,
+            "kl_mean": 0.3093045575264477,
+            "kl_p99": 2.571007537841797,
+            "n_positions": 6400,
+            "start": 63
+          },
+          {
+            "end": 191,
+            "kl_mean": 0.2809470741528528,
+            "kl_p99": 2.45525814056397,
+            "n_positions": 6400,
+            "start": 127
+          },
+          {
+            "end": 255,
+            "kl_mean": 0.2773378528078865,
+            "kl_p99": 2.439345464706428,
+            "n_positions": 6400,
+            "start": 191
+          },
+          {
+            "end": 319,
+            "kl_mean": 0.2771804229238288,
+            "kl_p99": 2.3136724853515624,
+            "n_positions": 6400,
+            "start": 255
+          },
+          {
+            "end": 383,
+            "kl_mean": 0.28586500389814007,
+            "kl_p99": 2.910166623592378,
+            "n_positions": 6400,
+            "start": 319
+          },
+          {
+            "end": 447,
+            "kl_mean": 0.2578739176285744,
+            "kl_p99": 2.3478537940979023,
+            "n_positions": 6400,
+            "start": 383
+          },
+          {
+            "end": 511,
+            "kl_mean": 0.24628332787696863,
+            "kl_p99": 2.090108695030214,
+            "n_positions": 6400,
+            "start": 447
+          }
+        ],
+        "kv_bits": 4,
+        "kv_group_size": 64,
+        "kv_layers_quantized": null,
+        "kv_layers_skipped": null,
+        "kv_layers_total": null,
+        "kv_method": "stock",
+        "kv_method_params": {
+          "bits": 4,
+          "group_size": 64
+        },
+        "kv_method_provenance": {
+          "package": "mlx-lm",
+          "version": "0.31.3"
+        },
+        "kv_partial": false,
+        "measured_kv_bytes_per_token": 77760,
+        "mlx_lm_version": "0.31.3",
+        "mlx_version": "0.31.2",
+        "model_id": "mlx-community/DeepSeek-V2-Lite-Chat-4bit-mlx",
+        "model_revision": "a33a8ad64477b9ca7a65b6dc1d8c06c997f87216",
+        "n_chunks": 100,
+        "n_positions": 51100,
+        "peak_memory_bytes": 10698011544,
+        "perplexity_delta": 1.0846597504681075,
+        "perplexity_quant": 12.778417635305976,
+        "perplexity_ref": 11.693757884837868,
+        "quantize_mode": "stress",
+        "quantize_start": 0,
+        "verdict": "bad",
+        "warnings": [
+          "measured KV bytes/token 77760 differs from the analytic 62208 for method 'stock' (ranking uses the analytic figure; a scale/bias dtype other than fp16/bf16 is the usual cause)."
+        ],
+        "working_set_bytes_per_token": 0
+      },
+      "status": "ok"
+    },
+    {
+      "error_type": null,
+      "excluded_reason": null,
+      "label": "affine:8:4",
+      "message": null,
+      "point": {
+        "cost_bytes": 89856,
+        "label": "affine:8:4",
+        "quality": 0.019903200202564413
+      },
+      "ranked_footing": "quantizer_only",
+      "ranked_kl": 0.019903200202564413,
+      "ranked_verdict": "bad",
+      "report": {
+        "cache_supported": true,
+        "control_flip_rate": null,
+        "control_kl": null,
+        "corpus": {
+          "bos_policy": "first-chunk",
+          "chunk_length": 512,
+          "dataset_revision": "b08601e04326c79dfdd32d625aee71d232d685c3",
+          "final_chunk_policy": "drop",
+          "n_tokens": 51200,
+          "name": "wikitext-2-raw",
+          "normalization": "raw",
+          "split": "test",
+          "stride": 512,
+          "tokenizer_id": "mlx-community/DeepSeek-V2-Lite-Chat-4bit-mlx"
+        },
+        "device": "Apple M1 Max, 32 GB",
+        "drift_footing": "quantizer_only",
+        "flip_rate": 0.06058708414872799,
+        "kl": {
+          "max": 11.035806655883789,
+          "mean": 0.019903200202564413,
+          "median": 0.006767678074538708,
+          "p99": 0.21362688720226333
+        },
+        "kl_by_depth": [
+          {
+            "end": 63,
+            "kl_mean": 0.021083328425195016,
+            "kl_p99": 0.20694857090711605,
+            "n_positions": 6300,
+            "start": 0
+          },
+          {
+            "end": 127,
+            "kl_mean": 0.022463628733069233,
+            "kl_p99": 0.2462396365404131,
+            "n_positions": 6400,
+            "start": 63
+          },
+          {
+            "end": 191,
+            "kl_mean": 0.020221750798377368,
+            "kl_p99": 0.21617878422141082,
+            "n_positions": 6400,
+            "start": 127
+          },
+          {
+            "end": 255,
+            "kl_mean": 0.02036537758037384,
+            "kl_p99": 0.18009678587317476,
+            "n_positions": 6400,
+            "start": 191
+          },
+          {
+            "end": 319,
+            "kl_mean": 0.020244594044461346,
+            "kl_p99": 0.23187370687723166,
+            "n_positions": 6400,
+            "start": 255
+          },
+          {
+            "end": 383,
+            "kl_mean": 0.02100715722767602,
+            "kl_p99": 0.2327019391953948,
+            "n_positions": 6400,
+            "start": 319
+          },
+          {
+            "end": 447,
+            "kl_mean": 0.01681960414991565,
+            "kl_p99": 0.18159085676074072,
+            "n_positions": 6400,
+            "start": 383
+          },
+          {
+            "end": 511,
+            "kl_mean": 0.017038600164925435,
+            "kl_p99": 0.1893839839100838,
+            "n_positions": 6400,
+            "start": 447
+          }
+        ],
+        "kv_bits": null,
+        "kv_group_size": 64,
+        "kv_layers_quantized": null,
+        "kv_layers_skipped": null,
+        "kv_layers_total": null,
+        "kv_method": "affine",
+        "kv_method_params": {
+          "group_size": 64,
+          "k_bits": 8,
+          "v_bits": 4
+        },
+        "kv_method_provenance": {
+          "group_size": "64",
+          "k_bits": "8",
+          "known_runtime": "arozanov/mlx-lm@feature/turboquant-kv-cache (MixedQuantKVCache, mlx-lm 0.31.3) \u2014 not upstream mlx-lm",
+          "package": "mlx",
+          "v_bits": "4",
+          "version": "0.31.2"
+        },
+        "kv_partial": false,
+        "measured_kv_bytes_per_token": 119232,
+        "mlx_lm_version": "0.31.3",
+        "mlx_version": "0.31.2",
+        "model_id": "mlx-community/DeepSeek-V2-Lite-Chat-4bit-mlx",
+        "model_revision": "a33a8ad64477b9ca7a65b6dc1d8c06c997f87216",
+        "n_chunks": 100,
+        "n_positions": 51100,
+        "peak_memory_bytes": 10718880419,
+        "perplexity_delta": 0.007889938382977135,
+        "perplexity_quant": 11.701647823220846,
+        "perplexity_ref": 11.693757884837868,
+        "quantize_mode": "stress",
+        "quantize_start": 0,
+        "verdict": "bad",
+        "warnings": [
+          "measured KV bytes/token 119232 differs from the analytic 89856 for method 'affine' (ranking uses the analytic figure; a scale/bias dtype other than fp16/bf16 is the usual cause).",
+          "affine: per-tensor asymmetric bits have no shipped runtime \u2014 upstream mlx-lm's QuantizedKVCache is symmetric; the only known implementation is an idle mlx-lm fork. The probe dequantizes on fetch and rides standard SDPA, so this drift is the quantizer round-trip only, for a hypothetical deployment."
+        ],
+        "working_set_bytes_per_token": 221184
+      },
+      "status": "ok"
+    }
+  ]
+}
