@@ -96,7 +96,7 @@ def _patch_kv_compare(
     monkeypatch.setattr(
         cmp, "preload_check", lambda model, revision, *, allow_custom_code: PreloadResult({}, None)
     )
-    monkeypatch.setattr(cmp, "_load_model", lambda model_id, revision: (object(), object()))
+    monkeypatch.setattr(cmp, "_load_model", lambda model_id, revision, **_: (object(), object()))
     monkeypatch.setattr(cmp, "_kv_dims", lambda model: dims)
     calls: list[tuple[int, int]] = []
 
@@ -295,7 +295,7 @@ def test_compare_kv_model_loaded_once(monkeypatch, tmp_path):
     reports = {(4, 64): _fid((4, 64), 0.09), (8, 64): _fid((8, 64), 0.01)}
     load_calls: list[str] = []
 
-    def fake_load(model_id: str, revision) -> tuple[object, object]:
+    def fake_load(model_id: str, revision, **_) -> tuple[object, object]:
         load_calls.append(model_id)
         return (object(), object())
 
@@ -338,7 +338,7 @@ def test_compare_kv_threads_revision_and_tokenizer(monkeypatch, tmp_path):
 
     load_model_calls: list[dict[str, object]] = []
 
-    def fake_load_model(model_id: str, revision: "str | None") -> "tuple[object, object]":
+    def fake_load_model(model_id: str, revision: "str | None", **_) -> "tuple[object, object]":
         load_model_calls.append({"model_id": model_id, "revision": revision})
         return (object(), sentinel_tokenizer)
 
@@ -481,7 +481,7 @@ def test_compare_kv_corrupt_at_collect_yields_failed_result(monkeypatch, tmp_pat
     monkeypatch.setattr(
         cmp, "preload_check", lambda model, revision, *, allow_custom_code: PreloadResult({}, None)
     )
-    monkeypatch.setattr(cmp, "_load_model", lambda model_id, revision: (object(), object()))
+    monkeypatch.setattr(cmp, "_load_model", lambda model_id, revision, **_: (object(), object()))
     monkeypatch.setattr(cmp, "_kv_dims", lambda model: (16, 8, 64))
     monkeypatch.setattr(cmp, "_load_corpus_for_kv", lambda tok, mid, mc, *, chunk_length: object())
     # score_kv_config should NOT be called (pending=[]) — use a sentinel that would raise
@@ -523,7 +523,7 @@ def test_compare_kv_all_resumed_skips_model_load(monkeypatch, tmp_path):
 
     load_calls: list[str] = []
 
-    def fail_if_loaded(model_id: str, revision) -> tuple[object, object]:
+    def fail_if_loaded(model_id: str, revision, **_) -> tuple[object, object]:
         load_calls.append(model_id)
         return (object(), object())
 
@@ -926,7 +926,7 @@ def test_compare_kv_stress_partial_recomputed_for_deployment(monkeypatch, tmp_pa
     (tmp_path / "8_64.json").write_text(json.dumps(_kv_partial_env(8, 64, kl_mean=0.001, cost=200)))
     loaded = {"n": 0}
 
-    def _fake_load(model_id, revision):
+    def _fake_load(model_id, revision, **_):
         loaded["n"] += 1
         raise RuntimeError(
             "stop after load"
@@ -1324,7 +1324,7 @@ def test_compare_kv_runs_control_only_for_stock(monkeypatch, tmp_path):
     monkeypatch.setattr(
         cmp, "preload_check", lambda model, revision, *, allow_custom_code: PreloadResult({}, None)
     )
-    monkeypatch.setattr(cmp, "_load_model", lambda model_id, revision: (object(), object()))
+    monkeypatch.setattr(cmp, "_load_model", lambda model_id, revision, **_: (object(), object()))
     monkeypatch.setattr(cmp, "_kv_dims", lambda model: (16, 8, 64))
     monkeypatch.setattr(
         cmp,
@@ -1361,7 +1361,7 @@ def test_compare_kv_ranks_on_quantizer_only_kl(monkeypatch, tmp_path):
     monkeypatch.setattr(
         cmp, "preload_check", lambda model, revision, *, allow_custom_code: PreloadResult({}, None)
     )
-    monkeypatch.setattr(cmp, "_load_model", lambda model_id, revision: (object(), object()))
+    monkeypatch.setattr(cmp, "_load_model", lambda model_id, revision, **_: (object(), object()))
     monkeypatch.setattr(cmp, "_kv_dims", lambda model: (16, 8, 64))
     monkeypatch.setattr(
         cmp,
@@ -1561,7 +1561,9 @@ def test_compare_kv_control_gate_skip_names_real_remedy(monkeypatch, tmp_path):
         cmp, "preload_check", lambda model, revision, *, allow_custom_code: PreloadResult({}, None)
     )
     monkeypatch.setattr(
-        cmp, "_load_model", lambda model_id, revision: (types.SimpleNamespace(args=args), object())
+        cmp,
+        "_load_model",
+        lambda model_id, revision, **_: (types.SimpleNamespace(args=args), object()),
     )
     monkeypatch.setattr(cmp, "_kv_dims", lambda model: (2, 2, 64))
     monkeypatch.setattr(
@@ -1695,7 +1697,7 @@ def test_compare_kv_loads_exactly_the_checked_commit(monkeypatch, tmp_path):
     class _StopError(Exception):
         pass
 
-    def fake_load(model_id, revision):
+    def fake_load(model_id, revision, **_):
         seen["revision"] = revision
         raise _StopError
 
@@ -1776,3 +1778,24 @@ def test_compare_kv_adds_no_caps_warning_when_caps_are_installed(monkeypatch, tm
     for result in report.results:
         assert result.report is not None
         assert not any("memory caps" in w for w in result.report.warnings)
+
+
+@pytest.mark.parametrize("allow", [True, False])
+def test_compare_kv_passes_allow_custom_code_to_the_model_load(monkeypatch, tmp_path, allow):
+    """Bug: compare kv drops --allow-custom-code before the tokenizer load, so an opted-in run
+    still refuses a tokenizer that ships its own code (the default must stay False)."""
+    _patch_kv_compare(monkeypatch, {})
+    received: list[object] = []
+
+    class _StopError(Exception):
+        pass
+
+    def recording_load_model(model_id, revision, **kw):
+        received.append(kw.get("allow_custom_code", "<not passed>"))
+        raise _StopError
+
+    monkeypatch.setattr(cmp, "_load_model", recording_load_model)
+    kwargs = {"allow_custom_code": True} if allow else {}
+    with pytest.raises(_StopError):
+        cmp.compare_kv_fidelity("org/m", [(4, 64), (8, 64)], artifacts_dir=tmp_path, **kwargs)
+    assert received == [allow]

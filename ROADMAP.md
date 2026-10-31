@@ -4,6 +4,7 @@
 
 ## Released
 
+- **0.11.0** — Wider real-repo coverage. A second weight ladder (five Qwen3-4B-Instruct-2507 repos against their bf16 reference), a KV comparison on DeepSeek-V2-Lite-Chat, and a methodology section on MLA models. A model whose attention cannot run on the chosen KV cache is refused before scoring, a tokenizer's own code is governed by `--allow-custom-code`, and partial downloads and a shadowing TurboQuant install are caught before a run starts.
 - **0.10.0** — Hardening. The memory guards count model weights, cover wrapper architectures and run before the weights probe loads anything; a watchdog aborts a run that crosses the memory ceiling. Repos whose config would execute their own code are refused unless you opt in, a NaN can no longer be ranked, bad parameters and missing extras fail before a model loads, and partial-coverage reports say so in the badge and headline.
 - **0.9.0** — The `kv` probe measures hybrid attention models (full-attention layers interleaved with sliding-window or state-space layers) on the layers whose cache can be quantized, rather than refusing the whole model. The report records how many layers were quantized and which types were skipped, with a note that mlx-lm does not run this mixed cache during generation.
 - **0.8.0** — Weight reports carry the quantization geometry measured on the loaded model (per-module bits and group sizes, quantizable modules left at full precision, effective bits per weight), `compare weights` shows that effective precision as a `bits/wt` column, and both weight commands accept a `repo@revision` pin. Adds a committed Qwen3-0.6B ladder ranking five repos, two of them published as DWQ and AWQ quantizations, against one bf16 reference.
@@ -21,4 +22,4 @@
 
 - **Threshold validation** — a one-off check of the badge thresholds against downstream task accuracy.
 - **More cache methods** — TurboQuant's layer-adaptive configuration once its silently-ignored `k_bits`/`v_bits` bug is resolved upstream, and a second port.
-- **Wider attention coverage** — MLA fidelity (whether measuring the compressed latent is meaningful) and true sliding-window quantization, which needs a quantized `RotatingKVCache` upstream in mlx-lm. Per-layer partial coverage of hybrid models shipped in 0.9.0.
+- **Wider attention coverage** — a latent-cache measurement on a real corpus (0.11.0 documents the two MLA cache layouts and refuses a model whose cache cannot be quantized, but has not scored a latent cache beyond a 64-token run check) and true sliding-window quantization, which needs a quantized `RotatingKVCache` upstream in mlx-lm. Per-layer partial coverage of hybrid models shipped in 0.9.0.

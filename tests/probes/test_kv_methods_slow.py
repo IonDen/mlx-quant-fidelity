@@ -16,7 +16,7 @@ Recorded values (main-thread run 2026-08-24, M1 Max 32 GB, mlx 0.31.2, port 0.3.
 import mlx.core as mx
 import pytest
 from tests.probes.port_skip import port_or_skip
-from tests.probes.test_kv_oracles import MODEL, _tiny_corpus
+from tests.probes.test_kv_oracles import MODEL, MODEL_REVISION, _tiny_corpus
 
 from mlx_quant_fidelity.errors import ExactZeroError
 from mlx_quant_fidelity.probes.kv import score_kv_config
@@ -40,7 +40,7 @@ def _port_or_skip():
 def loaded():
     from mlx_lm import load
 
-    return load(MODEL)
+    return load(MODEL, revision=MODEL_REVISION)
 
 
 @pytest.fixture(scope="module")

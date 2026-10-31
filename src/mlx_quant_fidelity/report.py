@@ -6,25 +6,39 @@ import dataclasses
 import json
 import math
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Self, cast
+from typing import Self, cast
 
 from mlx_quant_fidelity.corpora.provenance import CorpusProvenance
 from mlx_quant_fidelity.errors import ReportSchemaError
 from mlx_quant_fidelity.metrics import DepthBucketSummary, ScalarSummary
-
-if TYPE_CHECKING:
-    from mlx_quant_fidelity.ranking import RankPoint
-
+from mlx_quant_fidelity.ranking import RankPoint
 
 METHOD_NOT_RECORDED_WARNING = (
-    "Quantization method is not recorded in the repo config — mlx-lm's DWQ, AWQ and dynamic "
-    "quantizers write a quantization block that records only geometry (bits, group sizes, "
-    "per-module overrides), never the recipe. This report describes the geometry of the loaded "
-    "model, not the method that produced it."
+    "The recipe that produced this quantization is not recorded in a form this tool can check: "
+    "mlx-lm's DWQ, AWQ and dynamic quantizers write a quantization block that records only "
+    "geometry (bits, group sizes, per-module overrides), never the recipe. This report describes "
+    "the geometry of the loaded model, not the method that produced it."
 )
 """The standing caveat every weight report carries. Lives here, not in ``probes.weights``, so
 the renderer can re-add it to a comparison assembled from partials written before 0.8.0 without
 ``report.py`` importing the probe (and with it mlx-lm)."""
+
+_LEGACY_METHOD_NOT_RECORDED_WARNINGS = (
+    "Quantization method is not recorded in the repo config — mlx-lm's DWQ, AWQ and dynamic "
+    "quantizers write a quantization block that records only geometry (bits, group sizes, "
+    "per-module overrides), never the recipe. This report describes the geometry of the loaded "
+    "model, not the method that produced it.",
+)
+"""Earlier wordings of the caveat (0.8.0 to 0.10.x). A saved weight report carrying one reads
+back with the current wording, so a resumed comparison prints the caveat once, not twice."""
+
+
+def _current_method_warning(warnings: tuple[str, ...]) -> tuple[str, ...]:
+    """``warnings`` with any earlier caveat wording replaced by the current one."""
+    return tuple(
+        METHOD_NOT_RECORDED_WARNING if w in _LEGACY_METHOD_NOT_RECORDED_WARNINGS else w
+        for w in warnings
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -437,7 +451,9 @@ def weight_report_from_dict(d: dict[str, object]) -> WeightFidelityReport:
         if not isinstance(kl, dict) or not isinstance(corpus, dict):
             raise ReportSchemaError("persisted report 'kl'/'corpus' must be dicts")
         fields = {**d, "kl": ScalarSummary(**kl), "corpus": CorpusProvenance(**corpus)}
-        fields["warnings"] = tuple(cast("list[str]", fields.get("warnings") or []))
+        fields["warnings"] = _current_method_warning(
+            tuple(cast("list[str]", fields.get("warnings") or []))
+        )
         geometry = d.get("quant_geometry")
         if geometry is not None:
             ok = isinstance(geometry, (list, tuple)) and all(
@@ -459,6 +475,106 @@ def weight_report_from_dict(d: dict[str, object]) -> WeightFidelityReport:
         raise
     except (KeyError, TypeError) as exc:
         raise ReportSchemaError(f"persisted WeightFidelityReport is malformed: {exc}") from exc
+
+
+_ROW_STATUSES = ("ok", "failed", "skipped")
+
+
+def _row_report_from_dict(d: object) -> FidelityReport | WeightFidelityReport | None:
+    """A row's report, typed by its own keys: a weight report names `quant_model_id`."""
+    if d is None:
+        return None
+    if not isinstance(d, dict):
+        raise ReportSchemaError("persisted comparison row 'report' must be a dict or null")
+    if "quant_model_id" in d:
+        return weight_report_from_dict(d)
+    if "model_id" in d:
+        return fidelity_report_from_dict(d)
+    raise ReportSchemaError("persisted comparison row 'report' is neither a KV nor a weight report")
+
+
+def _rank_point_from_dict(d: object) -> RankPoint | None:
+    if d is None:
+        return None
+    if not isinstance(d, dict):
+        raise ReportSchemaError("persisted comparison row 'point' must be a dict or null")
+    label, quality, cost = d["label"], d["quality"], d["cost_bytes"]
+    if (
+        not isinstance(label, str)
+        or isinstance(quality, bool)
+        or not isinstance(quality, (int, float))
+        or isinstance(cost, bool)
+        or not isinstance(cost, int)
+    ):
+        raise ReportSchemaError("persisted comparison row 'point' has a mistyped field")
+    return RankPoint(label=label, quality=float(quality), cost_bytes=cost)
+
+
+def _target_result_from_dict(row: object) -> ComparisonTargetResult:
+    if not isinstance(row, dict):
+        raise ReportSchemaError("persisted comparison row must be a dict")
+    label, status = row["label"], row["status"]
+    if not isinstance(label, str) or status not in _ROW_STATUSES:
+        raise ReportSchemaError(
+            f"persisted comparison row needs a string 'label' and a status in {_ROW_STATUSES}"
+        )
+    return ComparisonTargetResult(
+        label=label,
+        status=status,
+        report=_row_report_from_dict(row["report"]),
+        point=_rank_point_from_dict(row["point"]),
+        excluded_reason=row["excluded_reason"],
+        error_type=row["error_type"],
+        message=row["message"],
+        ranked_kl=row.get("ranked_kl"),
+        ranked_verdict=row.get("ranked_verdict"),
+        ranked_footing=row.get("ranked_footing"),
+    )
+
+
+def comparison_report_from_dict(d: dict[str, object]) -> ComparisonReport:
+    """Rehydrate a ComparisonReport from `render_comparison_json` output (committed samples).
+
+    Each row's report goes through `fidelity_report_from_dict` or `weight_report_from_dict`, so
+    a malformed row raises the same `ReportSchemaError` a malformed partial does.
+    """
+    try:
+        results, corpus = d["results"], d["corpus"]
+        frontier, dominated = d["frontier"], d["dominated"]
+        if not isinstance(results, list):
+            raise ReportSchemaError("persisted comparison 'results' must be a list")
+        if corpus is not None and not isinstance(corpus, dict):
+            raise ReportSchemaError("persisted comparison 'corpus' must be a dict or null")
+        if not isinstance(frontier, list) or not all(isinstance(f, str) for f in frontier):
+            raise ReportSchemaError("persisted comparison 'frontier' must be a list of labels")
+        if not isinstance(dominated, list) or not all(
+            isinstance(p, list) and len(p) == 2 and all(isinstance(x, str) for x in p)
+            for p in dominated
+        ):
+            raise ReportSchemaError(
+                "persisted comparison 'dominated' must be a list of [label, dominator] pairs"
+            )
+        if d["mode"] not in ("weight", "kv"):
+            raise ReportSchemaError("persisted comparison 'mode' must be 'weight' or 'kv'")
+        return ComparisonReport(
+            mode=d["mode"],
+            reference=cast("str | None", d["reference"]),
+            model=cast("str | None", d["model"]),
+            corpus=CorpusProvenance(**corpus) if corpus is not None else None,
+            quantize_start=cast("int | None", d["quantize_start"]),
+            quantize_mode=cast("str | None", d["quantize_mode"]),
+            budget=cast("str | None", d["budget"]),
+            results=tuple(_target_result_from_dict(row) for row in results),
+            frontier=tuple(frontier),
+            dominated=tuple((p[0], p[1]) for p in dominated),
+            budget_pick=cast("str | None", d["budget_pick"]),
+            mlx_version=cast("str", d["mlx_version"]),
+            mlx_lm_version=cast("str", d["mlx_lm_version"]),
+        )
+    except ReportSchemaError:
+        raise
+    except (KeyError, TypeError) as exc:
+        raise ReportSchemaError(f"persisted ComparisonReport is malformed: {exc}") from exc
 
 
 def render_comparison_json(report: ComparisonReport) -> str:

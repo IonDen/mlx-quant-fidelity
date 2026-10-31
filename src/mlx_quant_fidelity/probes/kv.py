@@ -24,6 +24,7 @@ from mlx_quant_fidelity.errors import (
     CompareConfigError,
     CorpusError,
     LogitsBudgetError,
+    QuantFidelityError,
     QuantizeStartError,
 )
 from mlx_quant_fidelity.metrics import bucket_by_depth, kl_divergence, summarize, top_token_flips
@@ -37,7 +38,7 @@ from mlx_quant_fidelity.probes._paired import (
     _require_finite,
     report_chunk_progress,
 )
-from mlx_quant_fidelity.probes._preload import preload_check
+from mlx_quant_fidelity.probes._preload import load_checked, preload_check
 from mlx_quant_fidelity.probes.kv_methods import (
     ControlLaneMethod,
     PartialCoverageMethod,
@@ -424,6 +425,49 @@ def _gate_extra_bytes(
     return method_ws_bytes, control_bytes, cache_bytes
 
 
+# The exception types a forward raises when its attention cannot consume what the cache
+# returns. Measured: AttributeError ("'tuple' object has no attribute 'swapaxes'",
+# mlx_lm/models/deepseek_v3.py on QuantizedKVCache, 2026-10-24). TypeError (an op's binding
+# refusing a packed tuple) and NotImplementedError (an unimplemented cache path) are the same
+# family. RuntimeError stays in for the partial smoke's established contract, but a memory or
+# GPU-execution failure is never a mismatch. ValueError is left out: the one known ValueError
+# mismatch (mlx-lm's packed-width bug) is translated by the method's guard, and any other
+# ValueError propagates as itself.
+_CACHE_MISMATCH_ERRORS = (AttributeError, TypeError, RuntimeError)
+_NOT_A_MISMATCH_MARKERS = ("memory", "alloc", "command buffer")
+
+
+def _is_cache_mismatch(exc: Exception) -> bool:
+    """True when ``exc`` from the smoke forward means "this cache cannot run this attention"."""
+    if isinstance(exc, QuantFidelityError) or not isinstance(exc, _CACHE_MISMATCH_ERRORS):
+        return False
+    if isinstance(exc, RuntimeError):  # NotImplementedError included
+        text = str(exc).lower()
+        return not any(marker in text for marker in _NOT_A_MISMATCH_MARKERS)
+    return True
+
+
+def _smoke_forward(model: object, cache: list[object], message: str) -> None:
+    """One-token forward on ``cache``; a cache mismatch becomes CacheNotQuantizableError.
+
+    Anything else (memory, a bad shard, a package error) propagates unchanged.
+    """
+    try:
+        mx.eval(model(mx.array([[0]]), cache=cache))  # type: ignore[operator]
+    except Exception as exc:
+        if not _is_cache_mismatch(exc):
+            raise
+        raise CacheNotQuantizableError(f"{message}: {type(exc).__name__}: {exc}") from exc
+
+
+def _uniform_mismatch_message(method: KVCacheMethod, model_type: str) -> str:
+    return (
+        f"this model's attention (model_type {model_type!r}) does not run on the "
+        f"{method.name!r} method's quantized KV cache; a dequantize-on-fetch method hands the "
+        "attention plain arrays and may run it: try `affine:<k>:<v>` or `turboquant`"
+    )
+
+
 def _resolve_partial_coverage(
     model: object,
     method: KVCacheMethod,
@@ -431,15 +475,19 @@ def _resolve_partial_coverage(
     quantize_start: int,
     control_m: KVCacheMethod | None,
     probe_warnings: list[str],
+    model_type: str = "unknown",
 ) -> tuple[int, LayerCoverage | None]:
-    """Probe the cache once: layer count, capability gate, and per-layer partial coverage.
+    """Probe the cache once: layer count, capability gate, partial coverage, smoke forward.
 
     A hybrid model passes ``probe_capability`` as long as ONE layer is quantizable, so this
     records which layers to quantize (stock only; quantizer-only methods do not implement the
-    capability). A partial model is refused in deployment mode and with a control lane, and is
-    smoke-tested with a one-token forward on the mixed cache; the coverage note is appended
-    to ``probe_warnings``. ``make_prompt_cache`` is called through the module global so tests
-    that monkeypatch ``kv.make_prompt_cache`` keep binding.
+    capability). A partial model is refused in deployment mode and with a control lane; the
+    coverage note is appended to ``probe_warnings``. Every run then gets ONE one-token smoke
+    forward on the cache it will score (the mixed cache for a partial model, the method's
+    uniform cache otherwise), so an attention that cannot consume that cache is refused with
+    CacheNotQuantizableError before any chunk is scored; the smoke cache is released before
+    scoring. ``make_prompt_cache`` is called through the module global so tests that
+    monkeypatch ``kv.make_prompt_cache`` keep binding.
     """
     probe_cache = make_prompt_cache(model)
     n_layers = len(probe_cache)
@@ -469,16 +517,25 @@ def _resolve_partial_coverage(
         # full-precision cache: probe_capability only proves each layer quantizes in isolation,
         # not that the model runs over the heterogeneous list. A one-token forward here turns a
         # mid-loop crash into a clean, package-rooted error before any chunk is scored.
-        smoke_cache = method.make_partial_cache(make_prompt_cache(model), partial_coverage)
-        try:
-            mx.eval(model(mx.array([[0]]), cache=smoke_cache))  # type: ignore[operator]
-        except Exception as exc:
-            raise CacheNotQuantizableError(
-                "this model's forward does not run on a mixed quantized/full-precision KV cache "
-                f"(partial coverage): {exc}"
-            ) from exc
-        del smoke_cache
-        mx.clear_cache()
+        smoke_message = (
+            "this model's forward does not run on a mixed quantized/full-precision KV cache "
+            f"(partial coverage, model_type {model_type!r})"
+        )
+    else:
+        # The uniform cache can fail the same way: deepseek_v3 caches its latent and calls
+        # .swapaxes on what QuantizedKVCache returns (a packed tuple), so mlx-lm's stock cache
+        # dies on the first forward while a dequantize-on-fetch cache runs.
+        smoke_message = _uniform_mismatch_message(method, model_type)
+    # Under the method's guard, like every scored forward, so a crash the method already
+    # translates (the stock packed-width belt) surfaces with its own message.
+    with method.guard():
+        if partial_coverage is not None and isinstance(method, PartialCoverageMethod):
+            smoke_cache = method.make_partial_cache(make_prompt_cache(model), partial_coverage)
+        else:
+            smoke_cache = method.make_cache(n_layers=n_layers)
+        _smoke_forward(model, smoke_cache, smoke_message)
+    del smoke_cache
+    mx.clear_cache()
     return n_layers, partial_coverage
 
 
@@ -679,6 +736,7 @@ def score_kv_config(
         quantize_start=quantize_start,
         control_m=control_m,
         probe_warnings=probe_warnings,
+        model_type=model_type,
     )
 
     mode = "stress" if quantize_start == 0 else "deployment"
@@ -899,7 +957,8 @@ def measure_kv_fidelity(
             :func:`~mlx_quant_fidelity.probes.kv.score_kv_config`'s ``control`` docs.
 
         allow_custom_code: Let a repo whose config.json names a ``model_file`` run its own
-            Python code on load (off by default; mlx-lm executes that file).
+            Python code on load (off by default; mlx-lm executes that file), and let a tokenizer
+            that ships its own code load it.
         progress: Optional callback receiving `chunk i/n` lines about every tenth chunk.
             Silent when None (the default).
 
@@ -966,8 +1025,12 @@ def measure_kv_fidelity(
     # lazy=True: mlx-lm's eager load evaluates every parameter before returning, which would
     # make the "weights alone exceed" refusal in score_kv_config fire after they are resident.
     # model_resident_bytes reads nbytes metadata; the first forward materialises the weights.
-    _loaded = load(  # pragma: no cover
-        model_id, revision=checked.load_revision(model_revision), lazy=True
+    _loaded = load_checked(  # pragma: no cover
+        load,
+        model_id,
+        allow_custom_code=allow_custom_code,
+        revision=checked.load_revision(model_revision),
+        lazy=True,
     )
     model, tokenizer = _loaded[0], _loaded[1]  # pragma: no cover
 

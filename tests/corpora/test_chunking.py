@@ -52,6 +52,10 @@ def test_invalid_chunk_length_raises():
 # Network-gated test: live Hub fetch + full load_wikitext2 pipeline
 # ---------------------------------------------------------------------------
 
+_TOKENIZER_MODEL = "mlx-community/Llama-3.2-1B-Instruct-4bit"
+# Cached pin: offline, an unpinned `main` has no cached refs/main to resolve to.
+_TOKENIZER_REVISION = "08231374eeacb049a0eade7922910865b8fce912"
+
 
 @pytest.mark.network
 def test_load_wikitext2_live_provenance_and_chunks():
@@ -64,8 +68,10 @@ def test_load_wikitext2_live_provenance_and_chunks():
 
     from mlx_quant_fidelity.corpora.wikitext import load_wikitext2
 
-    # Use a small model just for its tokenizer — avoid loading weights
-    _model, tokenizer = mlx_load("mlx-community/Llama-3.2-1B-Instruct-4bit")
+    # Use a small model just for its tokenizer — avoid loading weights: `lazy=True` skips the
+    # parameter eval at the end of `load`, so the weights are never materialized.
+    _model, tokenizer = mlx_load(_TOKENIZER_MODEL, revision=_TOKENIZER_REVISION, lazy=True)
+    del _model
 
     corpus = load_wikitext2(tokenizer, chunk_length=512, drop_final_partial=True, max_chunks=5)
 

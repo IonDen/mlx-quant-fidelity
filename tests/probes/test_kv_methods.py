@@ -1157,3 +1157,105 @@ def test_present_distribution_without_git_record_is_named_a_wrong_install(monkey
     monkeypatch.setattr("mlx_quant_fidelity.probes.kv_methods._turboquant_direct_url", lambda: None)
     with pytest.raises(MethodUnavailableError, match="squatter"):
         TurboQuantKVMethod(bits=4).probe_capability([KVCache()])
+
+
+# --- the module-origin check (a shadowing turboquant_mlx is refused before import) ---------
+
+
+def _write_package(root, sentinel):
+    """A `turboquant_mlx/` package under ``root`` whose import writes ``sentinel``."""
+    pkg = root / "turboquant_mlx"
+    pkg.mkdir(parents=True)
+    (pkg / "__init__.py").write_text(
+        f"import pathlib\npathlib.Path({str(sentinel)!r}).write_text('ran')\n"
+    )
+    return pkg / "__init__.py"
+
+
+def _pinned_distribution(site, sentinel, *, record=True):
+    """A real on-disk `turboquant-mlx` install under ``site``: package files, a RECORD that lists
+    them, and a direct_url.json that names the pinned arozanov git commit."""
+    import importlib.metadata
+
+    _write_package(site, sentinel)
+    info = site / "turboquant_mlx-0.3.0.dist-info"
+    info.mkdir()
+    (info / "METADATA").write_text("Metadata-Version: 2.1\nName: turboquant-mlx\nVersion: 0.3.0\n")
+    if record:
+        (info / "RECORD").write_text(
+            "turboquant_mlx/__init__.py,,\nturboquant_mlx-0.3.0.dist-info/RECORD,,\n"
+        )
+    (info / "direct_url.json").write_text(
+        json.dumps(
+            {
+                "url": "https://github.com/arozanov/turboquant-mlx",
+                "vcs_info": {"vcs": "git", "commit_id": TURBOQUANT_PINNED_COMMIT},
+            }
+        )
+    )
+    return importlib.metadata.PathDistribution(info)
+
+
+def _serve_distribution(monkeypatch, dist):
+    """Route the stdlib metadata lookup for turboquant-mlx to ``dist``; forget any cached port."""
+    import importlib.metadata
+
+    real = importlib.metadata.distribution
+
+    def _distribution(distribution_name):
+        if distribution_name.lower().replace("_", "-") == "turboquant-mlx":
+            return dist
+        return real(distribution_name)
+
+    monkeypatch.setattr(importlib.metadata, "distribution", _distribution)
+    # setitem then delitem: the undo restores whatever was there (the real port, --hide-port's
+    # None, or nothing), so a module imported from tmp_path never leaks into later tests.
+    monkeypatch.setitem(sys.modules, "turboquant_mlx", None)
+    monkeypatch.delitem(sys.modules, "turboquant_mlx")
+
+
+def test_shadowing_package_is_refused_without_running_it(monkeypatch, tmp_path):
+    """Bug: the gate trusts direct_url.json alone, so a `turboquant_mlx/` directory earlier on
+    sys.path than the pinned install is imported, and its code runs."""
+    from mlx_quant_fidelity.probes.kv_methods import _import_turboquant
+
+    _serve_distribution(monkeypatch, _pinned_distribution(tmp_path / "site", tmp_path / "real-ran"))
+    monkeypatch.syspath_prepend(str(tmp_path / "site"))
+    shadow_sentinel = tmp_path / "shadow-ran"
+    _write_package(tmp_path / "shadow", shadow_sentinel)
+    monkeypatch.syspath_prepend(str(tmp_path / "shadow"))
+
+    with pytest.raises(MethodUnavailableError, match="not a file of the installed"):
+        _import_turboquant()
+    assert not shadow_sentinel.exists()
+    assert not (tmp_path / "real-ran").exists()
+    assert "turboquant_mlx" not in sys.modules
+
+
+def test_module_from_the_pinned_distribution_still_imports(monkeypatch, tmp_path):
+    """Bug: the origin check compares the module path against the RECORD's relative names (or
+    an unresolved path), so the genuine pinned install is refused as a shadow."""
+    from mlx_quant_fidelity.probes.kv_methods import _import_turboquant
+
+    sentinel = tmp_path / "real-ran"
+    _serve_distribution(monkeypatch, _pinned_distribution(tmp_path / "site", sentinel))
+    monkeypatch.syspath_prepend(str(tmp_path / "site"))
+
+    module = _import_turboquant()
+    assert sentinel.read_text() == "ran"
+    assert module.__file__ == str(tmp_path / "site" / "turboquant_mlx" / "__init__.py")
+
+
+def test_distribution_without_a_file_list_is_refused_without_running_it(monkeypatch, tmp_path):
+    """Bug: a distribution that lists no files (no RECORD) makes the origin check vacuous, so
+    any `turboquant_mlx` on sys.path is imported."""
+    from mlx_quant_fidelity.probes.kv_methods import _import_turboquant
+
+    sentinel = tmp_path / "real-ran"
+    dist = _pinned_distribution(tmp_path / "site", sentinel, record=False)
+    _serve_distribution(monkeypatch, dist)
+    monkeypatch.syspath_prepend(str(tmp_path / "site"))
+
+    with pytest.raises(MethodUnavailableError, match="not a file of the installed"):
+        _import_turboquant()
+    assert not sentinel.exists()
