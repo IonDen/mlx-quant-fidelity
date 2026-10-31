@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.metadata
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
@@ -26,7 +27,7 @@ from mlx_quant_fidelity.probes._paired import (
     _reduce_pair,
     report_chunk_progress,
 )
-from mlx_quant_fidelity.probes._preload import preload_check
+from mlx_quant_fidelity.probes._preload import load_checked, preload_check
 from mlx_quant_fidelity.probes.kv import MAX_CHUNK_LENGTH, _paired_logits_bytes
 from mlx_quant_fidelity.report import (
     METHOD_NOT_RECORDED_WARNING,  # re-exported: the standing caveat lives with the renderer
@@ -101,6 +102,9 @@ def extract_quant_meta(config: dict[str, object]) -> QuantMeta | None:
 Geometry = tuple[tuple[int, int, int], ...]
 """Measured quantization geometry: sorted (bits, group_size, module_count) triples."""
 
+LeafModules = list[tuple[str, Any]]
+"""mlx-lm's leaf view of a model: ``(path, module)`` for every childless module."""
+
 
 def _is_module(obj: object) -> bool:
     from mlx.nn.layers.base import Module as _Module
@@ -108,28 +112,39 @@ def _is_module(obj: object) -> bool:
     return isinstance(obj, _Module)
 
 
-def _leaf_modules(model: Module) -> list[tuple[str, Any]]:
+def _leaf_modules(model: Module) -> LeafModules:
     """mlx-lm's leaf view (`get_total_parameters`): every childless module, with its path."""
     return cast(
-        "list[tuple[str, Any]]",
+        "LeafModules",
         tree_flatten(model.leaf_modules(), is_leaf=_is_module),  # type: ignore[no-untyped-call]
     )
 
 
-def measured_geometry(model: Module) -> tuple[Geometry, int]:
+def _quant_bits(module: object) -> int | None:
+    """The module's quantizer width: its ``bits`` when that is a Python int, else None.
+
+    mlx's quantized layers carry plain ints. An array-valued ``bits`` is model state (nn.Module
+    stores arrays as parameters), and coercing it would host-sync once per module.
+    """
+    return _int_or_none(getattr(module, "bits", None))
+
+
+def measured_geometry(model: Module, *, leaves: LeafModules | None = None) -> tuple[Geometry, int]:
     """Read the loaded model's quantization geometry from its modules, not its config.
 
     Returns ``(geometry, n_full_precision)``: sorted ``(bits, group_size, module_count)`` triples
-    over leaf modules exposing ``bits`` (mlx's quantized layers all carry ``bits`` and
-    ``group_size`` — the same duck-typing mlx-lm uses), and the number of leaves that expose
-    ``to_quantized`` but carry no ``bits``: quantizable modules the quantizer left at full
-    precision. Norms and RoPE have no ``to_quantized`` and are never counted.
+    over leaf modules exposing an int ``bits`` (mlx's quantized layers all carry ``bits`` and
+    ``group_size`` — the same duck-typing mlx-lm uses; a layer without an int ``group_size`` is
+    counted under group 0), and the number of leaves that expose ``to_quantized`` but carry no
+    ``bits``: quantizable modules the quantizer left at full precision. Norms and RoPE have no
+    ``to_quantized`` and are never counted. ``leaves`` reuses an already-walked leaf view.
     """
     counts: dict[tuple[int, int], int] = {}
     n_full_precision = 0
-    for _, module in _leaf_modules(model):
-        if hasattr(module, "bits"):
-            key = (int(module.bits), int(module.group_size))
+    for _, module in _leaf_modules(model) if leaves is None else leaves:
+        bits = _quant_bits(module)
+        if bits is not None:
+            key = (bits, _int_or_none(getattr(module, "group_size", None)) or 0)
             counts[key] = counts.get(key, 0) + 1
         elif hasattr(module, "to_quantized"):
             n_full_precision += 1
@@ -137,7 +152,7 @@ def measured_geometry(model: Module) -> tuple[Geometry, int]:
     return geometry, n_full_precision
 
 
-def bits_per_weight(model: Module) -> float:
+def bits_per_weight(model: Module, *, leaves: LeafModules | None = None) -> float:
     """Effective bits per weight over the whole model, as mlx-lm defines it.
 
     Numerator: bytes of every array in the module tree (``mlx_lm.utils.compute_bits_per_weight``
@@ -146,14 +161,16 @@ def bits_per_weight(model: Module) -> float:
     quantized module contributes ``weight.size * 32 // bits`` (+ its layer bias), any other
     module its ``parameters()`` sizes. Two quirks are inherited on purpose so the number matches
     what ``mlx_lm.convert`` prints: ``_``-prefixed arrays count as bytes but not params, and a
-    quantized module is recognised by duck-typed ``bits``.
+    quantized module is recognised by duck-typed int ``bits``. ``leaves`` reuses an
+    already-walked leaf view.
     """
     flat = cast("list[tuple[str, object]]", tree_flatten(model))
     total_bytes = sum(a.nbytes for _, a in flat if isinstance(a, mx.array))
     params = 0
-    for _, module in _leaf_modules(model):
-        if hasattr(module, "bits"):
-            params += int(module.weight.size) * 32 // int(module.bits)
+    for _, module in _leaf_modules(model) if leaves is None else leaves:
+        bits = _quant_bits(module)
+        if bits is not None:
+            params += int(module.weight.size) * 32 // bits
             if hasattr(module, "bias"):
                 params += int(module.bias.size)
         else:
@@ -233,12 +250,36 @@ _PREFLIGHT_HEADROOM_BYTES = 2 * 1024**3
 _DEFAULT_WINDOW = 512  # the auto-loaded WikiText-2 window (matches the kv probe's default)
 
 
+_SHARD_INDEX = "model.safetensors.index.json"
+
+
+def _missing_shard_index(path: Path) -> dict[str, Any] | None:
+    """The snapshot's shard index when it lists a shard that is not on disk, else None.
+
+    An interrupted download leaves a subset of the shards; summing those under-sizes the model.
+    """
+    index_path = path / _SHARD_INDEX
+    if not index_path.is_file():
+        return None
+    index = cast("dict[str, Any]", json.loads(index_path.read_text()))
+    shards = set(index["weight_map"].values())
+    return None if all((path / name).is_file() for name in shards) else index
+
+
+def _index_total_size(index: dict[str, Any]) -> int | None:
+    """The index's ``metadata.total_size`` (tensor bytes) when it is a positive int, else None."""
+    metadata = index.get("metadata")
+    total = metadata.get("total_size") if isinstance(metadata, dict) else None
+    return total if isinstance(total, int) and not isinstance(total, bool) and total > 0 else None
+
+
 def _resolve_weight_bytes(repo: str, revision: str | None) -> int | None:
     """Sum the repo's `model*.safetensors` bytes (local dir or already-cached snapshot), or None.
 
     Best-effort: returns None for an uncached HF repo (local_files_only) or any error, so a
     measurement is never aborted by a missing byte count. Mirrors mlx-lm's `model*.safetensors`
-    glob (utils.py) — not all `*.safetensors`.
+    glob (utils.py) — not all `*.safetensors`. A snapshot whose shard index lists a shard that
+    is not on disk is sized from the index's ``metadata.total_size``, or None without one.
     """
     try:
         path = Path(repo)
@@ -246,6 +287,9 @@ def _resolve_weight_bytes(repo: str, revision: str | None) -> int | None:
             from huggingface_hub import snapshot_download
 
             path = Path(snapshot_download(repo, revision=revision, local_files_only=True))
+        partial = _missing_shard_index(path)
+        if partial is not None:
+            return _index_total_size(partial)
         total = sum(f.stat().st_size for f in path.glob("model*.safetensors"))
         return total or None
     except Exception:
@@ -359,7 +403,8 @@ def measure_weight_fidelity(
         quant_revision: Optional git revision for the quantized repo.
         reference_revision: Optional git revision for the reference repo.
         allow_custom_code: Let a repo whose config.json names a ``model_file`` run its own
-            Python code on load (off by default; mlx-lm executes that file). Checked for both.
+            Python code on load (off by default; mlx-lm executes that file), and let a tokenizer
+            that ships its own code load it. Checked for both.
         progress: Optional callback receiving ``chunk i/n`` lines about every tenth chunk.
             Silent when ``None`` (the default).
     """
@@ -407,21 +452,26 @@ def measure_weight_fidelity(
     )
     caps_note = caps_warning(install_memory_caps())  # install before any model load
 
-    ref_model, tokenizer, reference_config = load(  # type: ignore[misc]
+    ref_model, tokenizer, reference_config = load_checked(
+        load,
         reference_model_id,
+        allow_custom_code=allow_custom_code,
         revision=reference_checked.load_revision(reference_revision),
         return_config=True,
     )
-    quant_model, quant_tok, quant_config = load(  # type: ignore[misc]
+    quant_model, quant_tok, quant_config = load_checked(
+        load,
         quant_model_id,
+        allow_custom_code=allow_custom_code,
         revision=quant_checked.load_revision(quant_revision),
         return_config=True,
     )
     quant_meta, reference_bits = _gate_configs(
         quant_config=quant_config, reference_config=reference_config
     )
-    geometry, n_full_precision = measured_geometry(cast("Module", quant_model))
-    bpw = bits_per_weight(cast("Module", quant_model))
+    quant_leaves = _leaf_modules(cast("Module", quant_model))
+    geometry, n_full_precision = measured_geometry(cast("Module", quant_model), leaves=quant_leaves)
+    bpw = bits_per_weight(cast("Module", quant_model), leaves=quant_leaves)
     precision = "mixed" if len({b for b, _, _ in geometry}) > 1 else "uniform"
     warnings = [*_tokenizer_warnings(tokenizer, quant_tok), METHOD_NOT_RECORDED_WARNING]
     if reference_bits is not None:

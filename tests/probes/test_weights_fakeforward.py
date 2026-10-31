@@ -17,12 +17,15 @@ from mlx_quant_fidelity.probes.weights import (
     TOKENIZER_ASSUMPTION_WARNING,
     QuantMeta,
     _gate_configs,
+    _leaf_modules,
     _preflight_memory,
     _resolve_weight_bytes,
     _score_weight_chunk,
     _tokenizer_warnings,
+    bits_per_weight,
     extract_quant_meta,
     measure_weight_fidelity,
+    measured_geometry,
 )
 
 
@@ -317,12 +320,15 @@ def _patch_loads(monkeypatch, ref_peak, quant_peak, *, calls, ref_quantized=Fals
     # model instance each helper receives so a test can pin it's the quantized model, not the
     # reference.
     handed: list[tuple[str, object]] = []
+    monkeypatch.setattr(w, "_leaf_modules", lambda model: [])
     monkeypatch.setattr(
         w,
         "measured_geometry",
-        lambda model: handed.append(("geometry", model)) or (((4, 64, 3),), 0),
+        lambda model, **_: handed.append(("geometry", model)) or (((4, 64, 3),), 0),
     )
-    monkeypatch.setattr(w, "bits_per_weight", lambda model: handed.append(("bpw", model)) or 4.5)
+    monkeypatch.setattr(
+        w, "bits_per_weight", lambda model, **_: handed.append(("bpw", model)) or 4.5
+    )
     ref_cfg = {"model_type": "llama", "vocab_size": 3}
     if ref_quantized:
         ref_cfg = {**ref_cfg, "quantization": {"bits": 8, "group_size": 64}}
@@ -372,7 +378,7 @@ def test_measure_weight_marks_mixed_precision_from_geometry(monkeypatch):
     _patch_loads(monkeypatch, 0, 1, calls=calls)
     from mlx_quant_fidelity.probes import weights as w
 
-    monkeypatch.setattr(w, "measured_geometry", lambda model: (((4, 64, 2), (5, 64, 1)), 1))
+    monkeypatch.setattr(w, "measured_geometry", lambda model, **_: (((4, 64, 2), (5, 64, 1)), 1))
     report = measure_weight_fidelity("quant", "ref", corpus=_corpus(2))
     assert report.quant_precision == "mixed"
     assert report.quant_n_full_precision == 1
@@ -789,3 +795,150 @@ def test_pre_load_gate_refuses_bitless_methods_mlx_lm_does_not_rewrite(method):
     }
     with pytest.raises(ModelMismatchError, match="bits"):
         _gate_configs(quant_config=raw, reference_config=_REF_FP, pre_load=True)
+
+
+# ---------------------------------------------------------------------------
+# Partially cached snapshots (an interrupted download)
+# ---------------------------------------------------------------------------
+
+
+def _sharded_snapshot(tmp_path, *, present, total_size=None):
+    """A snapshot whose index lists two shards (2048 B and 1024 B on disk); only `present` exist.
+
+    ``total_size`` is the index's ``metadata.total_size`` (tensor bytes, which HF writes a little
+    below the file sizes because it leaves out each shard's header); None omits the metadata.
+    """
+    import json
+
+    shards = {"model-00001-of-00002.safetensors": 2048, "model-00002-of-00002.safetensors": 1024}
+    index: dict[str, object] = {
+        "weight_map": {"a.weight": next(iter(shards)), "b.weight": list(shards)[1]}
+    }
+    if total_size is not None:
+        index["metadata"] = {"total_size": total_size}
+    (tmp_path / "model.safetensors.index.json").write_text(json.dumps(index))
+    for name in present:
+        (tmp_path / name).write_bytes(b"x" * shards[name])
+    return tmp_path
+
+
+def test_partial_snapshot_is_sized_from_the_index_not_the_shards_present(tmp_path, monkeypatch):
+    """Bug: an interrupted download left 1 of 2 shards cached and the pre-flight summed only that
+    shard (2048 B), so a pair too large for the device passed the check. The index says the
+    model is 3000 B of tensors."""
+    import huggingface_hub
+
+    snap = _sharded_snapshot(
+        tmp_path, present=["model-00001-of-00002.safetensors"], total_size=3000
+    )
+    monkeypatch.setattr(huggingface_hub, "snapshot_download", lambda *a, **k: str(snap))
+    assert _resolve_weight_bytes("org/big", None) == 3000
+
+
+def test_partial_snapshot_without_index_metadata_has_no_local_size(tmp_path, monkeypatch):
+    """Bug: with no metadata.total_size to fall back on, the partial sum (2048 B) is still
+    returned; None is what sends the caller to the Hub metadata."""
+    import huggingface_hub
+
+    snap = _sharded_snapshot(tmp_path, present=["model-00001-of-00002.safetensors"])
+    monkeypatch.setattr(huggingface_hub, "snapshot_download", lambda *a, **k: str(snap))
+    assert _resolve_weight_bytes("org/big", None) is None
+
+
+def test_complete_snapshot_keeps_the_on_disk_sum(tmp_path, monkeypatch):
+    """Guards the other partition: a fully cached snapshot is sized from its files (2048 + 1024),
+    not from the index's tensor-byte total (3000). Reds if the index total always wins."""
+    import huggingface_hub
+
+    snap = _sharded_snapshot(
+        tmp_path,
+        present=["model-00001-of-00002.safetensors", "model-00002-of-00002.safetensors"],
+        total_size=3000,
+    )
+    monkeypatch.setattr(huggingface_hub, "snapshot_download", lambda *a, **k: str(snap))
+    assert _resolve_weight_bytes("org/big", None) == 3072
+
+
+def test_partial_snapshot_pair_is_preflighted_from_hub_metadata(tmp_path, monkeypatch):
+    """Bug: two half-downloaded 20 GiB repos pass the pre-flight on the few cached bytes and
+    both load; the Hub sizes (20 GiB each) must refuse the pair on a 24.96 GiB device first."""
+    import huggingface_hub
+    import mlx_lm
+
+    from mlx_quant_fidelity.probes import weights as w
+    from mlx_quant_fidelity.probes.weights import _hub_weight_bytes
+
+    calls: list[str] = []
+    _patch_loads(monkeypatch, 0, 1, calls=calls)
+    monkeypatch.setattr(w, "_resolve_weight_bytes", _resolve_weight_bytes)
+    monkeypatch.setattr(w, "_hub_weight_bytes", _hub_weight_bytes)
+    snap = _sharded_snapshot(tmp_path, present=["model-00001-of-00002.safetensors"])
+    monkeypatch.setattr(huggingface_hub, "snapshot_download", lambda *a, **k: str(snap))
+    shard = type("S", (), {"rfilename": "model-00001-of-00001.safetensors", "size": 20 * _GIB})()
+
+    class FakeApi:
+        def model_info(self, repo, **kw):
+            return type("I", (), {"siblings": [shard]})()
+
+    monkeypatch.setattr(huggingface_hub, "HfApi", FakeApi)
+    monkeypatch.setattr(
+        w.mx, "device_info", lambda: {"max_recommended_working_set_size": int(24.96 * _GIB)}
+    )
+    monkeypatch.setattr(
+        mlx_lm, "load", lambda *a, **k: (_ for _ in ()).throw(AssertionError("loaded"))
+    )
+    with pytest.raises(InsufficientMemoryError):
+        measure_weight_fidelity("org/quant", "org/ref", corpus=_corpus(2))
+
+
+def test_measure_weight_walks_the_quant_model_leaves_once(monkeypatch):
+    """Bug: the report walks the quantized model's leaf modules twice (once for the geometry,
+    once for bits/weight). The real helpers run here on a one-leaf 4-bit group-64 model:
+    weight uint32[8, 8] 256 B + scales and biases fp16[8, 1] 16 B each = 288 B = 2304 bits
+    over 8 x 64 = 512 params -> 4.50 bits/weight, one (4, 64, 1) triple."""
+    import mlx.nn as nn
+    import mlx_lm
+
+    from mlx_quant_fidelity.probes import weights as w
+
+    class _Leaf(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.bits = 4
+            self.group_size = 64
+            self.weight = mx.zeros((8, 8), dtype=mx.uint32)
+            self.scales = mx.zeros((8, 1), dtype=mx.float16)
+            self.biases = mx.zeros((8, 1), dtype=mx.float16)
+
+    class _CountingQuant(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.q = _Leaf()
+            self.walks = 0
+
+        def leaf_modules(self):
+            self.walks += 1
+            return super().leaf_modules()
+
+        def __call__(self, inp):
+            return _FakeWeightModel(1)(inp)
+
+    calls: list[str] = []
+    _patch_loads(monkeypatch, 0, 1, calls=calls)
+    monkeypatch.setattr(w, "measured_geometry", measured_geometry)
+    monkeypatch.setattr(w, "bits_per_weight", bits_per_weight)
+    monkeypatch.setattr(w, "_leaf_modules", _leaf_modules)
+    quant = _CountingQuant()
+    toks = type("T", (), {"bos_token_id": 1, "eos_token_id": 2})()
+    quant_cfg = {"model_type": "llama", "vocab_size": 3, "quantization": {"bits": 4}}
+
+    def fake_load(repo, **kw):
+        if repo == "ref":
+            return _FakeWeightModel(0), toks, {"model_type": "llama", "vocab_size": 3}
+        return quant, toks, quant_cfg
+
+    monkeypatch.setattr(mlx_lm, "load", fake_load)
+    report = measure_weight_fidelity("quant", "ref", corpus=_corpus(2))
+    assert report.quant_geometry == ((4, 64, 1),)
+    assert report.quant_bits_per_weight == 4.5
+    assert quant.walks == 1

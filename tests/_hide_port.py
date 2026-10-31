@@ -2,6 +2,7 @@
 
 import importlib.metadata
 from collections.abc import Callable, MutableMapping
+from typing import Any
 
 import pytest
 
@@ -37,6 +38,21 @@ def hiding_distribution(
     return _distribution
 
 
+def hiding_from_name(real: Any, hidden: frozenset[str] = HIDDEN_DISTRIBUTIONS) -> Any:
+    """Wrap the classmethod importlib.metadata.Distribution.from_name the same way.
+    `metadata()`, `files()` and friends call it directly, not through `distribution`, so
+    wrapping `distribution` alone leaves them reading the installed port. `real` is the raw
+    classmethod (from the class `__dict__`), re-bound to whichever subclass is called."""
+    hidden_canonical = {_canonical(h) for h in hidden}
+
+    def _from_name(cls: type, name: str) -> object:
+        if _canonical(name) in hidden_canonical:
+            raise importlib.metadata.PackageNotFoundError(name)
+        return real.__get__(None, cls)(name)
+
+    return classmethod(_from_name)
+
+
 def flag_conflict(*, hide_port: bool, run_slow: bool) -> str | None:
     """`--hide-port` is a default-lane flag; the slow lane needs the real port."""
     if hide_port and run_slow:
@@ -54,7 +70,8 @@ def apply_hide_port(
     """The whole --hide-port decision: returns False when the flag is off; on a --run-slow
     conflict records the usage-error exit code FIRST (the atexit hard-exit reads it — a
     UsageError raised in pytest_configure never reaches sessionfinish) and then raises
-    pytest.UsageError; otherwise masks the port module tree and the distribution metadata."""
+    pytest.UsageError; otherwise masks the port module tree and the distribution metadata (both `distribution`
+    and `Distribution.from_name`)."""
     if not hide_port:
         return False
     conflict = flag_conflict(hide_port=True, run_slow=run_slow)
@@ -63,4 +80,6 @@ def apply_hide_port(
         raise pytest.UsageError(conflict)
     mask_port(modules)
     importlib.metadata.distribution = hiding_distribution(importlib.metadata.distribution)  # type: ignore[assignment]
+    dist_cls = importlib.metadata.Distribution
+    dist_cls.from_name = hiding_from_name(dist_cls.__dict__["from_name"])  # type: ignore[method-assign]
     return True

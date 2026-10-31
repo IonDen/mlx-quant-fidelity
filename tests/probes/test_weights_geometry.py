@@ -83,6 +83,23 @@ def test_bits_per_weight_numerator_covers_arrays_on_non_leaf_modules():
     assert math.isclose(bits_per_weight(root), 3584 / 528, rel_tol=1e-9)
 
 
+class _DenseWithBuffer(_Dense):
+    """`_Dense` plus a `_`-prefixed fp32[8] buffer (32 B): model state, not a parameter."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._buf = mx.zeros((8,), dtype=mx.float32)
+
+
+def test_bits_per_weight_counts_underscore_arrays_as_bytes_but_not_params():
+    """mlx-lm's quirk, kept on purpose: a `_`-prefixed array adds bytes, never params.
+    Bytes: 320 (`_Quant`) + 64 (dense weight) + 32 (`_buf`) = 416 B = 3328 bits; params 512 + 16.
+    Reds with 3328 / 536 if the buffer is counted as params, or 3072 / 528 if its bytes are
+    dropped."""
+    root = _Tree(q=_Quant(), d=_DenseWithBuffer())
+    assert math.isclose(bits_per_weight(root), 3328 / 528, rel_tol=1e-9)
+
+
 def test_bits_per_weight_rejects_a_parameterless_model():
     """Reds if a zero denominator is silently returned as inf/None instead of raising."""
     with pytest.raises(ValueError, match="no parameters"):
@@ -101,11 +118,49 @@ def test_measured_geometry_groups_by_bits_and_group_size_and_counts_full_precisi
 
 
 def test_measured_geometry_is_uniform_when_all_modules_share_one_bit_width():
-    """All modules at one width collapse to a single geometry triple with n_full == 0, and the
-    helper consults only the modules — it has no config to read. The root carries a contradictory
-    `bits` of its own: reds if a non-leaf attribute reaches the geometry."""
+    """All modules at one width collapse to a single geometry triple with n_full == 0. Reds if
+    same-width modules are not counted together (a per-module triple, or a count stuck at 1)."""
     tree = _Tree(a=_Quant(8, 64), b=_Quant(8, 64))
-    tree.bits = 3
     geometry, n_full = measured_geometry(tree)
     assert geometry == ((8, 64, 2),)
+    assert n_full == 0
+
+
+class _ArrayBitsQuant(_Quant):
+    """The 4-bit group-32 layout of `_Quant`, but its `bits` is an mx.array. nn.Module stores
+    an array attribute as a parameter, so this `bits` is model state, not a quantizer width."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.bits = mx.array(4, dtype=mx.int32)
+
+
+def test_measured_geometry_does_not_read_an_array_valued_bits_as_a_width():
+    """Reds if `int(module.bits)` coerces the array (a host sync per module) and reports a 4-bit
+    group-32 module; only a Python-int `bits` (what mlx's quantized layers carry) is a width."""
+    geometry, n_full = measured_geometry(_Tree(q=_ArrayBitsQuant(), a=_Quant(8, 64)))
+    assert geometry == ((8, 64, 1),)
+    assert n_full == 0
+
+
+def test_bits_per_weight_treats_an_array_valued_bits_module_as_unquantized():
+    """Bytes: 320 B (the `_Quant` layout) + the int32 `bits` array 4 B = 324 B = 2592 bits.
+    Params, as an unquantized module: weight 64 + scales 16 + biases 16 + bits 1 = 97.
+    Reds with 2592 / 512 if the array is coerced and the module counted as quantized."""
+    assert math.isclose(bits_per_weight(_Tree(q=_ArrayBitsQuant())), 2592 / 97, rel_tol=1e-9)
+
+
+class _UngroupedQuant(_Quant):
+    """A third-party quantized layer that carries `bits` but no `group_size` attribute."""
+
+    def __init__(self) -> None:
+        super().__init__(bits=4, group_size=32)
+        del self.group_size
+
+
+def test_measured_geometry_tolerates_a_quantized_layer_without_group_size():
+    """Reds with AttributeError (after both models are loaded) if `group_size` is read
+    unconditionally; a layer without one is counted under group 0 (no group recorded)."""
+    geometry, n_full = measured_geometry(_Tree(q=_UngroupedQuant(), a=_Quant(4, 64)))
+    assert geometry == ((4, 0, 1), (4, 64, 1))
     assert n_full == 0

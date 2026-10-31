@@ -492,6 +492,166 @@ def test_score_kv_config_partial_refused_in_deployment_mode(monkeypatch):
         score_kv_config(_FakeDivergentModel(), _kv_corpus(2), model_id="org/m", quantize_start=1)
 
 
+# ---------------------------------------------------------------------------
+# cache smoke: a model whose attention cannot run on the chosen cache is refused up front
+# ---------------------------------------------------------------------------
+
+_MALLOC_OOM = (
+    "[metal::malloc] Attempting to allocate 40000000000 bytes which is greater than the "
+    "maximum allowed buffer size of 22000000000 bytes."
+)
+
+
+class _TupleFetchQuantCache(_FakeQuantCache):
+    """A quantized cache whose fetch hands the attention a tuple (mlx-lm's QuantizedKVCache)."""
+
+    fetch_returns_tuple = True
+
+
+class _LatentAttentionModel(_FakeDivergentModel):
+    """A deepseek_v3-like forward: it calls ``.swapaxes`` on what the cache returns, so a cache
+    that returns a packed tuple fails with the AttributeError measured on Moonlight."""
+
+    def __init__(self):
+        super().__init__()
+        self.args.model_type = "deepseek_v3"
+        self.lengths: list[int] = []
+
+    def __call__(self, inp, cache=None):
+        self.lengths.append(int(inp.shape[1]))
+        if cache is not None and getattr(cache[0], "fetch_returns_tuple", False):
+            raise AttributeError("'tuple' object has no attribute 'swapaxes'")
+        return super().__call__(inp, cache=cache)
+
+
+def _patch_stock_cache(monkeypatch, cache_cls, n_layers=2):
+    _patch_kv_caches_divergent(monkeypatch, n_layers=n_layers)
+    from mlx_quant_fidelity.probes import kv_methods
+
+    monkeypatch.setattr(
+        kv_methods.StockKVMethod,
+        "make_cache",
+        lambda self, *, n_layers: [cache_cls() for _ in range(n_layers)],
+    )
+
+
+def _spy_scored_chunks(monkeypatch) -> list[int]:
+    scored: list[int] = []
+    real = kvmod._score_chunk
+
+    def spy(model, ids, ref_cache, quant_cache):
+        scored.append(int(ids.size))
+        return real(model, ids, ref_cache, quant_cache)
+
+    monkeypatch.setattr(kvmod, "_score_chunk", spy)
+    return scored
+
+
+def test_cache_smoke_refuses_an_attention_that_cannot_run_the_quantized_cache(monkeypatch):
+    """Bug: with no smoke forward on a uniform cache, a deepseek_v3-style model reaches the
+    chunk loop and dies with a raw AttributeError instead of a package-rooted refusal."""
+    _patch_stock_cache(monkeypatch, _TupleFetchQuantCache)
+    scored = _spy_scored_chunks(monkeypatch)
+    with pytest.raises(CacheNotQuantizableError) as excinfo:
+        score_kv_config(_LatentAttentionModel(), _kv_corpus(3), model_id="org/m")
+    msg = str(excinfo.value)
+    assert "deepseek_v3" in msg
+    assert "affine" in msg
+    assert "turboquant" in msg
+    assert "swapaxes" in msg  # the underlying failure is kept for the user
+    assert scored == []  # refused before any chunk is scored
+    assert isinstance(excinfo.value.__cause__, AttributeError)
+
+
+def test_cache_smoke_lets_a_model_that_runs_the_cache_proceed(monkeypatch):
+    """Bug: a smoke that refuses unconditionally (or treats any cache as unrunnable) would
+    turn every run of a working model into a refusal."""
+    _patch_stock_cache(monkeypatch, _FakeQuantCache)
+    report = score_kv_config(_LatentAttentionModel(), _kv_corpus(3), model_id="org/m")
+    assert report.n_chunks == 3
+    assert report.kl.mean > 0
+
+
+def test_cache_smoke_runs_once_per_run_not_per_chunk(monkeypatch):
+    """Bug: a smoke placed inside the chunk loop spends one extra forward per chunk."""
+    _patch_stock_cache(monkeypatch, _FakeQuantCache)
+    model = _LatentAttentionModel()
+    score_kv_config(model, _kv_corpus(3), model_id="org/m")
+    assert model.lengths.count(1) == 1  # one one-token smoke forward for three chunks
+    assert model.lengths[0] == 1  # and it runs before the first scored forward
+
+
+def test_cache_smoke_releases_its_cache_before_scoring(monkeypatch):
+    """Bug: dropping the `del` + mx.clear_cache() after the smoke keeps its cache alive (and the
+    allocator pool full) through the whole scored run."""
+    import weakref
+
+    _patch_stock_cache(monkeypatch, _FakeQuantCache)
+    events: list[str] = []
+    smoke_refs: list[weakref.ref[object]] = []
+    real_clear = kvmod.mx.clear_cache
+
+    def clear_spy():
+        # mx.clear_cache only returns buffers nobody references: the smoke cache must be dead
+        # by the time the pool is cleared, or the clear frees nothing of it.
+        freed = bool(smoke_refs) and all(r() is None for r in smoke_refs)
+        events.append("clear-after-release" if freed else "clear")
+        real_clear()
+
+    class _Model(_LatentAttentionModel):
+        def __call__(self, inp, cache=None):
+            if int(inp.shape[1]) == 1:
+                smoke_refs.extend(weakref.ref(c) for c in cache)
+                events.append("smoke")
+            elif "first-scored" not in events:
+                events.append("first-scored")
+                assert smoke_refs
+                assert all(r() is None for r in smoke_refs)  # smoke cache freed
+            return super().__call__(inp, cache=cache)
+
+    monkeypatch.setattr(kvmod.mx, "clear_cache", clear_spy)
+    score_kv_config(_Model(), _kv_corpus(2), model_id="org/m")
+    smoke_at, first_at = events.index("smoke"), events.index("first-scored")
+    assert "clear-after-release" in events[smoke_at:first_at]
+
+
+@pytest.mark.parametrize(
+    "path",
+    ["uniform", "partial"],
+)
+def test_cache_smoke_never_relabels_a_memory_failure(monkeypatch, path):
+    """Bug: a smoke that catches RuntimeError wholesale (or `except Exception`) reports an
+    out-of-memory forward as "this model cannot run the cache", hiding the real failure."""
+    if path == "partial":
+        _patch_kv_caches_partial(monkeypatch)
+    else:
+        _patch_stock_cache(monkeypatch, _FakeQuantCache)
+
+    class _OomModel(_LatentAttentionModel):
+        def __call__(self, inp, cache=None):
+            if int(inp.shape[1]) == 1:
+                raise RuntimeError(_MALLOC_OOM)
+            return super().__call__(inp, cache=cache)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        score_kv_config(_OomModel(), _kv_corpus(2), model_id="org/m")
+    assert not isinstance(excinfo.value, CacheNotQuantizableError)
+    assert str(excinfo.value) == _MALLOC_OOM  # propagated unchanged
+
+
+def test_cache_smoke_never_relabels_an_unrelated_error(monkeypatch):
+    """Bug: a catch-all smoke relabels a failure that has nothing to do with the cache (here an
+    OSError from a lazily read shard) as a cache mismatch."""
+    _patch_kv_caches_partial(monkeypatch)
+
+    class _ShardModel(_LatentAttentionModel):
+        def __call__(self, inp, cache=None):
+            raise OSError("model-00002-of-00004.safetensors: unexpected end of file")
+
+    with pytest.raises(OSError, match="unexpected end of file"):
+        score_kv_config(_ShardModel(), _kv_corpus(2), model_id="org/m")
+
+
 def test_score_kv_config_full_coverage_is_not_partial(monkeypatch):
     # a fully-quantizable model is never flagged partial (keeps its committed headline).
     _patch_kv_caches_divergent(monkeypatch)
@@ -1405,7 +1565,7 @@ def test_seam_records_measured_bytes_from_first_chunk_only(monkeypatch):
     # first (and only) measurement: 144 B * 1 * 2 layers / offset 4 = 72 B/token
     assert report.measured_kv_bytes_per_token == 72
     assert method.calls.count("measured_bytes") == 1
-    assert method.calls.count("make_cache") == 3
+    assert method.calls.count("make_cache") == 4  # one smoke cache per run + one per chunk (3)
 
 
 def test_seam_warns_when_measured_disagrees_with_analytic(monkeypatch):
