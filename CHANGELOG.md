@@ -3,6 +3,15 @@
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.1] - 2026-11-05
+
+A packaging release. Nothing in measurement, reports, the API or the `>=3.11` Python floor changes.
+
+### Changed
+
+- The README badge now states the floor, Python 3.11 or newer, instead of listing versions.
+- CI and the package classifiers now cover Python 3.11 to 3.14.
+
 ## [0.11.0] - 2026-11-01
 
 A coverage release. Two new committed comparisons extend the measured set: five Qwen3-4B-Instruct-2507 repos scored against their bf16 reference, and three KV methods on DeepSeek-V2-Lite-Chat. The methodology document gains a section on MLA models, and a model whose attention cannot run on the chosen KV cache is now refused before any scoring starts. Two other checks are new: a TurboQuant install that shadows the pinned port is refused before it is imported, and a tokenizer that needs custom code is refused unless you pass `--allow-custom-code`. The weight probe's memory pre-flight also sizes a model from its shard index.

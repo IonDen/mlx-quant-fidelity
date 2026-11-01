@@ -4,6 +4,7 @@
 
 ## Released
 
+- **0.11.1** — Packaging. The README badge states the Python 3.11 floor, and Python 3.14 is now tested in CI and listed as supported. Nothing in measurement, reports or the API changes.
 - **0.11.0** — Wider real-repo coverage. A second weight ladder (five Qwen3-4B-Instruct-2507 repos against their bf16 reference), a KV comparison on DeepSeek-V2-Lite-Chat, and a methodology section on MLA models. A model whose attention cannot run on the chosen KV cache is refused before scoring, a tokenizer's own code is governed by `--allow-custom-code` (the refusal comes after the weights have downloaded and loaded), a shadowing TurboQuant install is refused before it is imported, and the weight probe's memory pre-flight sizes a model from its shard index.
 - **0.10.0** — Hardening. The memory guards count model weights, cover wrapper architectures and run before the weights probe loads anything; a watchdog aborts a run that crosses the memory ceiling. Repos whose config would execute their own code are refused unless you opt in, a NaN can no longer be ranked, bad parameters and missing extras fail before a model loads, and partial-coverage reports say so in the badge and headline.
 - **0.9.0** — The `kv` probe measures hybrid attention models (full-attention layers interleaved with sliding-window or state-space layers) on the layers whose cache can be quantized, rather than refusing the whole model. The report records how many layers were quantized and which types were skipped, with a note that mlx-lm does not run this mixed cache during generation.

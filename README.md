@@ -5,7 +5,7 @@
 </p>
 
 [![PyPI version](https://img.shields.io/pypi/v/mlx-quant-fidelity.svg)](https://pypi.org/project/mlx-quant-fidelity/)
-[![Python versions](https://img.shields.io/pypi/pyversions/mlx-quant-fidelity.svg)](https://pypi.org/project/mlx-quant-fidelity/)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://pypi.org/project/mlx-quant-fidelity/)
 [![License: Apache-2.0](https://img.shields.io/pypi/l/mlx-quant-fidelity.svg)](https://github.com/IonDen/mlx-quant-fidelity/blob/main/LICENSE)
 
 You install a 4-bit model. It loads, it answers, the prose reads fine. Nothing in the logs suggests otherwise.
@@ -374,7 +374,9 @@ Every entry point, the Python API included, caps MLX's wired memory and its buff
 
 ## Status
 
-0.11.0, released on PyPI as `mlx-quant-fidelity`. A coverage release: a second weight ladder on Qwen3-4B-Instruct-2507, a KV comparison on DeepSeek-V2-Lite-Chat, and a [methodology section on MLA models](docs/measurement-principles.md#mla-models-and-what-their-cache-stores). A model whose attention cannot run on the chosen cache is now refused before scoring, and a `turboquant_mlx` install that shadows the pinned port is refused before it is imported. `--allow-custom-code` also covers a tokenizer's own code, though that check fires after the weights have downloaded and loaded. The weight probe's memory pre-flight now sizes a model from its shard index. That only feeds the pre-flight: a partial snapshot that fits passes, and mlx-lm's load then completes the download. Threshold validation and the remaining attention coverage are on the [roadmap](ROADMAP.md).
+0.11.1, released on PyPI as `mlx-quant-fidelity`, is a packaging release. The badge above states the Python 3.11 floor, and Python 3.14 is now tested in CI and listed as supported. Measurement, reports and the API are unchanged from 0.11.0.
+
+0.11.0 was a coverage release: a second weight ladder on Qwen3-4B-Instruct-2507, a KV comparison on DeepSeek-V2-Lite-Chat, and a [methodology section on MLA models](docs/measurement-principles.md#mla-models-and-what-their-cache-stores). A model whose attention cannot run on the chosen cache is now refused before scoring, and a `turboquant_mlx` install that shadows the pinned port is refused before it is imported. `--allow-custom-code` also covers a tokenizer's own code, though that check fires after the weights have downloaded and loaded. The weight probe's memory pre-flight now sizes a model from its shard index. That only feeds the pre-flight: a partial snapshot that fits passes, and mlx-lm's load then completes the download. Threshold validation and the remaining attention coverage are on the [roadmap](ROADMAP.md).
 
 ## License
 
