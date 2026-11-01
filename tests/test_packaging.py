@@ -1,5 +1,6 @@
 """Packaging and CI-configuration guards (pure file parsing — no build, no network)."""
 
+import itertools
 import re
 import tomllib
 from pathlib import Path
@@ -8,6 +9,12 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOWS = sorted((ROOT / ".github" / "workflows").glob("*.yml"))
+
+# The one list of Pythons the package claims to support, lowest first. The classifiers, the
+# CI test matrix, the `requires-python` floor and the README badge must all agree with it, so
+# a widened or narrowed list cannot ship untested (the CI matrix entry is the test for a
+# version) and the badge cannot drift from the floor.
+SUPPORTED_PYTHONS = ("3.11", "3.12", "3.13", "3.14")
 
 
 def _pyproject() -> dict[str, object]:
@@ -64,19 +71,86 @@ def test_workflows_default_to_read_only_token() -> None:
         assert re.search(r"^permissions:\s*\n\s+contents:\s*read", text, re.MULTILINE), wf.name
 
 
-def test_ci_tests_every_declared_python_version() -> None:
+def test_classifiers_list_every_supported_python() -> None:
+    """Bug: a `Programming Language :: Python :: 3.X` classifier is added or dropped without
+    the supported list moving with it, so PyPI advertises a version nobody tests (or hides one
+    that is tested)."""
     classifiers = _pyproject()["project"]["classifiers"]  # type: ignore[index]
     declared = {
         c.rsplit(":: ", 1)[1]
         for c in classifiers
         if re.fullmatch(r"Programming Language :: Python :: 3\.\d+", c)
     }
+    assert declared == set(SUPPORTED_PYTHONS)
+
+
+def test_ci_matrix_tests_every_supported_python() -> None:
+    """Bug: a version is dropped from (or added to) any ci.yml `python-version` matrix, the
+    first one or one in a later job, so a supported Python ships without a CI leg that runs
+    that job on it."""
     ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text()
-    matrix = re.search(r"python-version:\s*\[([^\]]*)\]", ci)
-    assert matrix is not None, "ci.yml has no python-version matrix"
-    tested = {v.strip().strip("\"'") for v in matrix.group(1).split(",")}
-    assert declared == {"3.11", "3.12", "3.13"}
-    assert tested == declared
+    matrices = re.findall(r"python-version:\s*\[([^\]]*)\]", ci)
+    assert matrices, "ci.yml has no python-version matrix"
+    for matrix in matrices:
+        tested = {v.strip().strip("\"'") for v in matrix.split(",")}
+        assert tested == set(SUPPORTED_PYTHONS), matrix
+
+
+def test_requires_python_floor_is_the_lowest_supported_python() -> None:
+    """Bug: `requires-python` is lowered (say to `>=3.10`) or raised without the supported list,
+    so pip installs the package on a Python CI never runs, or refuses one it does."""
+    assert _pyproject()["project"]["requires-python"] == f">={SUPPORTED_PYTHONS[0]}"  # type: ignore[index]
+
+
+def test_readme_python_badge_states_the_floor() -> None:
+    """Bug: the hand-written README badge keeps an old floor (`python-3.10%2B`) after the floor
+    moves, so the README advertises a Python the package does not install on."""
+    readme = (ROOT / "README.md").read_text()
+    assert f"badge/python-{SUPPORTED_PYTHONS[0]}%2B-" in readme
+
+
+def test_readme_has_exactly_one_python_badge() -> None:
+    """Bug: a new floor badge is added beside the old one instead of replacing it, so the
+    README shows two floors and the presence check above stays green on the stale one."""
+    readme = (ROOT / "README.md").read_text()
+    assert readme.count("badge/python-") == 1
+
+
+def test_readme_prose_states_the_floor() -> None:
+    """Bug: the README's prose floor ("Apple Silicon, Python 3.11+.") keeps the old version
+    after the floor moves. The badge's alt text also reads "Python 3.11+", so badges are cut
+    out first; otherwise the badge alone would keep this green."""
+    readme = (ROOT / "README.md").read_text()
+    prose = re.sub(r"!\[[^\]]*\]\([^)]*\)", "", readme)
+    assert f"Python {SUPPORTED_PYTHONS[0]}+" in prose
+
+
+def test_supported_pythons_are_strictly_ascending() -> None:
+    """Bug: a version is added out of order or twice (say `("3.12", "3.11", ...)`), so
+    `SUPPORTED_PYTHONS[0]` is no longer the floor and every floor check pins the wrong one.
+    Compared as integer tuples: as strings, "3.10" sorts before "3.9"."""
+    versions = [tuple(int(part) for part in v.split(".")) for v in SUPPORTED_PYTHONS]
+    assert all(low < high for low, high in itertools.pairwise(versions)), SUPPORTED_PYTHONS
+
+
+def test_ruff_targets_the_lowest_supported_python() -> None:
+    """Bug: ruff's `target-version` stays on (or moves to) a Python other than the floor, so
+    ruff accepts syntax the floor cannot parse, or keeps shims the floor no longer needs."""
+    floor = SUPPORTED_PYTHONS[0].replace(".", "")
+    assert _pyproject()["tool"]["ruff"]["target-version"] == f"py{floor}"  # type: ignore[index]
+
+
+def test_mypy_targets_the_lowest_supported_python() -> None:
+    """Bug: mypy's `python_version` is above the floor, so typing that only works on newer
+    Pythons type-checks clean and then fails on the floor."""
+    assert _pyproject()["tool"]["mypy"]["python_version"] == SUPPORTED_PYTHONS[0]  # type: ignore[index]
+
+
+def test_readme_has_no_enumerating_pyversions_badge() -> None:
+    """Bug: shields' `pypi/pyversions` badge comes back beside (or instead of) the floor badge;
+    it lists whatever the last release's classifiers said, so it drifts from the floor."""
+    readme = (ROOT / "README.md").read_text()
+    assert "pypi/pyversions" not in readme
 
 
 def test_pyarrow_floor_excludes_cve_2023_47248() -> None:
