@@ -17,7 +17,7 @@ from typing import Protocol, runtime_checkable
 
 import mlx.core as mx
 
-from mlx_quant_fidelity.costs import kv_bytes_per_token
+from mlx_quant_fidelity.costs import KVLayout, kv_bytes_per_token
 from mlx_quant_fidelity.errors import (
     CacheNotQuantizableError,
     CompareConfigError,
@@ -603,7 +603,9 @@ def _step_padded_window(window: int) -> int:
     return -(-window // _TURBOQUANT_STEP) * _TURBOQUANT_STEP
 
 
-def _gate_turboquant_head_dim(head_dim: int | None, *, model_type: str | None = None) -> None:
+def _gate_turboquant_head_dim(
+    head_dim: int | None, *, model_type: str | None = None, width_name: str = "head_dim"
+) -> None:
     """Raise unless head_dim is known, a power of two, and <= 256.
 
     The port's fused Metal kernels have no dimension assert: a non-power-of-two head_dim returns
@@ -611,7 +613,8 @@ def _gate_turboquant_head_dim(head_dim: int | None, *, model_type: str | None = 
     catch either, so this pure gate is the only line of defence. ``model_type`` names the model in
     the message when the caller has one (``check``); ``turboquant_bytes_per_token`` is called with
     only a geometry, so it passes None and the clause naming the model is omitted rather than
-    printing a placeholder like ``model '?'``.
+    printing a placeholder like ``model '?'``. ``width_name`` names the width in the message
+    when it is not the model's plain ``head_dim`` (see :func:`_gate_turboquant_layout`).
     """
     if (
         head_dim is None
@@ -622,9 +625,44 @@ def _gate_turboquant_head_dim(head_dim: int | None, *, model_type: str | None = 
         model_clause = f" model '{model_type}' has" if model_type is not None else " got"
         raise CacheNotQuantizableError(
             f"TurboQuant-MLX kernels require a known power-of-two head_dim <= "
-            f"{_TURBOQUANT_MAX_HEAD_DIM};{model_clause} head_dim={head_dim}. This is a "
+            f"{_TURBOQUANT_MAX_HEAD_DIM};{model_clause} {width_name}={head_dim}. This is a "
             "limitation of the port's kernels, not of the model."
         )
+
+
+def _gate_turboquant_layout(method: KVCacheMethod, layout: KVLayout, *, model_type: str) -> None:
+    """Gate the widths a TurboQuant method's kernels would really get; no-op for other methods.
+
+    ``hidden // heads``, which ``check`` sees, is not the cached width on an MLA model. Uniform
+    TurboQuant runs K and V through the kernels and V-only runs just V, while K stays in plain
+    fp16. A layout whose widths cannot be stated is refused, since the gate cannot see them.
+    """
+    if not isinstance(method, TurboQuantKVMethod | TurboQuantVOnlyKVMethod):
+        return
+    if not layout.modelled:
+        raise CacheNotQuantizableError(
+            f"TurboQuant-MLX kernels require a known power-of-two head_dim <= "
+            f"{_TURBOQUANT_MAX_HEAD_DIM}; model '{model_type}' has a KV cache whose widths cannot "
+            "be read from its config. This is a limitation of the port's kernels, not of the "
+            "model."
+        )
+    if layout.k_dim is not None and isinstance(method, TurboQuantKVMethod):
+        _gate_turboquant_head_dim(layout.k_dim, model_type=model_type, width_name="key width")
+    if layout.v_dim is not None:
+        _gate_turboquant_head_dim(layout.v_dim, model_type=model_type, width_name="value width")
+
+
+def _check_head_dim(method: KVCacheMethod, layout: KVLayout, head_dim: int | None) -> int | None:
+    """The width ``method.check`` should gate: the cached width a TurboQuant method's kernels get.
+
+    On a modelled MLA layout that is V for V-only and K for uniform (both already passed
+    :func:`_gate_turboquant_layout`), never ``hidden // heads``. Otherwise ``head_dim`` unchanged.
+    """
+    if isinstance(method, TurboQuantVOnlyKVMethod) and layout.v_dim is not None:
+        return layout.v_dim
+    if isinstance(method, TurboQuantKVMethod) and layout.k_dim is not None:
+        return layout.k_dim
+    return head_dim
 
 
 def turboquant_bytes_per_token(*, n_layers: int, n_kv_heads: int, head_dim: int, bits: int) -> int:

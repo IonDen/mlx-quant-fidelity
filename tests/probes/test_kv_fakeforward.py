@@ -1,18 +1,23 @@
 """Offline fake-forward tests for the KV-quant probe (no real model load)."""
 
 import dataclasses
+import json
 import math
 
 import mlx.core as mx
 import pytest
+from mlx_lm.models.cache import KVCache
+from tests.factories import make_fid_report
 from tests.probes.fake_kv_method import (
     FakeControlCache,
     FakeFullCache,
     FakeKVMethod,
     FakeMethodModel,
 )
+from tests.probes.fake_turboquant import install_fake_port
 
 from mlx_quant_fidelity.corpora.provenance import Corpus, CorpusProvenance
+from mlx_quant_fidelity.costs import KVLayout
 from mlx_quant_fidelity.errors import (
     CacheNotQuantizableError,
     CompareConfigError,
@@ -31,7 +36,14 @@ from mlx_quant_fidelity.probes.kv import (
     packed_width_mismatch,
     score_kv_config,
 )
-from mlx_quant_fidelity.probes.kv_methods import StockKVMethod
+from mlx_quant_fidelity.probes.kv_methods import (
+    AffineKVMethod,
+    StockKVMethod,
+    TurboQuantKVMethod,
+    TurboQuantVOnlyKVMethod,
+)
+from mlx_quant_fidelity.runners import compare as cmp
+from mlx_quant_fidelity.runners._identity import kv_run_identity
 
 
 @pytest.fixture(autouse=True)
@@ -568,7 +580,7 @@ def test_cache_smoke_refuses_an_attention_that_cannot_run_the_quantized_cache(mo
     msg = str(excinfo.value)
     assert "deepseek_v3" in msg
     assert "affine" in msg
-    assert "turboquant" in msg
+    assert "turboquant" not in msg  # refused on exactly these models
     assert "swapaxes" in msg  # the underlying failure is kept for the user
     assert scored == []  # refused before any chunk is scored
     assert isinstance(excinfo.value.__cause__, AttributeError)
@@ -819,17 +831,33 @@ class _MarkerFetchFailsModel(FakeMethodModel):
     ],
 )
 def test_cache_smoke_hints_other_methods_only_for_the_stock_cache(monkeypatch, method, hinted):
-    """Bug: the "try `affine:<k>:<v>` or `turboquant`" advice is printed when the method that
-    just failed is turboquant or affine itself. Only the stock (control-lane) cache gets it;
-    any other method is told its own cache did not run."""
+    """Bug: the "try `affine:<k>:<v>`" advice is printed when the method that just failed is
+    turboquant or affine itself. Only the stock (control-lane) cache gets it; any other method
+    is told its own cache did not run."""
     _patch_kv_caches_divergent(monkeypatch)
     with pytest.raises(CacheNotQuantizableError) as excinfo:
         score_kv_config(_MarkerFetchFailsModel(), _kv_corpus(2), model_id="org/m", method=method)
     msg = str(excinfo.value)
     assert "deepseek_v3" in msg
     assert repr(method.name) in msg
-    assert ("try `affine:<k>:<v>` or `turboquant`" in msg) is hinted
+    assert ("try `affine:<k>:<v>`" in msg) is hinted
     assert ("the attention did not run on this method's cache" in msg) is not hinted
+
+
+def test_stock_refusal_points_at_affine_and_not_at_turboquant(monkeypatch):
+    """Bug: the refusal on a cache mlx-lm's stock path cannot run sends the user to `turboquant`,
+    which is refused on exactly these models."""
+    _patch_kv_caches_divergent(monkeypatch)
+    with pytest.raises(CacheNotQuantizableError) as excinfo:
+        score_kv_config(
+            _MarkerFetchFailsModel(),
+            _kv_corpus(2),
+            model_id="org/m",
+            method=FakeKVMethod(stock_like=True),
+        )
+    msg = str(excinfo.value)
+    assert "`affine:<k>:<v>`" in msg
+    assert "turboquant" not in msg
 
 
 def test_cache_smoke_never_relabels_an_unrelated_error(monkeypatch):
@@ -2428,3 +2456,322 @@ def test_weights_are_not_materialized_when_the_gate_refuses(monkeypatch):
     with pytest.raises(kvmod.LogitsBudgetError, match="does not fit"):
         score_kv_config(_Huge(), _kv_corpus(1), model_id="fake")
     assert "eval-params" not in events
+
+
+# ---------------------------------------------------------------------------
+# TurboQuant on MLA caches: the kernels only ever get a width the gate saw
+# ---------------------------------------------------------------------------
+
+_V2_ARGS = {
+    "model_type": "deepseek_v2",
+    "hidden_size": 2048,
+    "num_attention_heads": 16,
+    "num_key_value_heads": 16,
+    "vocab_size": 4,
+    "qk_nope_head_dim": 128,
+    "qk_rope_head_dim": 64,
+    "v_head_dim": 128,
+    "kv_lora_rank": 512,
+}
+_TURBOQUANT_METHODS = [
+    pytest.param(TurboQuantKVMethod(bits=4), id="turboquant"),
+    pytest.param(TurboQuantVOnlyKVMethod(v_bits=4), id="turboquant-vonly"),
+]
+
+
+class _WidthsForwardModel:
+    """One layer that hands its cache K and V at stated widths, as mlx-lm's attentions do
+    (deepseek_v2.py:230). Logits depend on what the cache returns, so a lossy cache shows up."""
+
+    def __init__(self, args, *, k_width=192, v_width=128):
+        self.args = args
+        self.k_width = k_width
+        self.v_width = v_width
+
+    def make_cache(self):
+        return [KVCache()]
+
+    def __call__(self, inp, cache=None):
+        length = inp.shape[1]
+        out = mx.zeros((1, length, 4))
+        out[:, :, 0] = 5.0
+        if cache is not None:
+            keys = mx.sin(mx.arange(length * self.k_width) * 0.37)
+            values = mx.sin(mx.arange(length * self.v_width) * 0.73)
+            _, fetched = cache[0].update_and_fetch(
+                keys.reshape(1, 1, length, self.k_width).astype(mx.float16),
+                values.reshape(1, 1, length, self.v_width).astype(mx.float16),
+            )
+            out[:, :, 1] = 8.0 * mx.mean(mx.abs(fetched[:, :, -length:, :]), axis=(1, 3))
+        return out
+
+
+class _NoRunModel:
+    """Fails loudly if a refused method got as far as a cache, a forward or a weight read."""
+
+    def __init__(self, args):
+        self.args = args
+
+    def make_cache(self):
+        raise AssertionError("a cache was built before the refusal")
+
+    def parameters(self):
+        raise AssertionError("the weights were read before the refusal")
+
+    def __call__(self, inp, cache=None):
+        raise AssertionError("a forward ran before the refusal")
+
+
+def _no_field(name):
+    return _Args(**{k: v for k, v in _V2_ARGS.items() if k != name})
+
+
+def _kimi_k25_args(nest):
+    """kimi_k25's ModelArgs: every width under text_config (kimi_k25.py:17-23), dict or object."""
+    text = {k: v for k, v in _V2_ARGS.items() if k != "model_type"}
+    return _Args(model_type="kimi_k25", text_config=nest(text))
+
+
+def test_kv_layout_reads_flat_and_nested_args():
+    """Bug: the resolver misses text_config, so a wrapper model reads as having no MLA fields."""
+    flat = kvmod._kv_layout(_ModelWithArgs(_Args(**_V2_ARGS)))
+    assert flat == KVLayout(k_dim=192, v_dim=128, modelled=True)
+    v3 = kvmod._kv_layout(_ModelWithArgs(_Args(**{**_V2_ARGS, "model_type": "deepseek_v3"})))
+    assert v3.modelled is False
+    assert kvmod._kv_layout(_ModelWithArgs(_kimi_k25_args(dict))).modelled is False
+    no_args = kvmod._kv_layout(object())
+    assert no_args == KVLayout(k_dim=None, v_dim=None, modelled=True)
+
+
+def test_kv_layout_goes_by_the_outer_model_type():
+    """Bug: a nested model_type picks the expanded rule, though only the outer one says what runs
+    and what the refusal message reports."""
+    wrapper = _ModelWithArgs(_Args(model_type="wrapper", text_config=dict(_V2_ARGS)))
+    assert kvmod._kv_layout(wrapper).modelled is False
+    no_outer_type = _ModelWithArgs(_Args(text_config=dict(_V2_ARGS)))
+    assert kvmod._kv_layout(no_outer_type).modelled is False
+
+
+def test_score_refuses_turboquant_on_deepseek_v2_naming_192_before_anything_runs():
+    """Bug: the gate sees hidden//heads = 128 and K 192 reaches fused_quantize."""
+    with pytest.raises(CacheNotQuantizableError) as excinfo:
+        score_kv_config(
+            _NoRunModel(_Args(**_V2_ARGS)),
+            _kv_corpus(1),
+            model_id="org/v2",
+            method=TurboQuantKVMethod(bits=4),
+        )
+    assert "192" in str(excinfo.value)
+    assert "deepseek_v2" in str(excinfo.value)
+
+
+def test_score_allows_vonly_on_deepseek_v2(monkeypatch):
+    """Bug: V-only is refused on K, which it keeps in plain fp16, though V 128 is fit."""
+    install_fake_port(monkeypatch)
+    report = score_kv_config(
+        _WidthsForwardModel(_Args(**_V2_ARGS)),
+        _kv_corpus(1),
+        model_id="org/v2",
+        method=TurboQuantVOnlyKVMethod(v_bits=4),
+    )
+    assert report.kv_method == "turboquant-vonly"
+    assert report.kl.mean > 0
+
+
+# Full DeepSeek-V2's geometry: hidden 5120 over 128 heads is 40, which is no cached width.
+_V2_FULL_ARGS = {
+    **_V2_ARGS,
+    "hidden_size": 5120,
+    "num_attention_heads": 128,
+    "num_key_value_heads": 128,
+}
+
+
+def test_score_allows_vonly_when_hidden_over_heads_is_unfit(monkeypatch):
+    """Bug: `check` still gates hidden//heads = 40 after the layout gate passed V 128, so V-only
+    is refused on full DeepSeek-V2 with a spurious head_dim=40."""
+    install_fake_port(monkeypatch)
+    report = score_kv_config(
+        _WidthsForwardModel(_Args(**_V2_FULL_ARGS)),
+        _kv_corpus(1),
+        model_id="org/v2",
+        method=TurboQuantVOnlyKVMethod(v_bits=4),
+    )
+    assert report.kv_method == "turboquant-vonly"
+
+
+def test_score_refuses_uniform_on_the_key_width_not_hidden_over_heads():
+    """Bug: the layout gate is dropped or runs after `check`, so uniform is refused on
+    hidden//heads = 40 instead of the cached key width 192."""
+    with pytest.raises(CacheNotQuantizableError) as excinfo:
+        score_kv_config(
+            _NoRunModel(_Args(**_V2_FULL_ARGS)),
+            _kv_corpus(1),
+            model_id="org/v2",
+            method=TurboQuantKVMethod(bits=4),
+        )
+    assert "key width=192" in str(excinfo.value)
+    assert "head_dim=40" not in str(excinfo.value)
+
+
+def test_score_layout_gate_runs_before_the_head_dim_check():
+    """Bug: `check` runs first, so an unmodelled MLA layout whose hidden//heads is unfit (96) is
+    refused on head_dim=96 rather than on widths the config cannot state."""
+    args = _Args(
+        **{**_V2_ARGS, "model_type": "deepseek_v3", "hidden_size": 768, "num_attention_heads": 8}
+    )
+    with pytest.raises(CacheNotQuantizableError) as excinfo:
+        score_kv_config(
+            _NoRunModel(args), _kv_corpus(1), model_id="org/v3", method=TurboQuantKVMethod(bits=4)
+        )
+    assert "cannot be read from its config" in str(excinfo.value)
+    assert "head_dim=96" not in str(excinfo.value)
+
+
+@pytest.mark.parametrize("method", _TURBOQUANT_METHODS)
+@pytest.mark.parametrize(
+    "args",
+    [
+        pytest.param(_Args(**{**_V2_ARGS, "model_type": "deepseek_v3"}), id="deepseek_v3-flat"),
+        pytest.param(_kimi_k25_args(dict), id="kimi_k25-text_config-dict"),
+        pytest.param(_kimi_k25_args(lambda text: _Args(**text)), id="kimi_k25-text_config-object"),
+        pytest.param(_no_field("qk_rope_head_dim"), id="deepseek_v2-missing-qk_rope"),
+    ],
+)
+def test_score_refuses_both_turboquant_methods_on_unmodelled_layouts(args, method):
+    """Bug: a latent cache (K 512 on mlx-lm's default) or a partial config reaches the kernels."""
+    with pytest.raises(CacheNotQuantizableError, match="cannot be read from its config"):
+        score_kv_config(_NoRunModel(args), _kv_corpus(1), model_id="org/m", method=method)
+
+
+@pytest.mark.parametrize("method", _TURBOQUANT_METHODS)
+def test_score_llama_shape_runs_both_turboquant_methods(monkeypatch, method):
+    """Bug: the new gate refuses a K == V model, whose behaviour must not change."""
+    install_fake_port(monkeypatch)
+    args = _Args(
+        model_type="llama",
+        hidden_size=512,
+        num_attention_heads=8,
+        num_key_value_heads=8,
+        vocab_size=4,
+    )
+    model = _WidthsForwardModel(args, k_width=64, v_width=64)
+    report = score_kv_config(model, _kv_corpus(1), model_id="org/m", method=method)
+    assert report.kv_method == method.name
+    assert report.kl.mean > 0
+
+
+@pytest.mark.parametrize("method", _TURBOQUANT_METHODS)
+@pytest.mark.parametrize(("hidden", "width"), [(768, 96), (4096, 512)], ids=["not-pow2", "over256"])
+def test_score_llama_shape_keeps_the_head_dim_gate(method, hidden, width):
+    """Bug: the helper replaces the existing gate instead of sitting in front of it."""
+    args = _Args(model_type="llama", hidden_size=hidden, num_attention_heads=8, vocab_size=4)
+    with pytest.raises(CacheNotQuantizableError, match=f"head_dim={width}"):
+        score_kv_config(_NoRunModel(args), _kv_corpus(1), model_id="org/m", method=method)
+
+
+@pytest.mark.parametrize("model_type", ["deepseek_v2", "deepseek_v3"])
+def test_score_stock_is_not_refused_on_mla_args(monkeypatch, model_type):
+    """Bug: the helper refuses stock on an MLA model; today's path decides that in its smoke."""
+    _patch_kv_caches_divergent(monkeypatch)
+    model = _FakeDivergentModel()
+    for name, value in _V2_ARGS.items():
+        setattr(model.args, name, value)
+    model.args.model_type = model_type
+    model.args.head_dim = None
+    report = score_kv_config(
+        model, _kv_corpus(2), model_id="org/m", method=StockKVMethod(bits=4, group_size=64)
+    )
+    assert report.kv_method == "stock"
+
+
+@pytest.mark.parametrize("model_type", ["deepseek_v2", "deepseek_v3"])
+def test_score_affine_is_not_refused_on_mla_args(model_type):
+    """Bug: the helper refuses affine, the one method the stock refusal points at."""
+    model = _WidthsForwardModel(_Args(**{**_V2_ARGS, "model_type": model_type}))
+    report = score_kv_config(
+        model, _kv_corpus(1), model_id="org/m", method=AffineKVMethod(k_bits=8, v_bits=4)
+    )
+    assert report.kv_method == "affine"
+
+
+def test_compare_kv_takes_the_same_refusal_path(monkeypatch, tmp_path):
+    """Bug: `compare kv` has a route to the kernels that skips the layout gate. Only the load is
+    faked; compare_kv_fidelity and score_kv_config are the real ones. The refused config is a
+    failed row, the run continues with the config the layout allows."""
+    install_fake_port(monkeypatch)
+    model = _WidthsForwardModel(_Args(**_V2_ARGS))
+    monkeypatch.setattr(cmp, "install_memory_caps", lambda: (0, 0))
+    monkeypatch.setattr(
+        cmp, "preload_check", lambda model, revision, *, allow_custom_code: PreloadResult({}, None)
+    )
+    monkeypatch.setattr(cmp, "_load_model", lambda model_id, revision, **_: (model, object()))
+    monkeypatch.setattr(
+        cmp, "_load_corpus_for_kv", lambda tok, model_id, max_chunks, *, chunk_length: _kv_corpus(1)
+    )
+    report = cmp.compare_kv_fidelity(
+        "org/v2",
+        [TurboQuantKVMethod(bits=4), TurboQuantVOnlyKVMethod(v_bits=4)],
+        artifacts_dir=tmp_path,
+    )
+    by_label = {r.label: r for r in report.results}
+    assert by_label["turboquant:4"].status == "failed"
+    assert by_label["turboquant:4"].error_type == "CacheNotQuantizableError"
+    assert "192" in by_label["turboquant:4"].message
+    assert by_label["turboquant-vonly:4"].status == "ok"
+
+
+def test_compare_kv_schema_5_turboquant_partial_no_longer_replays(monkeypatch, tmp_path):
+    """Bug: a partial written before the layout gate resumes without passing it, so a number
+    measured at a width the gate never saw is still ranked. Everything in the seeded identity
+    matches this run except the literal schema version."""
+    install_fake_port(monkeypatch)
+    model = _WidthsForwardModel(_Args(**_V2_ARGS))
+    monkeypatch.setattr(cmp, "install_memory_caps", lambda: (0, 0))
+    monkeypatch.setattr(
+        cmp, "preload_check", lambda model, revision, *, allow_custom_code: PreloadResult({}, None)
+    )
+    monkeypatch.setattr(cmp, "_load_model", lambda model_id, revision, **_: (model, object()))
+    monkeypatch.setattr(
+        cmp, "_load_corpus_for_kv", lambda tok, model_id, max_chunks, *, chunk_length: _kv_corpus(1)
+    )
+    method = TurboQuantKVMethod(bits=4)
+    identity = kv_run_identity(
+        model_id="org/v2",
+        model_revision=None,
+        method_name=method.name,
+        params=dict(method.params),
+        method_provenance=dict(method.provenance()),
+        quantize_start=0,
+        max_chunks=None,
+        chunk_length=512,
+    )
+    seeded = make_fid_report(
+        model_id="org/v2",
+        kv_bits=None,
+        kv_group_size=None,
+        kv_method=method.name,
+        kv_method_params=dict(method.params),
+        kv_method_provenance=dict(method.provenance()),
+    )
+    (tmp_path / "turboquant_4.json").write_text(
+        json.dumps(
+            {
+                "status": "ok",
+                "report": dataclasses.asdict(seeded),
+                "cost": 22032,
+                "ranked_kl": 0.02,
+                "ranked_verdict": "marginal",
+                "ranked_footing": "quantizer_only",
+                "run_identity": {**identity, "schema_version": 5},
+            }
+        )
+    )
+    report = cmp.compare_kv_fidelity(
+        "org/v2", [method, TurboQuantVOnlyKVMethod(v_bits=4)], artifacts_dir=tmp_path
+    )
+    row = next(r for r in report.results if r.label == "turboquant:4")
+    assert row.status == "failed"
+    assert row.error_type == "CacheNotQuantizableError"
+    assert "192" in row.message
+    assert "turboquant:4" not in report.frontier

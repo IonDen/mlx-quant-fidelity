@@ -975,11 +975,11 @@ def test_kv_envelope_non_dict_is_corrupt_partial():
 # ── regression: chunk_length as a first-class knob ─────────────────────────────
 
 
-def test_kv_partial_schema_version_is_5():
+def test_kv_partial_schema_version_is_6():
     # Literal pin (mirrors the weight-side == 1 pin in test_compare_weight.py): a future
     # unrelated edit that accidentally bumps or resets this constant goes red here, not just
     # against whatever the constant happens to be at the time.
-    assert cmp._KV_PARTIAL_SCHEMA_VERSION == 5
+    assert cmp._KV_PARTIAL_SCHEMA_VERSION == 6
 
 
 def test_kv_partial_identity_includes_chunk_length(monkeypatch, tmp_path):
@@ -991,9 +991,9 @@ def test_kv_partial_identity_includes_chunk_length(monkeypatch, tmp_path):
     cmp.compare_kv_fidelity("m", [(4, 64), (8, 64)], chunk_length=1024, artifacts_dir=tmp_path)
     env = json.loads((tmp_path / "4_64.json").read_text())
     assert env["run_identity"]["chunk_length"] == 1024
-    # Literal (not compared against the live constant -- see test_kv_partial_schema_version_is_5
+    # Literal (not compared against the live constant -- see test_kv_partial_schema_version_is_6
     # for that pin; this asserts the ACTUAL persisted value, not a hardcoded guess).
-    assert env["run_identity"]["schema_version"] == 5
+    assert env["run_identity"]["schema_version"] == 6
 
 
 def test_chunk_length_change_invalidates_partials(monkeypatch, tmp_path):
@@ -1166,12 +1166,12 @@ def test_compare_kv_accepts_mixed_tuple_and_method_list(monkeypatch, tmp_path):
     assert (tmp_path / "turboquant_4.json").exists()
 
 
-def test_compare_kv_partial_identity_carries_method_and_schema_5(monkeypatch, tmp_path):
+def test_compare_kv_partial_identity_carries_method_and_schema_6(monkeypatch, tmp_path):
     reports = {(4, 64): _fid((4, 64), 0.09), (8, 64): _fid((8, 64), 0.01)}
     _patch_kv_compare(monkeypatch, reports)
     cmp.compare_kv_fidelity("m", [(4, 64), (8, 64)], artifacts_dir=tmp_path)
     ident = json.loads((tmp_path / "4_64.json").read_text())["run_identity"]
-    assert ident["schema_version"] == 5
+    assert ident["schema_version"] == 6
     assert ident["method"] == "stock"
     assert ident["params"] == {"bits": 4, "group_size": 64}
     assert "bits" not in ident
