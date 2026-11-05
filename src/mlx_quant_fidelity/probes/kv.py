@@ -19,6 +19,7 @@ from mlx_quant_fidelity._memory_caps import (
     install_memory_caps,
 )
 from mlx_quant_fidelity.corpora.provenance import scored_provenance
+from mlx_quant_fidelity.costs import KVLayout, kv_layout
 from mlx_quant_fidelity.errors import (
     CacheNotQuantizableError,
     CompareConfigError,
@@ -43,6 +44,8 @@ from mlx_quant_fidelity.probes.kv_methods import (
     ControlLaneMethod,
     PartialCoverageMethod,
     StockKVMethod,
+    _check_head_dim,
+    _gate_turboquant_layout,
     check_before_load,
 )
 from mlx_quant_fidelity.probes.kv_methods import (
@@ -259,6 +262,12 @@ def _kv_head_dim(model: object) -> int | None:
     if isinstance(hidden, int) and isinstance(heads, int):
         return hidden // heads
     return None
+
+
+def _kv_layout(model: object) -> KVLayout:
+    """The cached K and V widths of a loaded model, read through ``_model_arg``."""
+    args = getattr(model, "args", None)
+    return kv_layout(getattr(args, "model_type", None), lambda name: _model_arg(args, name))
 
 
 def _score_chunk(
@@ -503,7 +512,7 @@ def _uniform_mismatch_message(method: KVCacheMethod, model_type: str) -> str:
         return (
             f"this model's attention (model_type {model_type!r}) does not run on the "
             f"{method.name!r} method's quantized KV cache; a dequantize-on-fetch method hands "
-            "the attention plain arrays and may run it: try `affine:<k>:<v>` or `turboquant`"
+            "the attention plain arrays and may run it: try `affine:<k>:<v>`"
         )
     return (
         f"the attention did not run on this method's cache (method {method.name!r}, "
@@ -732,7 +741,11 @@ def score_kv_config(
     head_dim = _kv_head_dim(model)
     # Pure pre-flight first (keeps the 0.5.x warnings order: head_dim, then budget). It allocates
     # nothing, so the kernel-panic budget gate below still precedes any cache construction.
-    probe_warnings.extend(method.check(head_dim=head_dim, model_type=model_type))
+    layout = _kv_layout(model)
+    _gate_turboquant_layout(method, layout, model_type=model_type)
+    probe_warnings.extend(
+        method.check(head_dim=_check_head_dim(method, layout, head_dim), model_type=model_type)
+    )
     window = getattr(corpus.provenance, "chunk_length", None)
     _require_teacher_forced_positions(
         corpus.chunks[:max_chunks] if max_chunks is not None else corpus.chunks

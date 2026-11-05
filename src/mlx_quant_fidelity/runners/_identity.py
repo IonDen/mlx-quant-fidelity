@@ -12,9 +12,9 @@ from pathlib import Path
 
 # Bump the relevant constant when that mode's partial format or cost formula changes, so only
 # that mode's old partials are rejected. The two modes' partials are independent.
-KV_PARTIAL_SCHEMA_VERSION = (
-    5  # bumped: report provenance gained bos_policy, dataset_revision, n_tokens
-)
+# KV bumped to 6: a partial written before the TurboQuant MLA gate could hold a number measured at
+# a width the gate never saw. It must be scored again, so that it passes the gate.
+KV_PARTIAL_SCHEMA_VERSION = 6
 WEIGHT_PARTIAL_SCHEMA_VERSION = 3  # bumped: identity now carries mlx/mlx-lm versions
 
 # The footing every `compare kv` row is ranked on, regardless of a method's native footing.

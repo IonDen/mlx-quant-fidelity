@@ -6,8 +6,10 @@ import sys
 import mlx.core as mx
 import pytest
 from mlx_lm.models.cache import KVCache, RotatingKVCache
+from tests.probes.fake_kv_method import FakeKVMethod
 from tests.probes.fake_turboquant import install_fake_port
 
+from mlx_quant_fidelity.costs import KVLayout
 from mlx_quant_fidelity.errors import (
     CacheNotQuantizableError,
     CompareConfigError,
@@ -20,6 +22,7 @@ from mlx_quant_fidelity.probes.kv_methods import (
     StockKVMethod,
     TurboQuantKVMethod,
     TurboQuantVOnlyKVMethod,
+    _gate_turboquant_layout,
     parse_method_spec,
     stored_state_bytes,
     turboquant_bytes_per_token,
@@ -1280,3 +1283,101 @@ def test_distribution_without_a_file_list_is_refused_without_running_it(monkeypa
     with pytest.raises(MethodUnavailableError, match="not a file of the installed"):
         _import_turboquant()
     assert not sentinel.exists()
+
+
+# --- _gate_turboquant_layout: the width the cache really holds ------------------------------
+
+_V2_LAYOUT = KVLayout(k_dim=192, v_dim=128, modelled=True)
+_UNMODELLED = KVLayout(k_dim=None, v_dim=None, modelled=False)
+_NO_MLA = KVLayout(k_dim=None, v_dim=None, modelled=True)
+
+
+def test_layout_gate_refuses_turboquant_on_the_key_width():
+    """Bug: uniform TurboQuant reaches the kernels with K 192, where it returns wrong values."""
+    with pytest.raises(CacheNotQuantizableError) as excinfo:
+        _gate_turboquant_layout(TurboQuantKVMethod(bits=4), _V2_LAYOUT, model_type="deepseek_v2")
+    msg = str(excinfo.value)
+    assert "key width=192" in msg
+    assert "deepseek_v2" in msg
+    assert "port's kernels" in msg
+
+
+@pytest.mark.parametrize(
+    ("layout", "named"),
+    [
+        (KVLayout(k_dim=128, v_dim=96, modelled=True), "96"),  # V is not a power of two
+        (KVLayout(k_dim=128, v_dim=512, modelled=True), "512"),  # V overruns the arrays
+        (KVLayout(k_dim=512, v_dim=128, modelled=True), "512"),  # K overruns the arrays
+    ],
+)
+def test_layout_gate_turboquant_checks_both_widths(layout, named):
+    """Bug: only one side is gated while both go through the kernels."""
+    with pytest.raises(CacheNotQuantizableError, match=named):
+        _gate_turboquant_layout(TurboQuantKVMethod(bits=4), layout, model_type="x")
+
+
+def test_layout_gate_allows_turboquant_when_both_widths_are_fit():
+    """Bug: every expanded layout is refused, not only one whose width the kernels cannot take."""
+    layout = KVLayout(k_dim=128, v_dim=64, modelled=True)
+    _gate_turboquant_layout(TurboQuantKVMethod(bits=4), layout, model_type="deepseek_v2")
+
+
+def test_layout_gate_allows_vonly_on_value_width():
+    """Bug: K is gated on V-only, where it stays in plain fp16 and never meets a kernel."""
+    vonly = TurboQuantVOnlyKVMethod(v_bits=4)
+    _gate_turboquant_layout(vonly, _V2_LAYOUT, model_type="deepseek_v2")
+    k_too_wide = KVLayout(k_dim=512, v_dim=128, modelled=True)
+    _gate_turboquant_layout(vonly, k_too_wide, model_type="deepseek_v2")
+
+
+@pytest.mark.parametrize("v_dim", [96, 512])
+def test_layout_gate_refuses_vonly_on_unfit_value_width(v_dim):
+    """Bug: V-only trusts hidden//heads, which says nothing about the width V is cached at."""
+    layout = KVLayout(k_dim=192, v_dim=v_dim, modelled=True)
+    with pytest.raises(CacheNotQuantizableError, match=f"value width={v_dim}"):
+        _gate_turboquant_layout(TurboQuantVOnlyKVMethod(v_bits=4), layout, model_type="deepseek_v2")
+
+
+@pytest.mark.parametrize(
+    "method", [TurboQuantKVMethod(bits=4), TurboQuantVOnlyKVMethod(v_bits=4)], ids=["uniform", "v"]
+)
+def test_layout_gate_refuses_both_methods_on_unmodelled_layout(method):
+    """Bug: a cache whose widths nobody can state reaches the kernels."""
+    with pytest.raises(CacheNotQuantizableError) as excinfo:
+        _gate_turboquant_layout(method, _UNMODELLED, model_type="deepseek_v3")
+    msg = str(excinfo.value)
+    assert "deepseek_v3" in msg
+    assert "port's kernels" in msg
+
+
+@pytest.mark.parametrize(
+    "method", [TurboQuantKVMethod(bits=4), TurboQuantVOnlyKVMethod(v_bits=4)], ids=["uniform", "v"]
+)
+def test_layout_gate_leaves_models_without_mla_fields_to_the_head_dim_gate(method):
+    """Bug: a K == V model is refused here, or None widths fail the power-of-two test."""
+    _gate_turboquant_layout(method, _NO_MLA, model_type="llama")
+
+
+@pytest.mark.parametrize(
+    "method",
+    [
+        StockKVMethod(bits=4, group_size=64),
+        AffineKVMethod(k_bits=8, v_bits=4),
+        FakeKVMethod(name="turboquant"),  # a third-party method is judged by class, not by name
+    ],
+    ids=["stock", "affine", "third-party"],
+)
+@pytest.mark.parametrize("layout", [_V2_LAYOUT, _UNMODELLED, _NO_MLA], ids=["v2", "latent", "none"])
+def test_layout_gate_is_a_no_op_for_other_methods(method, layout):
+    """Bug: the helper gates by anything wider than the two TurboQuant classes."""
+    _gate_turboquant_layout(method, layout, model_type="deepseek_v2")
+
+
+def test_head_dim_gate_message_is_unchanged():
+    """Bug: the K == V refusal text drifts while the gate gains a width label."""
+    with pytest.raises(CacheNotQuantizableError) as excinfo:
+        TurboQuantKVMethod(bits=4).check(head_dim=96, model_type="phi3")
+    assert str(excinfo.value) == (
+        "TurboQuant-MLX kernels require a known power-of-two head_dim <= 256; model 'phi3' has "
+        "head_dim=96. This is a limitation of the port's kernels, not of the model."
+    )
