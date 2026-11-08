@@ -3,6 +3,17 @@
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.2] - 2026-11-08
+
+A bug-fix release. On models with multi-head latent attention (MLA), the TurboQuant methods are now checked against the widths the model really caches. Models whose config has no MLA fields, such as Llama, Qwen and Gemma, behave as before. Costs and memory figures do not change.
+
+### Fixed
+
+- On MLA models, the TurboQuant width check looked at the hidden size divided by the head count, which is not the width these models put in the KV cache. TurboQuant-MLX's fused kernels need a power-of-two width up to 256, so the check could pass while the kernels received a width they do not handle. This comes from reading the kernel source; no wrong result was observed in a run.
+- `turboquant` is now refused on `deepseek_v2` and `youtu_llm`, which cache keys of width qk_nope + qk_rope (192 on DeepSeek-V2-Lite; the `youtu_llm` widths come from mlx-lm 0.31.3's model source, and no `youtu_llm` model was run), and on any model whose config has MLA fields in a layout the tool does not model, such as the compressed-latent caches of DeepSeek-V3 and Kimi. `turboquant-vonly` checks the value width instead: it is allowed on `deepseek_v2` (128) and refused on an unmodelled layout. The refusal comes after the model loads and before any TurboQuant cache is built or any of its kernels runs. It is the same refusal error (`CacheNotQuantizableError`) that the other width checks raise. Its message names the width when it is known, and otherwise says the widths cannot be read from the config.
+- When a model's attention cannot run on the stock quantized cache, the refusal used to suggest `affine:<k>:<v>` or `turboquant`. It now suggests only `affine:<k>:<v>`, because the tool does not model TurboQuant's widths on those layouts.
+- Partial results saved by `compare kv` in earlier versions are scored again on the next run instead of being reused, so an old TurboQuant row on an MLA model cannot reappear in a ranking. This costs one recomputation.
+
 ## [0.11.1] - 2026-11-05
 
 A packaging release. Nothing in measurement, reports, the API or the `>=3.11` Python floor changes.
