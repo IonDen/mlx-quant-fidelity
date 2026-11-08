@@ -374,7 +374,9 @@ Every entry point, the Python API included, caps MLX's wired memory and its buff
 
 ## Status
 
-0.11.1, released on PyPI as `mlx-quant-fidelity`, is a packaging release. The badge above states the Python 3.11 floor, and Python 3.14 is now tested in CI and listed as supported. Measurement, reports and the API are unchanged from 0.11.0.
+0.11.2, released on PyPI as `mlx-quant-fidelity`, is a bug-fix release. On models with multi-head latent attention (MLA), such as DeepSeek-V2, the TurboQuant methods now check the widths the model really caches, not a width derived from the hidden size. `turboquant` is refused on `deepseek_v2` and `youtu_llm` (keys are 192 wide on DeepSeek-V2-Lite) and on MLA layouts the tool does not model. `turboquant-vonly` is allowed on `deepseek_v2`, where values are 128 wide. The refusal comes before any TurboQuant cache is built or any of its kernels runs, and the stock-cache refusal now suggests only `affine:<k>:<v>`. This comes from reading TurboQuant-MLX's kernel source, not from an observed wrong result. Models whose config has no MLA fields (Llama, Qwen, Gemma and the like) behave as before, and saved `compare kv` results are scored again once.
+
+0.11.1 was a packaging release: the Python 3.11 floor in the badge, and Python 3.14 tested in CI and listed as supported.
 
 0.11.0 was a coverage release: a second weight ladder on Qwen3-4B-Instruct-2507, a KV comparison on DeepSeek-V2-Lite-Chat, and a [methodology section on MLA models](docs/measurement-principles.md#mla-models-and-what-their-cache-stores). A model whose attention cannot run on the chosen cache is now refused before scoring, and a `turboquant_mlx` install that shadows the pinned port is refused before it is imported. `--allow-custom-code` also covers a tokenizer's own code, though that check fires after the weights have downloaded and loaded. The weight probe's memory pre-flight now sizes a model from its shard index. That only feeds the pre-flight: a partial snapshot that fits passes, and mlx-lm's load then completes the download. Threshold validation and the remaining attention coverage are on the [roadmap](ROADMAP.md).
 
