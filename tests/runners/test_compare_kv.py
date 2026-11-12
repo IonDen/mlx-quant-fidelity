@@ -7,8 +7,10 @@ import types
 
 import pytest
 from tests.factories import make_fid_report
+from tests.probes.fake_kv_method import FakeKVMethod
 from tests.probes.fake_turboquant import install_fake_port
 
+from mlx_quant_fidelity.costs import KVLayout
 from mlx_quant_fidelity.errors import CompareConfigError, CorpusError, LogitsBudgetError
 from mlx_quant_fidelity.metrics import ScalarSummary
 from mlx_quant_fidelity.policy import verdict_for
@@ -975,11 +977,11 @@ def test_kv_envelope_non_dict_is_corrupt_partial():
 # ── regression: chunk_length as a first-class knob ─────────────────────────────
 
 
-def test_kv_partial_schema_version_is_6():
+def test_kv_partial_schema_version_is_7():
     # Literal pin (mirrors the weight-side == 1 pin in test_compare_weight.py): a future
     # unrelated edit that accidentally bumps or resets this constant goes red here, not just
     # against whatever the constant happens to be at the time.
-    assert cmp._KV_PARTIAL_SCHEMA_VERSION == 6
+    assert cmp._KV_PARTIAL_SCHEMA_VERSION == 7
 
 
 def test_kv_partial_identity_includes_chunk_length(monkeypatch, tmp_path):
@@ -991,9 +993,9 @@ def test_kv_partial_identity_includes_chunk_length(monkeypatch, tmp_path):
     cmp.compare_kv_fidelity("m", [(4, 64), (8, 64)], chunk_length=1024, artifacts_dir=tmp_path)
     env = json.loads((tmp_path / "4_64.json").read_text())
     assert env["run_identity"]["chunk_length"] == 1024
-    # Literal (not compared against the live constant -- see test_kv_partial_schema_version_is_6
+    # Literal (not compared against the live constant -- see test_kv_partial_schema_version_is_7
     # for that pin; this asserts the ACTUAL persisted value, not a hardcoded guess).
-    assert env["run_identity"]["schema_version"] == 6
+    assert env["run_identity"]["schema_version"] == 7
 
 
 def test_chunk_length_change_invalidates_partials(monkeypatch, tmp_path):
@@ -1201,12 +1203,12 @@ def test_compare_kv_accepts_mixed_tuple_and_method_list(monkeypatch, tmp_path):
     assert (tmp_path / "turboquant_4.json").exists()
 
 
-def test_compare_kv_partial_identity_carries_method_and_schema_6(monkeypatch, tmp_path):
+def test_compare_kv_partial_identity_carries_method_and_schema_7(monkeypatch, tmp_path):
     reports = {(4, 64): _fid((4, 64), 0.09), (8, 64): _fid((8, 64), 0.01)}
     _patch_kv_compare(monkeypatch, reports)
     cmp.compare_kv_fidelity("m", [(4, 64), (8, 64)], artifacts_dir=tmp_path)
     ident = json.loads((tmp_path / "4_64.json").read_text())["run_identity"]
-    assert ident["schema_version"] == 6
+    assert ident["schema_version"] == 7
     assert ident["method"] == "stock"
     assert ident["params"] == {"bits": 4, "group_size": 64}
     assert "bits" not in ident
@@ -1834,3 +1836,224 @@ def test_compare_kv_passes_allow_custom_code_to_the_model_load(monkeypatch, tmp_
     with pytest.raises(_StopError):
         cmp.compare_kv_fidelity("org/m", [(4, 64), (8, 64)], artifacts_dir=tmp_path, **kwargs)
     assert received == [allow]
+
+
+# ── K and V widths: compare costs, unmodelled layouts, old signatures, partials ───────────────
+
+_V2_LAYOUT = KVLayout(k_dim=192, v_dim=128, modelled=True)
+_UNMODELLED_LAYOUT = KVLayout(k_dim=None, v_dim=None, modelled=False)
+# DeepSeek-V2-Lite's config.json at a33a8ad (the committed sample's pin); head_dim is absent.
+_V2_CONFIG = {
+    "model_type": "deepseek_v2",
+    "hidden_size": 2048,
+    "num_attention_heads": 16,
+    "num_key_value_heads": 16,
+    "num_hidden_layers": 27,
+    "qk_nope_head_dim": 128,
+    "qk_rope_head_dim": 64,
+    "v_head_dim": 128,
+    "kv_lora_rank": 512,
+}
+
+
+def _two_stock_reports():
+    return {(4, 64): _fid((4, 64), 0.09), (8, 64): _fid((8, 64), 0.01)}
+
+
+def test_compare_cost_uses_both_widths(monkeypatch, tmp_path):
+    """Bug: compare costs a row without v_dim, so V is counted at K's 192 (4:64 would cost
+    432·384·0.5625 = 93312) instead of 432·(192+128)·0.5625 = 77760; 8:64 is 432·320·1.0625.
+    Bug: the resolver reads DeepSeek-V2's args wrong (K at 128, 4:64 then costs 62208). Only the
+    load and the scoring are faked; the widths come from the real resolver over V2's args."""
+    report = _compare_on_args(monkeypatch, tmp_path, real_dims=True, **_V2_CONFIG)
+    by_label = {r.label: r for r in report.results}
+    assert by_label["4:64"].point.cost_bytes == 77760
+    assert by_label["8:64"].point.cost_bytes == 146880
+
+
+def test_compare_latent_layout_is_cost_unavailable(monkeypatch, tmp_path):
+    """Bug: a layout the resolver cannot state is costed at hidden // heads and ranked on a
+    number that is not its stored bytes."""
+    _patch_kv_compare(monkeypatch, _two_stock_reports(), dims=(27, 16, 128))
+    monkeypatch.setattr(cmp, "_kv_layout", lambda model: _UNMODELLED_LAYOUT)
+    report = cmp.compare_kv_fidelity("m", [(4, 64), (8, 64)], artifacts_dir=tmp_path)
+    assert [(r.status, r.point, r.excluded_reason) for r in report.results] == [
+        ("ok", None, "cost unavailable"),
+        ("ok", None, "cost unavailable"),
+    ]
+    assert report.frontier == ()
+
+
+def _compare_on_args(monkeypatch, tmp_path, *, real_dims=False, **fields):
+    """Run compare kv on stock 4:64 and 8:64 with the real layout resolver over these args.
+
+    ``real_dims`` keeps the real ``_kv_dims`` too, so the KV heads and key width are read from
+    the same args instead of a fixed (27, 16, 128); the model then carries one placeholder per
+    ``num_hidden_layers`` for mlx-lm's ``make_prompt_cache`` to count."""
+    real_kv_dims = cmp._kv_dims
+    _patch_kv_compare(monkeypatch, _two_stock_reports(), dims=(27, 16, 128))
+    model = types.SimpleNamespace(args=types.SimpleNamespace(**fields))
+    if real_dims:
+        monkeypatch.setattr(cmp, "_kv_dims", real_kv_dims)
+        model.layers = [None] * fields["num_hidden_layers"]
+    monkeypatch.setattr(cmp, "_load_model", lambda model_id, revision, **_: (model, object()))
+    return cmp.compare_kv_fidelity("m", [(4, 64), (8, 64)], artifacts_dir=tmp_path)
+
+
+def test_compare_minicpm3_is_cost_unavailable(monkeypatch, tmp_path):
+    """minicpm3 caches V at hidden_size // num_attention_heads (mlx-lm minicpm3.py:52); no field
+    of its config states that width. Bug: compare reads its MLA fields as cache widths, or costs
+    it at hidden // heads, and ranks a number."""
+    report = _compare_on_args(
+        monkeypatch,
+        tmp_path,
+        model_type="minicpm3",
+        qk_nope_head_dim=64,
+        qk_rope_head_dim=32,
+        kv_lora_rank=256,
+        hidden_size=2560,
+        num_attention_heads=40,
+    )
+    assert {(r.point, r.excluded_reason) for r in report.results} == {(None, "cost unavailable")}
+
+
+def test_compare_mimo_v2_flash_is_cost_unavailable(monkeypatch, tmp_path):
+    """mimo_v2_flash picks its K/V widths per layer, full vs sliding-window attention (mlx-lm
+    mimo_v2_flash.py:61-72), so one width pair cannot cost it. Bug: compare costs it on one pair."""
+    report = _compare_on_args(
+        monkeypatch,
+        tmp_path,
+        model_type="mimo_v2_flash",
+        head_dim=192,
+        v_head_dim=128,
+        swa_head_dim=192,
+        swa_v_head_dim=128,
+    )
+    assert {(r.point, r.excluded_reason) for r in report.results} == {(None, "cost unavailable")}
+
+
+def test_old_signature_method_on_asymmetric_model_is_a_failed_row(monkeypatch, tmp_path):
+    """Bug: v_dim is left out on a K != V model, so a method written against the older signature
+    is silently costed with V at K's width; or its TypeError aborts the run instead of being
+    that config's failed row. Only the load is faked; score_kv_config is the real one."""
+    monkeypatch.setattr(cmp, "install_memory_caps", lambda: (0, 0))
+    monkeypatch.setattr(
+        cmp, "preload_check", lambda model, revision, *, allow_custom_code: PreloadResult({}, None)
+    )
+    model = types.SimpleNamespace(args=types.SimpleNamespace(**_V2_CONFIG))
+    monkeypatch.setattr(cmp, "_load_model", lambda model_id, revision, **_: (model, object()))
+    monkeypatch.setattr(cmp, "_kv_dims", lambda model: (27, 16, 192))
+    monkeypatch.setattr(
+        cmp, "_load_corpus_for_kv", lambda tok, model_id, max_chunks, *, chunk_length: object()
+    )
+    report = cmp.compare_kv_fidelity(
+        "org/v2", [FakeKVMethod(), StockKVMethod(bits=4, group_size=64)], artifacts_dir=tmp_path
+    )
+    row = next(r for r in report.results if r.label == "fake:1")
+    assert row.status == "failed"
+    assert row.error_type == "TypeError"
+    assert "v_dim" in row.message
+
+
+def test_old_signature_method_on_an_expanded_type_with_equal_widths_is_costed(
+    monkeypatch, tmp_path
+):
+    """Bug: compare's cost call hands v_dim=192 to a method with the old signature on a
+    deepseek_v2 model whose K (128 + 64) and V are both 192 (the key width is not compared),
+    so its row fails with TypeError instead of being ranked. Only the load and the scoring are
+    faked; the widths come from the real resolver over the args. By hand: the fake costs
+    100 B per layer · 27 layers = 2700; stock 4:64 costs 432·(192 + 192)·0.5625 = 93312."""
+    real_kv_dims = cmp._kv_dims
+    reports = {(1, None): _fid((1, 64), 0.05), (4, 64): _fid((4, 64), 0.09)}
+    _patch_kv_compare(monkeypatch, reports)
+    model = types.SimpleNamespace(
+        args=types.SimpleNamespace(**{**_V2_CONFIG, "v_head_dim": 192}),
+        layers=[None] * 27,
+    )
+    monkeypatch.setattr(cmp, "_load_model", lambda model_id, revision, **_: (model, object()))
+    monkeypatch.setattr(cmp, "_kv_dims", real_kv_dims)
+    report = cmp.compare_kv_fidelity(
+        "org/v2", [FakeKVMethod(), StockKVMethod(bits=4, group_size=64)], artifacts_dir=tmp_path
+    )
+    by_label = {r.label: r for r in report.results}
+    assert by_label["fake:1"].status == "ok"
+    assert by_label["fake:1"].point.cost_bytes == 2700
+    assert by_label["4:64"].point.cost_bytes == 93312
+
+
+def test_schema_6_partial_with_old_cost_recomputes(monkeypatch, tmp_path):
+    """Bug: the partial schema stays 6, so a 4:64 partial costed with K and V at one shared width
+    (hidden // heads = 128) resumes and is ranked at its old 62208 (432·256·0.5625) instead of
+    being scored again at 77760."""
+    (tmp_path / "4_64.json").write_text(
+        _kv_partial_with_identity(
+            _fid((4, 64), 0.09), 62208, bits=4, group_size=64, schema_version=6
+        )
+    )
+    calls = _patch_kv_compare(monkeypatch, _two_stock_reports(), dims=(27, 16, 192))
+    monkeypatch.setattr(cmp, "_kv_layout", lambda model: _V2_LAYOUT)
+    report = cmp.compare_kv_fidelity("m", [(4, 64), (8, 64)], artifacts_dir=tmp_path)
+    assert (4, 64) in calls
+    row = next(r for r in report.results if r.label == "4:64")
+    assert row.point.cost_bytes == 77760
+
+
+def test_geometry_from_config_is_the_key_width_on_deepseek_v2():
+    """Bug: head_dim stays hidden // heads = 128 on deepseek_v2, whose cache holds K at 192."""
+    assert cmp.kv_geometry_from_config(_V2_CONFIG) == (27, 16, 192)
+
+
+def test_v_dim_from_config_reads_the_value_width():
+    """Bug: the sweep and the budget have no value width to pass, so V is costed at K's 192."""
+    assert cmp.kv_v_dim_from_config(_V2_CONFIG) == 128
+
+
+def test_v_dim_from_config_is_none_without_mla_fields():
+    """Bug: a K == V model gets a v_dim, which an old-signature method cannot take."""
+    flat = {"num_hidden_layers": 16, "num_attention_heads": 32, "hidden_size": 2048}
+    assert cmp.kv_v_dim_from_config(flat) is None
+
+
+@pytest.mark.parametrize(
+    "config",
+    [
+        pytest.param({**_V2_CONFIG, "model_type": "deepseek_v3"}, id="deepseek_v3-latent"),
+        pytest.param(
+            {
+                # hidden / heads also sit at the top level, so a layout reader that skips the
+                # nested MLA fields derives 2048 // 16 = 128 and the head_dim check reds.
+                "model_type": "kimi_k25",
+                "hidden_size": 2048,
+                "num_attention_heads": 16,
+                "text_config": {k: v for k, v in _V2_CONFIG.items() if k != "model_type"},
+            },
+            id="kimi_k25-text_config",
+        ),
+        pytest.param(
+            {k: v for k, v in _V2_CONFIG.items() if k != "qk_rope_head_dim"},
+            id="deepseek_v2-missing-qk_rope",
+        ),
+    ],
+)
+def test_geometry_from_config_has_no_head_dim_on_an_unmodelled_layout(config):
+    """Bug: a latent cache (K is kv_lora_rank there) or a deepseek_v2 config missing a width is
+    swept and budgeted at hidden // heads = 128, a width its cache does not hold."""
+    assert cmp.kv_geometry_from_config(config)[2] is None
+    assert cmp.kv_v_dim_from_config(config) is None
+
+
+def test_budget_filter_counts_both_widths():
+    """Bug: the budget costs V at K's width, or K at 128: 4:64 then costs 93312 or 62208, and
+    62208 would keep it under 70000. Both widths: 4:64 is 432·320·0.5625 = 77760 (over),
+    2:64 is 432·320·0.3125 = 43200 (under)."""
+    kept, skipped = cmp.filter_configs_by_kv_budget(
+        [(2, 64), (4, 64)],
+        n_layers=27,
+        n_kv_heads=16,
+        head_dim=192,
+        v_dim=128,
+        max_kv_bytes_per_token=70000,
+    )
+    assert kept == [(2, 64)]
+    assert skipped[0][0] == "4:64"
+    assert "77760" in skipped[0][1]

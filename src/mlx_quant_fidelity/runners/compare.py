@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Any, TypeVar
 import mlx.core as mx
 
 from mlx_quant_fidelity._memory_caps import caps_warning, install_memory_caps
-from mlx_quant_fidelity.costs import kv_bytes_per_token
+from mlx_quant_fidelity.costs import KVLayout, kv_bytes_per_token, kv_layout, v_dim_kwarg
 from mlx_quant_fidelity.errors import (
     CacheNotQuantizableError,
     CompareConfigError,
@@ -27,6 +27,7 @@ from mlx_quant_fidelity.probes._preload import load_checked, preload_check
 from mlx_quant_fidelity.probes.kv import (
     MAX_CHUNK_LENGTH,
     _kv_head_dim,
+    _kv_layout,
     _model_arg,
     score_kv_config,
 )
@@ -575,6 +576,35 @@ def generate_sweep_configs(
     return grid, skipped
 
 
+def _config_field_reader(config: dict[str, object]) -> Callable[[str], int | None]:
+    """A positive-int field reader over a raw ``config.json`` dict, ``text_config`` as fallback.
+
+    Each field is read top-level first, ``text_config`` only when the top level lacks a positive
+    integer for it, so a top-level value wins over a nested one. Non-positive counts as missing.
+    """
+    nested = config.get("text_config")
+    nested_cfg = nested if isinstance(nested, dict) else {}
+
+    def _int_or_none(v: object) -> int | None:
+        return v if isinstance(v, int) and not isinstance(v, bool) and v > 0 else None
+
+    def _get(key: str) -> int | None:
+        top = _int_or_none(config.get(key))
+        return top if top is not None else _int_or_none(nested_cfg.get(key))
+
+    return _get
+
+
+def _config_kv_layout(config: dict[str, object]) -> KVLayout:
+    """The cached K and V widths a ``config.json`` states, keyed on its top-level model_type."""
+    return kv_layout(config.get("model_type"), _config_field_reader(config))
+
+
+def config_kv_layout_modelled(config: dict[str, object]) -> bool:
+    """False when ``config.json`` carries MLA fields whose cached widths this tool cannot state."""
+    return _config_kv_layout(config).modelled
+
+
 def kv_geometry_from_config(
     config: dict[str, object],
 ) -> tuple[int | None, int | None, int | None]:
@@ -586,29 +616,37 @@ def kv_geometry_from_config(
     ``num_key_value_heads`` falls back to ``num_attention_heads`` (dense attention). A field
     that can't be resolved to an int comes back ``None`` rather than raising — the caller
     decides what's fatal.
+
+    ``head_dim`` is the cached key width: on an expanded MLA cache (see
+    :func:`~mlx_quant_fidelity.costs.kv_layout`) it is ``qk_nope_head_dim + qk_rope_head_dim``,
+    and on a layout whose widths the config cannot state it is ``None``. The value width comes
+    from :func:`kv_v_dim_from_config`.
     """
-    nested = config.get("text_config")
-    nested_cfg = nested if isinstance(nested, dict) else {}
-
-    def _int_or_none(v: object) -> int | None:
-        return v if isinstance(v, int) and not isinstance(v, bool) and v > 0 else None
-
-    def _get(key: str) -> int | None:
-        # Top-level key first, ``text_config`` as the fallback; non-positive counts as missing.
-        top = _int_or_none(config.get(key))
-        return top if top is not None else _int_or_none(nested_cfg.get(key))
-
+    _get = _config_field_reader(config)
     n_layers = _get("num_hidden_layers")
     n_heads = _get("num_attention_heads")
     n_kv_heads = _get("num_key_value_heads")
     if n_kv_heads is None:
         n_kv_heads = n_heads
+    layout = _config_kv_layout(config)
+    if not layout.modelled:
+        return n_layers, n_kv_heads, None
+    if layout.k_dim is not None:
+        return n_layers, n_kv_heads, layout.k_dim
     head_dim = _get("head_dim")
     if head_dim is None:
         hidden_size = _get("hidden_size")
         if hidden_size is not None and n_heads:
             head_dim = hidden_size // n_heads
     return n_layers, n_kv_heads, head_dim
+
+
+def kv_v_dim_from_config(config: dict[str, object]) -> int | None:
+    """The cached value width a ``config.json`` states, or ``None`` when V = K or it is unknown.
+
+    Pass it as ``v_dim`` next to :func:`kv_geometry_from_config`'s ``head_dim``.
+    """
+    return _config_kv_layout(config).v_dim
 
 
 def filter_configs_by_kv_budget(
@@ -618,17 +656,24 @@ def filter_configs_by_kv_budget(
     n_kv_heads: int,
     head_dim: int,
     max_kv_bytes_per_token: int,
+    v_dim: int | None = None,
 ) -> tuple[list[tuple[int, int]], list[tuple[str, str]]]:
     """Partition ``configs`` into ``(kept, skipped)`` by a KV-byte-per-token budget.
 
     Costed via :func:`~mlx_quant_fidelity.costs.kv_bytes_per_token` — the same denominator
-    ``compare kv`` ranks on.
+    ``compare kv`` ranks on. ``head_dim`` is the key width and ``v_dim`` the value width;
+    ``v_dim=None`` means V = K.
     """
     kept: list[tuple[int, int]] = []
     skipped: list[tuple[str, str]] = []
     for bits, gs in configs:
         cost = kv_bytes_per_token(
-            n_layers=n_layers, n_kv_heads=n_kv_heads, head_dim=head_dim, bits=bits, group_size=gs
+            n_layers=n_layers,
+            n_kv_heads=n_kv_heads,
+            head_dim=head_dim,
+            bits=bits,
+            group_size=gs,
+            v_dim=v_dim,
         )
         label = _kv_config_label(bits, gs)
         if cost > max_kv_bytes_per_token:
@@ -952,6 +997,9 @@ def compare_kv_fidelity(
             model_id, checked.load_revision(model_revision), allow_custom_code=allow_custom_code
         )
         n_layers, n_kv_heads, head_dim = _kv_dims(model)
+        # A layout the resolver cannot state gets no cost ("cost unavailable"), never one at
+        # hidden // heads; a known value width is passed to the method on its own.
+        layout = _kv_layout(model)
         corpus = _load_corpus_for_kv(tokenizer, model_id, max_chunks, chunk_length=chunk_length)
         for method_index, method in enumerate(pending, start=1):
             if progress is not None:
@@ -976,10 +1024,18 @@ def compare_kv_fidelity(
                 if caps_note is not None:
                     fid_report = _dc.replace(fid_report, warnings=(*fid_report.warnings, caps_note))
                 cost: int | None
-                if n_layers is not None and n_kv_heads is not None and head_dim is not None:
+                if (
+                    layout.modelled
+                    and n_layers is not None
+                    and n_kv_heads is not None
+                    and head_dim is not None
+                ):
                     try:
                         cost = method.bytes_per_token(
-                            n_layers=n_layers, n_kv_heads=n_kv_heads, head_dim=head_dim
+                            n_layers=n_layers,
+                            n_kv_heads=n_kv_heads,
+                            head_dim=head_dim,
+                            **v_dim_kwarg(layout.v_dim, head_dim),
                         )
                     except CacheNotQuantizableError:
                         cost = None  # a method that cannot cost this geometry is "cost unavailable"
