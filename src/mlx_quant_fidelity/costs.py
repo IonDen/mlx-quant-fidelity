@@ -10,7 +10,13 @@ _MLA_FIELDS = ("qk_nope_head_dim", "qk_rope_head_dim", "v_head_dim", "kv_lora_ra
 
 
 def kv_bytes_per_token(
-    *, n_layers: int, n_kv_heads: int, head_dim: int, bits: int, group_size: int
+    *,
+    n_layers: int,
+    n_kv_heads: int,
+    head_dim: int,
+    bits: int,
+    group_size: int,
+    v_dim: int | None = None,
 ) -> int:
     """KV-cache bytes per token for a quantized cache, incl. per-group scale+bias overhead.
 
@@ -18,6 +24,8 @@ def kv_bytes_per_token(
     ``group_size``. Counts K and V across every layer. The group overhead is load-bearing — a
     smaller group_size buys accuracy but costs bytes, and the Pareto must see it. See
     docs/ranking-principles.md (the cost axis).
+
+    K is ``head_dim`` wide and V is ``v_dim`` wide per head; ``v_dim=None`` means V = K.
 
     The ``4 / group_size`` term (scale + bias = 2 B + 2 B = 4 B per group) assumes a
     **bf16/fp16 KV cache**, which is the only path validated on Apple Silicon (MLX's
@@ -27,7 +35,8 @@ def kv_bytes_per_token(
     """
     if group_size <= 0:
         raise ValueError(f"group_size must be positive, got {group_size}")
-    elements_per_token = 2 * n_layers * n_kv_heads * head_dim  # K and V
+    v_width = head_dim if v_dim is None else v_dim
+    elements_per_token = n_layers * n_kv_heads * (head_dim + v_width)  # K and V
     bytes_per_element = bits / 8 + 4 / group_size  # 4 B = fp16 scale + fp16 bias per group
     return round(elements_per_token * bytes_per_element)
 
@@ -67,3 +76,13 @@ def kv_layout(model_type: object, field: Callable[[str], object]) -> KVLayout:
         return KVLayout(k_dim=k_nope + k_rope, v_dim=v_dim, modelled=True)
     has_mla_field = any(field(name) is not None for name in _MLA_FIELDS)
     return KVLayout(k_dim=None, v_dim=None, modelled=not has_mla_field)
+
+
+def v_dim_kwarg(v_dim: int | None) -> dict[str, int]:
+    """``{"v_dim": v_dim}`` when the value width is known, else ``{}``.
+
+    Call sites spread this into a method's cost, working-set or gate call, so a method written
+    against the older signature (no ``v_dim``) keeps working on every model whose K and V widths
+    are equal.
+    """
+    return {} if v_dim is None else {"v_dim": v_dim}

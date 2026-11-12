@@ -47,6 +47,17 @@ def packed_width_mismatch(head_dim: int, bits: int) -> bool:
     return head_dim // (32 // bits) != head_dim * bits // 32
 
 
+def _gated_widths(head_dim: int | None, v_dim: int | None) -> list[tuple[int | None, str]]:
+    """The ``(width, name)`` pairs a gate tests: one ``head_dim`` when V = K, else K then V.
+
+    An explicit ``v_dim`` equal to ``head_dim`` is the K == V case, so its refusal text stays the
+    one a caller without ``v_dim`` gets.
+    """
+    if v_dim is None or v_dim == head_dim:
+        return [(head_dim, "head_dim")]
+    return [(head_dim, "key width"), (v_dim, "value width")]
+
+
 class KVCacheMethod(Protocol):
     """One way of quantizing the per-layer KV cache, as the probe consumes it.
 
@@ -88,8 +99,13 @@ class KVCacheMethod(Protocol):
         """
         ...
 
-    def check(self, *, head_dim: int | None, model_type: str) -> list[str]:
-        """Pure pre-flight: raise CacheNotQuantizableError if impossible; return warnings."""
+    def check(
+        self, *, head_dim: int | None, model_type: str, v_dim: int | None = None
+    ) -> list[str]:
+        """Pure pre-flight: raise CacheNotQuantizableError if impossible; return warnings.
+
+        ``head_dim`` is the key width and ``v_dim`` the value width; ``v_dim=None`` means V = K.
+        """
         ...
 
     def probe_capability(self, empty_cache: list[object]) -> None:
@@ -108,14 +124,29 @@ class KVCacheMethod(Protocol):
         """Context manager wrapping cache construction + forward (re-raises known crashes)."""
         ...
 
-    def bytes_per_token(self, *, n_layers: int, n_kv_heads: int, head_dim: int) -> int:
-        """Analytic KV bytes per token — the ranking cost."""
+    def bytes_per_token(
+        self, *, n_layers: int, n_kv_heads: int, head_dim: int, v_dim: int | None = None
+    ) -> int:
+        """Analytic KV bytes per token — the ranking cost.
+
+        ``head_dim`` is the key width and ``v_dim`` the value width; ``v_dim=None`` means V = K.
+        """
         ...
 
     def working_set_bytes(
-        self, *, window: int, n_layers: int, n_kv_heads: int, head_dim: int, dtype_bytes: int
+        self,
+        *,
+        window: int,
+        n_layers: int,
+        n_kv_heads: int,
+        head_dim: int,
+        dtype_bytes: int,
+        v_dim: int | None = None,
     ) -> int:
-        """Resident+transient bytes the method's fetch path needs beyond stored cache state and logits."""
+        """Resident+transient bytes the method's fetch path needs beyond stored cache state and logits.
+
+        ``head_dim`` is the key width and ``v_dim`` the value width; ``v_dim=None`` means V = K.
+        """
         ...
 
     def measured_bytes(self, cache: list[object]) -> int:
@@ -348,32 +379,46 @@ class StockKVMethod:
         """``{"bits", "group_size"}``."""
         return {"bits": self.bits, "group_size": self.group_size}
 
-    def check(self, *, head_dim: int | None, model_type: str) -> list[str]:
-        """Head-dim divisibility / bits / packed-width gates, in 0.5.x order."""
+    def check(
+        self, *, head_dim: int | None, model_type: str, v_dim: int | None = None
+    ) -> list[str]:
+        """Head-dim divisibility / bits / packed-width gates, in 0.5.x order.
+
+        Each gate tests the key width (``head_dim``) and the value width (``v_dim``) when they
+        differ; ``v_dim=None`` means V = K.
+        """
         warnings: list[str] = []
+        widths = [(w, name) for w, name in _gated_widths(head_dim, v_dim) if w is not None]
         if head_dim is None:
             warnings.append(
                 f"head_dim/kv_group_size compatibility unverified for '{model_type}'; "
                 "relying on MLX to surface a mismatch at first use."
             )
-        elif head_dim % self.group_size != 0:
-            raise CacheNotQuantizableError(
-                f"kv_group_size={self.group_size} does not divide the model's KV "
-                f"head_dim={head_dim}; choose a group size that divides {head_dim} (e.g. 32 or 64)."
-            )
+        for width, width_name in widths:
+            if width % self.group_size != 0:
+                raise CacheNotQuantizableError(
+                    f"kv_group_size={self.group_size} does not divide the model's KV "
+                    f"{width_name}={width}; choose a group size that divides {width} "
+                    "(e.g. 32 or 64)."
+                )
         self.validate_before_load()
-        if head_dim is not None and packed_width_mismatch(head_dim, self.bits):
-            usable = [b for b in _STOCK_BITS if not packed_width_mismatch(head_dim, b)]
-            remedy = (
-                f"use bits {'/'.join(str(b) for b in usable)} or a group-compatible head_dim."
-                if usable
-                else "no supported bit width packs cleanly at this head_dim."
-            )
-            raise CacheNotQuantizableError(
-                f"kv_bits={self.bits} cannot append to a fresh QuantizedKVCache at "
-                f"head_dim={head_dim} on this mlx-lm version (packed-width truncation bug); "
-                f"{remedy}"
-            )
+        for width, width_name in widths:
+            if packed_width_mismatch(width, self.bits):
+                usable = [
+                    b
+                    for b in _STOCK_BITS
+                    if not any(packed_width_mismatch(w, b) for w, _ in widths)
+                ]
+                remedy = (
+                    f"use bits {'/'.join(str(b) for b in usable)} or a group-compatible head_dim."
+                    if usable
+                    else "no supported bit width packs cleanly at this head_dim."
+                )
+                raise CacheNotQuantizableError(
+                    f"kv_bits={self.bits} cannot append to a fresh QuantizedKVCache at "
+                    f"{width_name}={width} on this mlx-lm version (packed-width truncation bug); "
+                    f"{remedy}"
+                )
         return warnings
 
     def layer_coverage(self, empty_cache: list[object]) -> LayerCoverage:
@@ -482,20 +527,36 @@ class StockKVMethod:
         """The packed-width belt."""
         return _packed_width_belt(self.bits)
 
-    def bytes_per_token(self, *, n_layers: int, n_kv_heads: int, head_dim: int) -> int:
-        """Delegates to :func:`~mlx_quant_fidelity.costs.kv_bytes_per_token`."""
+    def bytes_per_token(
+        self, *, n_layers: int, n_kv_heads: int, head_dim: int, v_dim: int | None = None
+    ) -> int:
+        """Delegates to :func:`~mlx_quant_fidelity.costs.kv_bytes_per_token`.
+
+        K is ``head_dim`` wide and V is ``v_dim`` wide; ``v_dim=None`` means V = K.
+        """
         return kv_bytes_per_token(
             n_layers=n_layers,
             n_kv_heads=n_kv_heads,
             head_dim=head_dim,
             bits=self.bits,
             group_size=self.group_size,
+            v_dim=v_dim,
         )
 
     def working_set_bytes(
-        self, *, window: int, n_layers: int, n_kv_heads: int, head_dim: int, dtype_bytes: int
+        self,
+        *,
+        window: int,
+        n_layers: int,
+        n_kv_heads: int,
+        head_dim: int,
+        dtype_bytes: int,
+        v_dim: int | None = None,
     ) -> int:
-        """Zero: mlx-lm's quantized attention reads the packed cache directly, no extra buffer."""
+        """Zero: mlx-lm's quantized attention reads the packed cache directly, no extra buffer.
+
+        Zero whatever the K and V widths, so ``v_dim`` is accepted and ignored.
+        """
         return 0
 
     def measured_bytes(self, cache: list[object]) -> int:
@@ -665,16 +726,23 @@ def _check_head_dim(method: KVCacheMethod, layout: KVLayout, head_dim: int | Non
     return head_dim
 
 
-def turboquant_bytes_per_token(*, n_layers: int, n_kv_heads: int, head_dim: int, bits: int) -> int:
+def turboquant_bytes_per_token(
+    *, n_layers: int, n_kv_heads: int, head_dim: int, bits: int, v_dim: int | None = None
+) -> int:
     """Stored bytes per token for TurboQuant's uniform-bit cache.
 
     Per (token, head): ``packed_dim(head_dim, bits)`` uint32 words of codes plus one fp32 norm;
     K and V; every layer. Reproduces 9216 / 8192 / 5120 B/token at 4/3/2 bits on Llama-3.2-1B
     (16 layers x 8 heads x 64 dims), including the 3-bit round-up from ``VALS_PER_WORD[3] == 10``.
+
+    K is packed at ``head_dim`` and V at ``v_dim``, and both widths pass the kernel gate;
+    ``v_dim=None`` means V = K.
     """
-    _gate_turboquant_head_dim(head_dim)
-    per_token_head = _packed_dim(head_dim, bits) * 4 + 4
-    return per_token_head * 2 * n_kv_heads * n_layers
+    for width, width_name in _gated_widths(head_dim, v_dim):
+        _gate_turboquant_head_dim(width, width_name=width_name)
+    v_width = head_dim if v_dim is None else v_dim
+    per_token_head = (_packed_dim(head_dim, bits) * 4 + 4) + (_packed_dim(v_width, bits) * 4 + 4)
+    return per_token_head * n_kv_heads * n_layers
 
 
 def _turboquant_dist_version() -> str:
@@ -849,9 +917,16 @@ class TurboQuantKVMethod:
         """``{"bits", "seed"}``."""
         return {"bits": self.bits, "seed": self.seed}
 
-    def check(self, *, head_dim: int | None, model_type: str) -> list[str]:
-        """The head_dim gate (see :func:`_gate_turboquant_head_dim`); no warnings."""
-        _gate_turboquant_head_dim(head_dim, model_type=model_type)
+    def check(
+        self, *, head_dim: int | None, model_type: str, v_dim: int | None = None
+    ) -> list[str]:
+        """The head_dim gate (see :func:`_gate_turboquant_head_dim`); no warnings.
+
+        K (``head_dim``) and V (``v_dim``) both run through the kernels, so both widths are
+        gated when they differ; ``v_dim=None`` means V = K.
+        """
+        for width, width_name in _gated_widths(head_dim, v_dim):
+            _gate_turboquant_head_dim(width, model_type=model_type, width_name=width_name)
         return []
 
     def _cache_cls(self) -> type:
@@ -957,14 +1032,30 @@ class TurboQuantKVMethod:
         """No known crash to translate."""
         return nullcontext()
 
-    def bytes_per_token(self, *, n_layers: int, n_kv_heads: int, head_dim: int) -> int:
-        """Analytic stored bytes (see :func:`turboquant_bytes_per_token`); gates geometry too."""
+    def bytes_per_token(
+        self, *, n_layers: int, n_kv_heads: int, head_dim: int, v_dim: int | None = None
+    ) -> int:
+        """Analytic stored bytes (see :func:`turboquant_bytes_per_token`); gates geometry too.
+
+        K is ``head_dim`` wide and V is ``v_dim`` wide; ``v_dim=None`` means V = K.
+        """
         return turboquant_bytes_per_token(
-            n_layers=n_layers, n_kv_heads=n_kv_heads, head_dim=head_dim, bits=self.bits
+            n_layers=n_layers,
+            n_kv_heads=n_kv_heads,
+            head_dim=head_dim,
+            bits=self.bits,
+            v_dim=v_dim,
         )
 
     def working_set_bytes(
-        self, *, window: int, n_layers: int, n_kv_heads: int, head_dim: int, dtype_bytes: int
+        self,
+        *,
+        window: int,
+        n_layers: int,
+        n_kv_heads: int,
+        head_dim: int,
+        dtype_bytes: int,
+        v_dim: int | None = None,
     ) -> int:
         """Prefill's ``all_k``+``all_v`` transients plus the two retained step-padded dequant buffers.
 
@@ -972,9 +1063,13 @@ class TurboQuantKVMethod:
         ``dtype_bytes``: the prefill forward's full-window dequantized K and V (transient, freed
         after the forward), plus the ``_k_deq_buf``/``_v_deq_buf`` working copies the port retains
         after ``update_and_fetch`` (see :meth:`probe_capability`'s trim-release contract).
+
+        The two K buffers are ``head_dim`` wide and the two V buffers ``v_dim`` wide;
+        ``v_dim=None`` means V = K.
         """
         padded_window = _step_padded_window(window)
-        return 4 * n_layers * n_kv_heads * padded_window * head_dim * dtype_bytes
+        v_width = head_dim if v_dim is None else v_dim
+        return 2 * n_layers * n_kv_heads * padded_window * (head_dim + v_width) * dtype_bytes
 
     def measured_bytes(self, cache: list[object]) -> int:
         """Trimmed stored bytes (see :func:`stored_state_bytes`)."""
@@ -1063,13 +1158,19 @@ class TurboQuantVOnlyKVMethod:
         """``{"v_bits", "seed"}``."""
         return {"v_bits": self.v_bits, "seed": self.seed}
 
-    def check(self, *, head_dim: int | None, model_type: str) -> list[str]:
+    def check(
+        self, *, head_dim: int | None, model_type: str, v_dim: int | None = None
+    ) -> list[str]:
         """The head_dim gate (see :func:`_gate_turboquant_head_dim`); no warnings.
 
         The V path still runs the port's fused Metal kernels, so the same power-of-two/<=256
         constraint applies even though K stays in plain fp16.
+
+        Only the value width is gated: ``v_dim`` when given, else ``head_dim`` (V = K). The key
+        width never meets a kernel.
         """
-        _gate_turboquant_head_dim(head_dim, model_type=model_type)
+        width, width_name = _gated_widths(head_dim, v_dim)[-1]
+        _gate_turboquant_head_dim(width, model_type=model_type, width_name=width_name)
         return []
 
     def _cache_cls(self) -> type:
@@ -1177,27 +1278,42 @@ class TurboQuantVOnlyKVMethod:
         """No known crash to translate."""
         return nullcontext()
 
-    def bytes_per_token(self, *, n_layers: int, n_kv_heads: int, head_dim: int) -> int:
+    def bytes_per_token(
+        self, *, n_layers: int, n_kv_heads: int, head_dim: int, v_dim: int | None = None
+    ) -> int:
         """fp16 K + fp16 V (the port's unused duplicate) + packed V + fp32 norms, every layer.
 
         Source-verified against the pinned port (``v_only_cache.py``): ``update_and_fetch`` feeds
         BOTH tensors to the inner plain ``KVCache`` used for K storage, so ``state`` is four
         arrays, not two — this is what makes the method's stored bytes exceed a plain fp16 cache
         at low V bit-widths (see :meth:`report_warnings`).
+
+        K is ``head_dim`` wide and V is ``v_dim`` wide; ``v_dim=None`` means V = K.
         """
-        packed = _packed_dim(head_dim, self.v_bits) * 4 + 4
-        return n_layers * n_kv_heads * head_dim * 2 * 2 + packed * n_kv_heads * n_layers
+        v_width = head_dim if v_dim is None else v_dim
+        packed = _packed_dim(v_width, self.v_bits) * 4 + 4
+        return n_layers * n_kv_heads * (head_dim + v_width) * 2 + packed * n_kv_heads * n_layers
 
     def working_set_bytes(
-        self, *, window: int, n_layers: int, n_kv_heads: int, head_dim: int, dtype_bytes: int
+        self,
+        *,
+        window: int,
+        n_layers: int,
+        n_kv_heads: int,
+        head_dim: int,
+        dtype_bytes: int,
+        v_dim: int | None = None,
     ) -> int:
         """Just the V half of :meth:`TurboQuantKVMethod.working_set_bytes` — K stays plain fp16.
 
         Only V's prefill transient plus its one retained ``_v_deq_buf`` working copy count;
         same step-256-padded buffer shape as the full-cache port, halved.
+
+        The buffers are ``v_dim`` wide; ``v_dim=None`` means V = K (``head_dim``).
         """
         padded_window = _step_padded_window(window)
-        return 2 * n_layers * n_kv_heads * padded_window * head_dim * dtype_bytes
+        v_width = head_dim if v_dim is None else v_dim
+        return 2 * n_layers * n_kv_heads * padded_window * v_width * dtype_bytes
 
     def measured_bytes(self, cache: list[object]) -> int:
         """Trimmed stored bytes (see :func:`stored_state_bytes`)."""
@@ -1288,18 +1404,25 @@ class AffineKVMethod:
         """``{"k_bits", "v_bits", "group_size"}``."""
         return {"k_bits": self.k_bits, "v_bits": self.v_bits, "group_size": self.group_size}
 
-    def check(self, *, head_dim: int | None, model_type: str) -> list[str]:
-        """Pure pre-flight: the head_dim % group_size gate plain mx.quantize actually has."""
+    def check(
+        self, *, head_dim: int | None, model_type: str, v_dim: int | None = None
+    ) -> list[str]:
+        """Pure pre-flight: the head_dim % group_size gate plain mx.quantize actually has.
+
+        K (``head_dim``) and V (``v_dim``) are quantized separately, so the group size must
+        divide both when they differ; ``v_dim=None`` means V = K.
+        """
+        for width, width_name in _gated_widths(head_dim, v_dim):
+            if width is not None and width % self.group_size != 0:
+                raise CacheNotQuantizableError(
+                    f"group_size={self.group_size} does not divide the model's KV "
+                    f"{width_name}={width}; choose a group size that divides {width}."
+                )
         if head_dim is None:
             return [
                 f"head_dim/group_size compatibility unverified for '{model_type}'; "
                 "relying on MLX to surface a mismatch at first use."
             ]
-        if head_dim % self.group_size != 0:
-            raise CacheNotQuantizableError(
-                f"group_size={self.group_size} does not divide the model's KV "
-                f"head_dim={head_dim}; choose a group size that divides {head_dim}."
-            )
         return []
 
     def probe_capability(self, empty_cache: list[object]) -> None:
@@ -1327,18 +1450,35 @@ class AffineKVMethod:
         """No known crash to translate."""
         return nullcontext()
 
-    def bytes_per_token(self, *, n_layers: int, n_kv_heads: int, head_dim: int) -> int:
-        """Per side: elements x (bits/8 + 4/group); sum the sides, round once."""
-        el_side = n_layers * n_kv_heads * head_dim
-        k_side = el_side * (self.k_bits / 8 + 4 / self.group_size)
-        v_side = el_side * (self.v_bits / 8 + 4 / self.group_size)
+    def bytes_per_token(
+        self, *, n_layers: int, n_kv_heads: int, head_dim: int, v_dim: int | None = None
+    ) -> int:
+        """Per side: elements x (bits/8 + 4/group); sum the sides, round once.
+
+        K is ``head_dim`` wide at ``k_bits`` and V is ``v_dim`` wide at ``v_bits``;
+        ``v_dim=None`` means V = K.
+        """
+        v_width = head_dim if v_dim is None else v_dim
+        k_side = n_layers * n_kv_heads * head_dim * (self.k_bits / 8 + 4 / self.group_size)
+        v_side = n_layers * n_kv_heads * v_width * (self.v_bits / 8 + 4 / self.group_size)
         return round(k_side + v_side)
 
     def working_set_bytes(
-        self, *, window: int, n_layers: int, n_kv_heads: int, head_dim: int, dtype_bytes: int
+        self,
+        *,
+        window: int,
+        n_layers: int,
+        n_kv_heads: int,
+        head_dim: int,
+        dtype_bytes: int,
+        v_dim: int | None = None,
     ) -> int:
-        """K+V dequantized-on-fetch transients at the exact window — ``mx.dequantize`` pads nothing."""
-        return 2 * n_layers * n_kv_heads * window * head_dim * dtype_bytes
+        """K+V dequantized-on-fetch transients at the exact window — ``mx.dequantize`` pads nothing.
+
+        K is ``head_dim`` wide and V is ``v_dim`` wide; ``v_dim=None`` means V = K.
+        """
+        v_width = head_dim if v_dim is None else v_dim
+        return n_layers * n_kv_heads * window * (head_dim + v_width) * dtype_bytes
 
     def measured_bytes(self, cache: list[object]) -> int:
         """Trimmed stored bytes (see :func:`stored_state_bytes`)."""

@@ -1074,6 +1074,41 @@ def test_sweep_grid_indivisible_head_dim_raises():
         cmp.generate_sweep_configs(48)
 
 
+_SPLIT_GRID = [(2, 32), (2, 64), (4, 32), (4, 64), (8, 32), (8, 64)]
+_SPLIT_SKIPPED = {"3:32", "3:64", "6:32", "6:64"}
+
+
+def test_sweep_grid_deepseek_v2_widths_checks_the_key_width():
+    """Bug: the sweep checks V only. K 192: group 128 does not divide it, bits 3 (19 vs 18) and
+    6 (38 vs 36) mismatch; V 128 alone would keep group 128 and bits 3."""
+    grid, skipped = cmp.generate_sweep_configs(192, v_dim=128)
+    assert grid == _SPLIT_GRID
+    assert {label for label, _ in skipped} == _SPLIT_SKIPPED
+    reasons = dict(skipped)
+    assert "key width=192" in reasons["3:32"]
+    assert "mlx-lm" in reasons["3:32"]
+
+
+def test_sweep_grid_checks_the_value_width():
+    """Bug: the sweep checks K only. K 64 is clean at every bit width and group 32/64; V 192
+    drops group 128 and skips bits 3 and 6. K alone would give ten configs and no skips."""
+    grid, skipped = cmp.generate_sweep_configs(64, v_dim=192)
+    assert grid == _SPLIT_GRID
+    assert {label for label, _ in skipped} == _SPLIT_SKIPPED
+    assert "value width=192" in dict(skipped)["6:32"]
+
+
+def test_sweep_grid_explicit_equal_v_dim_is_the_symmetric_grid():
+    """Bug: an explicit v_dim equal to head_dim changes the grid or the skip wording."""
+    assert cmp.generate_sweep_configs(128, v_dim=128) == cmp.generate_sweep_configs(128)
+
+
+def test_sweep_grid_no_group_divides_both_widths_raises():
+    """Bug: the group filter tests K only, so V 48 (no divisor in 32/64/128) gets a grid."""
+    with pytest.raises(CompareConfigError, match="value width=48"):
+        cmp.generate_sweep_configs(64, v_dim=48)
+
+
 def test_geometry_from_flat_and_nested_config():
     flat = {
         "num_hidden_layers": 16,

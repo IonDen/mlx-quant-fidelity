@@ -1,6 +1,6 @@
 import pytest
 
-from mlx_quant_fidelity.costs import KVLayout, kv_bytes_per_token, kv_layout
+from mlx_quant_fidelity.costs import KVLayout, kv_bytes_per_token, kv_layout, v_dim_kwarg
 
 
 def test_kv_bytes_per_token_hand_value():
@@ -132,3 +132,57 @@ def test_kv_layout_non_string_model_type_is_not_the_expanded_rule(model_type):
     """Bug: an unhashable model_type crashes the lookup, or a non-string reaches the rule."""
     assert kv_layout(model_type, _V2_FIELDS.get).modelled is False
     assert kv_layout(model_type, {}.get).modelled is True
+
+
+# --- K and V widths counted separately (v_dim) -----------------------------------------------
+
+# DeepSeek-V2-Lite: 27 layers, 16 KV heads, K = 128 + 64 = 192, V = 128 (config.json at a33a8ad).
+_V2_LITE = {"n_layers": 27, "n_kv_heads": 16, "head_dim": 192, "v_dim": 128}
+
+
+def test_kv_bytes_counts_v_at_its_own_width_4bit():
+    """Bug: V is still counted at K's width (2 * K elements instead of K + V).
+    27 * 16 * (192 + 128) * (4/8 + 4/64) = 432 * 320 * 0.5625 = 77760."""
+    assert kv_bytes_per_token(**_V2_LITE, bits=4, group_size=64) == 77760
+
+
+def test_kv_bytes_counts_v_at_its_own_width_8bit():
+    """Bug: V is still counted at K's width. 432 * 320 * (8/8 + 4/64) = 432 * 340 = 146880."""
+    assert kv_bytes_per_token(**_V2_LITE, bits=8, group_size=64) == 146880
+
+
+def test_kv_bytes_explicit_equal_v_dim_matches_the_default():
+    """Bug: an explicit v_dim equal to head_dim takes a different rounding path than None."""
+    assert (
+        kv_bytes_per_token(n_layers=2, n_kv_heads=4, head_dim=64, v_dim=64, bits=4, group_size=64)
+        == 576
+    )
+
+
+def test_v_dim_kwarg_passes_v_dim_only_when_known():
+    """Bug: None is forwarded as v_dim=None (breaks a third-party method with the old signature
+    on a K == V model), or a known width is dropped."""
+    assert v_dim_kwarg(None) == {}
+    assert v_dim_kwarg(128) == {"v_dim": 128}
+
+
+def test_kv_layout_minicpm3_is_not_modelled():
+    """minicpm3.py:52 caches V at hidden_size // num_attention_heads, no MLA field states it.
+    Bug: minicpm3 is added to _EXPANDED_KV_MODEL_TYPES and gets an invented qk/v width."""
+    fields = {
+        "qk_nope_head_dim": 64,
+        "qk_rope_head_dim": 32,
+        "kv_lora_rank": 256,
+        "hidden_size": 2560,
+        "num_attention_heads": 40,
+    }
+    assert kv_layout("minicpm3", fields.get) == KVLayout(k_dim=None, v_dim=None, modelled=False)
+
+
+def test_kv_layout_mimo_v2_flash_is_not_modelled():
+    """mimo_v2_flash.py:61-72 picks K/V widths per layer (full vs sliding-window attention).
+    Bug: mimo_v2_flash is added to _EXPANDED_KV_MODEL_TYPES and one width pair is costed."""
+    fields = {"head_dim": 192, "v_head_dim": 128, "swa_head_dim": 192, "swa_v_head_dim": 128}
+    assert kv_layout("mimo_v2_flash", fields.get) == KVLayout(
+        k_dim=None, v_dim=None, modelled=False
+    )

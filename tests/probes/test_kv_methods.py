@@ -1381,3 +1381,202 @@ def test_head_dim_gate_message_is_unchanged():
         "TurboQuant-MLX kernels require a known power-of-two head_dim <= 256; model 'phi3' has "
         "head_dim=96. This is a limitation of the port's kernels, not of the model."
     )
+
+
+# --- K and V widths counted separately (v_dim) -----------------------------------------------
+
+# DeepSeek-V2-Lite: 27 layers, 16 KV heads, K = 128 + 64 = 192, V = 128 (config.json at a33a8ad).
+_V2_LITE_GEO = {"n_layers": 27, "n_kv_heads": 16, "head_dim": 192, "v_dim": 128}
+
+
+def test_stock_bytes_per_token_forwards_v_dim():
+    """Bug: the stock method drops v_dim and costs V at K's width (93312 instead of 77760)."""
+    assert StockKVMethod(bits=4, group_size=64).bytes_per_token(**_V2_LITE_GEO) == 77760
+
+
+def test_affine_bytes_per_token_counts_each_side_at_its_width():
+    """Bug: V is costed at K's width. 432 * (192 * 1.0625 + 128 * 0.5625) = 432 * 276 = 119232."""
+    assert AffineKVMethod(k_bits=8, v_bits=4).bytes_per_token(**_V2_LITE_GEO) == 119232
+
+
+def test_affine_bytes_per_token_pairs_k_bits_with_the_key_width():
+    """Bug: k_bits is applied to V's width and v_bits to K's (the sides are swapped).
+    432 * (192 * 0.5625 + 128 * 1.0625) = 432 * 244 = 105408; swapped it would be 119232."""
+    assert AffineKVMethod(k_bits=4, v_bits=8).bytes_per_token(**_V2_LITE_GEO) == 105408
+
+
+def test_turboquant_bytes_per_token_packs_each_side_at_its_width():
+    """Bug: V is packed at K's width. K 128: 16 words * 4 + 4 = 68; V 64: 8 * 4 + 4 = 36."""
+    assert (
+        TurboQuantKVMethod(bits=4).bytes_per_token(n_layers=1, n_kv_heads=1, head_dim=128, v_dim=64)
+        == 104
+    )
+
+
+@pytest.mark.parametrize("v_dim", [96, 512])
+def test_turboquant_bytes_per_token_gates_the_value_width(v_dim):
+    """Bug: only K reaches the kernel gate, so a V of 96 (not a power of two) or 512 (overruns
+    the threadgroup arrays) gets a cost."""
+    with pytest.raises(CacheNotQuantizableError, match=f"value width={v_dim}"):
+        turboquant_bytes_per_token(n_layers=1, n_kv_heads=1, head_dim=128, v_dim=v_dim, bits=4)
+    with pytest.raises(CacheNotQuantizableError, match=f"value width={v_dim}"):
+        TurboQuantKVMethod(bits=4).bytes_per_token(
+            n_layers=1, n_kv_heads=1, head_dim=128, v_dim=v_dim
+        )
+
+
+def test_vonly_bytes_per_token_counts_fp16_k_and_v_plus_packed_v():
+    """Bug: the fp16 duplicate is counted at 2 * K, or V is packed at K's width.
+    2 B * (192 + 128) = 640 fp16, plus V 128 at 4 bits: 16 * 4 + 4 = 68; total 708."""
+    assert (
+        TurboQuantVOnlyKVMethod(v_bits=4).bytes_per_token(
+            n_layers=1, n_kv_heads=1, head_dim=192, v_dim=128
+        )
+        == 708
+    )
+
+
+def test_affine_working_set_counts_k_plus_v():
+    """Bug: the dequantized transients are sized at 2 * K. 432 * 1 * (192 + 128) * 2 = 276480."""
+    ws = AffineKVMethod(k_bits=8, v_bits=4).working_set_bytes(
+        window=1, **_V2_LITE_GEO, dtype_bytes=2
+    )
+    assert ws == 276480
+
+
+def test_turboquant_working_set_counts_k_plus_v():
+    """Bug: the four port buffers are sized at K's width. 2 * 512 * (128 + 64) * 2 = 393216."""
+    ws = TurboQuantKVMethod(bits=4).working_set_bytes(
+        window=512, n_layers=1, n_kv_heads=1, head_dim=128, v_dim=64, dtype_bytes=2
+    )
+    assert ws == 393216
+
+
+def test_vonly_working_set_counts_only_v():
+    """Bug: K leaks into the V-only buffers (K stays plain fp16). 2 * 512 * 64 * 2 = 131072."""
+    ws = TurboQuantVOnlyKVMethod(v_bits=4).working_set_bytes(
+        window=512, n_layers=1, n_kv_heads=1, head_dim=128, v_dim=64, dtype_bytes=2
+    )
+    assert ws == 131072
+
+
+def test_stock_working_set_ignores_v_dim():
+    """Bug: stock gains a working set on a K != V model (its attention reads the packed cache)."""
+    ws = StockKVMethod(bits=4, group_size=64).working_set_bytes(
+        window=512, **_V2_LITE_GEO, dtype_bytes=2
+    )
+    assert ws == 0
+
+
+@pytest.mark.parametrize(
+    ("method", "expected"),
+    [
+        # Llama-3.2-1B hand values from the committed sample (16 layers, 8 KV heads, 64 dims).
+        (StockKVMethod(bits=4, group_size=64), 9216),
+        (AffineKVMethod(k_bits=8, v_bits=4), 13312),
+        (TurboQuantKVMethod(bits=4), 9216),
+        (TurboQuantVOnlyKVMethod(v_bits=4), 37376),
+    ],
+    ids=["stock", "affine", "turboquant", "vonly"],
+)
+def test_explicit_equal_v_dim_keeps_the_symmetric_cost(method, expected):
+    """Bug: an explicit v_dim equal to head_dim takes a different arithmetic path than None."""
+    geo = {"n_layers": 16, "n_kv_heads": 8, "head_dim": 64}
+    assert method.bytes_per_token(**geo, v_dim=64) == expected
+    assert method.bytes_per_token(**geo) == expected
+
+
+# --- check(..., v_dim=): every gate looks at both widths ------------------------------------
+
+
+def test_stock_check_refuses_a_group_that_does_not_divide_the_key_width():
+    """Bug: the divisibility gate tests V only; group 128 divides V 128 but not K 192."""
+    with pytest.raises(CacheNotQuantizableError, match="192"):
+        StockKVMethod(bits=4, group_size=128).check(
+            head_dim=192, v_dim=128, model_type="deepseek_v2"
+        )
+
+
+def test_stock_check_refuses_a_group_that_does_not_divide_the_value_width():
+    """Bug: the divisibility gate tests K only; group 128 divides K 128 but not V 192."""
+    with pytest.raises(CacheNotQuantizableError, match="192"):
+        StockKVMethod(bits=4, group_size=128).check(head_dim=128, v_dim=192, model_type="x")
+
+
+def test_stock_check_refuses_a_packed_width_mismatch_on_the_key_width():
+    """Bug: the packed-width gate tests V only. K 192 at 3 bits: 192 // 10 = 19 vs 18."""
+    with pytest.raises(CacheNotQuantizableError, match="packed-width"):
+        StockKVMethod(bits=3, group_size=64).check(
+            head_dim=192, v_dim=128, model_type="deepseek_v2"
+        )
+
+
+def test_stock_check_refuses_a_packed_width_mismatch_on_the_value_width():
+    """Bug: the packed-width gate tests K only. K 64 at 6 bits is clean; V 128: 25 vs 24."""
+    with pytest.raises(CacheNotQuantizableError, match="packed-width"):
+        StockKVMethod(bits=6, group_size=64).check(head_dim=64, v_dim=128, model_type="x")
+
+
+def test_stock_check_accepts_deepseek_v2_widths_at_4_64():
+    """Bug: any split layout is refused, not only one a width cannot take."""
+    assert (
+        StockKVMethod(bits=4, group_size=64).check(
+            head_dim=192, v_dim=128, model_type="deepseek_v2"
+        )
+        == []
+    )
+
+
+def test_affine_check_refuses_a_group_that_does_not_divide_the_value_width():
+    """Bug: the affine gate tests K only; group 64 divides K 128 but not V 96."""
+    with pytest.raises(CacheNotQuantizableError, match="96"):
+        AffineKVMethod(k_bits=8, v_bits=4).check(head_dim=128, v_dim=96, model_type="x")
+
+
+def test_affine_check_accepts_deepseek_v2_widths():
+    """Bug: any split layout is refused by the affine gate."""
+    assert (
+        AffineKVMethod(k_bits=8, v_bits=4).check(head_dim=192, v_dim=128, model_type="deepseek_v2")
+        == []
+    )
+
+
+def test_turboquant_check_refuses_the_key_width():
+    """Bug: uniform TurboQuant gates V only, so K 192 (not a power of two) reaches the kernels."""
+    with pytest.raises(CacheNotQuantizableError, match="192"):
+        TurboQuantKVMethod(bits=4).check(head_dim=192, v_dim=128, model_type="deepseek_v2")
+
+
+def test_turboquant_check_refuses_the_value_width():
+    """Bug: uniform TurboQuant gates K only, so V 96 reaches the kernels."""
+    with pytest.raises(CacheNotQuantizableError, match="value width=96"):
+        TurboQuantKVMethod(bits=4).check(head_dim=128, v_dim=96, model_type="x")
+
+
+def test_turboquant_check_accepts_two_fit_widths():
+    """Bug: any split layout is refused by the uniform gate."""
+    assert TurboQuantKVMethod(bits=4).check(head_dim=128, v_dim=64, model_type="x") == []
+
+
+def test_vonly_check_does_not_gate_the_key_width():
+    """Bug: V-only gates K 192, which stays in plain fp16 and never meets a kernel."""
+    assert (
+        TurboQuantVOnlyKVMethod(v_bits=4).check(head_dim=192, v_dim=128, model_type="deepseek_v2")
+        == []
+    )
+
+
+def test_vonly_check_gates_the_value_width():
+    """Bug: V-only gates head_dim (K) instead of the value width it really quantizes."""
+    with pytest.raises(CacheNotQuantizableError, match="value width=96"):
+        TurboQuantVOnlyKVMethod(v_bits=4).check(head_dim=128, v_dim=96, model_type="x")
+
+
+def test_explicit_equal_v_dim_keeps_the_refusal_text():
+    """Bug: an explicit v_dim equal to head_dim switches the K == V refusal to the split wording."""
+    with pytest.raises(CacheNotQuantizableError) as excinfo:
+        TurboQuantKVMethod(bits=4).check(head_dim=96, v_dim=96, model_type="phi3")
+    assert str(excinfo.value) == (
+        "TurboQuant-MLX kernels require a known power-of-two head_dim <= 256; model 'phi3' has "
+        "head_dim=96. This is a limitation of the port's kernels, not of the model."
+    )

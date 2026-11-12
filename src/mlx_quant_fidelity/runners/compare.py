@@ -525,7 +525,9 @@ _SWEEP_BITS: tuple[int, ...] = _STOCK_BITS
 _SWEEP_GROUP_SIZES: tuple[int, ...] = (32, 64, 128)
 
 
-def generate_sweep_configs(head_dim: int) -> tuple[list[tuple[int, int]], list[tuple[str, str]]]:
+def generate_sweep_configs(
+    head_dim: int, *, v_dim: int | None = None
+) -> tuple[list[tuple[int, int]], list[tuple[str, str]]]:
     """Auto-generate the (bits, group_size) grid for ``compare kv --sweep``.
 
     Group sizes are drawn from ``(32, 64, 128)``, filtered to those dividing ``head_dim``;
@@ -534,25 +536,36 @@ def generate_sweep_configs(head_dim: int) -> tuple[list[tuple[int, int]], list[t
     routed to ``skipped`` with a reason instead of the grid, so a sweep never emits a failed
     row for a known-broken width.
 
+    ``head_dim`` is the key width and ``v_dim`` the value width; when they differ, a group size
+    must divide both and a bit width must pack cleanly at both. ``v_dim=None`` means V = K.
+
     Raises:
-        CompareConfigError: If no group size in ``(32, 64, 128)`` divides ``head_dim``.
+        CompareConfigError: If no group size in ``(32, 64, 128)`` divides ``head_dim`` (and
+            ``v_dim``, when given).
     """
-    group_sizes = [gs for gs in _SWEEP_GROUP_SIZES if head_dim % gs == 0]
+    if v_dim is None or v_dim == head_dim:
+        widths = [(head_dim, "head_dim")]
+    else:
+        widths = [(head_dim, "key width"), (v_dim, "value width")]
+    group_sizes = [gs for gs in _SWEEP_GROUP_SIZES if all(w % gs == 0 for w, _ in widths)]
     if not group_sizes:
+        described = " and ".join(f"{name}={w}" for w, name in widths)
         raise CompareConfigError(
-            f"head_dim={head_dim} is not divisible by any of {list(_SWEEP_GROUP_SIZES)}; "
+            f"{described} is not divisible by any of {list(_SWEEP_GROUP_SIZES)}; "
             "pass --configs explicitly with a group size that divides the model's KV head_dim."
         )
     grid: list[tuple[int, int]] = []
     skipped: list[tuple[str, str]] = []
     for bits in _SWEEP_BITS:
+        broken = next(((w, name) for w, name in widths if packed_width_mismatch(w, bits)), None)
         for gs in group_sizes:
             label = _kv_config_label(bits, gs)
-            if packed_width_mismatch(head_dim, bits):
+            if broken is not None:
+                width, width_name = broken
                 skipped.append(
                     (
                         label,
-                        f"bits={bits} at head_dim={head_dim} hits an upstream mlx-lm "
+                        f"bits={bits} at {width_name}={width} hits an upstream mlx-lm "
                         "QuantizedKVCache packed-width bug (pre-allocation width disagrees "
                         "with mx.quantize's packed width); excluded from the sweep.",
                     )
