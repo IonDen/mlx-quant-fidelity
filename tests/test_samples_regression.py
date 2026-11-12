@@ -179,3 +179,47 @@ def test_no_committed_sample_carries_the_old_method_not_recorded_sentence():
         if OLD_METHOD_SENTENCE in p.read_text(encoding="utf-8")
     ]
     assert carriers == []
+
+
+def _kv_rows(stem):
+    """The measured rows of a committed comparison sample: (method, cost_bytes, measured bytes)."""
+    from mlx_quant_fidelity.probes.kv_methods import parse_method_spec
+
+    data = json.loads((SAMPLES / "compare" / f"{stem}.json").read_text())
+    return [
+        (
+            parse_method_spec(row["label"]),
+            row["point"]["cost_bytes"],
+            row["report"]["measured_kv_bytes_per_token"],
+        )
+        for row in data["results"]
+        if row["point"] is not None
+    ]
+
+
+def test_cost_formula_equals_committed_stored_bytes_on_v2_lite():
+    """Reds unless each method's formula reproduces the bytes the real run stored. Offline proof
+    of the acceptance criterion: compares against measured_kv_bytes_per_token, not cost_bytes.
+    Bug: V is costed at K's width (the old rule gave 117504 / 62208 / 89856)."""
+    rows = _kv_rows("kv-deepseek-v2-lite-methods")
+    # DeepSeek-V2-Lite: 27 layers, 16 KV heads, K = 128 + 64 = 192, V = 128 (config.json a33a8ad)
+    for method, _cost, measured in rows:
+        cost = method.bytes_per_token(n_layers=27, n_kv_heads=16, head_dim=192, v_dim=128)
+        assert cost == measured, method.label
+    assert len(rows) == 3
+
+
+@pytest.mark.parametrize(
+    ("sample", "geo"),
+    [
+        ("kv-llama-3.2-1b-methods", {"n_layers": 16, "n_kv_heads": 8, "head_dim": 64}),
+        ("kv-qwen2.5-0.5b", {"n_layers": 24, "n_kv_heads": 2, "head_dim": 64}),
+    ],
+)
+def test_symmetric_samples_keep_their_cost(sample, geo):
+    """The K == V proof. Reds if the split changes any symmetric number, for every shipped method
+    (bug: a formula counts V twice or at another width, e.g. K + 2 * V in stock)."""
+    rows = _kv_rows(sample)
+    for method, cost_bytes, measured in rows:
+        assert method.bytes_per_token(**geo) == cost_bytes == measured, method.label
+    assert len(rows) >= 3
