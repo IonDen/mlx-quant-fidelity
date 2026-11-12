@@ -37,10 +37,10 @@ The comparison table also shows each target's effective bits per weight, measure
 For KV quantization, cost is KV-cache bytes per token:
 
 ```
-2 · n_layers · n_kv_heads · head_dim · (bits/8 + 4/group_size)
+n_layers · n_kv_heads · (k_dim + v_dim) · (bits/8 + 4/group_size)
 ```
 
-The `4/group_size` term is the per-group overhead: a fp16 scale (2 bytes) and a fp16 bias (2 bytes), amortized over `group_size` elements. This formula applies to the bf16/fp16 KV path used by MLX's `QuantizedKVCache` on Apple Silicon. An fp32 KV cache would carry `8/group_size` bytes of overhead per element, but that path is not currently supported.
+Outside `deepseek_v2` and `youtu_llm`, `k_dim` and `v_dim` are both `head_dim`. They differ only where the cache stores expanded keys and values at different widths, as DeepSeek-V2-Lite does (192 for keys, 128 for values); a model whose widths the tool cannot read from its config gets no cost. The `4/group_size` term is the per-group overhead: a fp16 scale (2 bytes) and a fp16 bias (2 bytes), amortized over `group_size` elements. This formula applies to the bf16/fp16 KV path used by MLX's `QuantizedKVCache` on Apple Silicon. An fp32 KV cache would carry `8/group_size` bytes of overhead per element, but that path is not currently supported.
 
 The formula is exact for the supported path. Each KV-cache method supplies its own formula for the bytes it stores per token; every report also records the bytes actually stored in the cache after the first scored window, and the two are tested to agree for every method this package ships. Group overhead matters for ranking: a smaller group size improves accuracy but increases bytes per token, so two configurations at the same bit width can land at different positions on the cost axis. Ignoring group size would misrank them.
 
