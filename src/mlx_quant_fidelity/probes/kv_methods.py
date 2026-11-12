@@ -694,9 +694,9 @@ def _gate_turboquant_head_dim(
 def _gate_turboquant_layout(method: KVCacheMethod, layout: KVLayout, *, model_type: str) -> None:
     """Gate the widths a TurboQuant method's kernels would really get; no-op for other methods.
 
-    ``hidden // heads``, which ``check`` sees, is not the cached width on an MLA model. Uniform
-    TurboQuant runs K and V through the kernels and V-only runs just V, while K stays in plain
-    fp16. A layout whose widths cannot be stated is refused, since the gate cannot see them.
+    ``hidden // heads`` is not the cached width on an MLA model. Uniform TurboQuant runs K and V
+    through the kernels and V-only runs just V, while K stays in plain fp16. A layout whose
+    widths cannot be stated is refused here, since ``check`` then gets no width to gate.
     """
     if not isinstance(method, TurboQuantKVMethod | TurboQuantVOnlyKVMethod):
         return
@@ -711,19 +711,6 @@ def _gate_turboquant_layout(method: KVCacheMethod, layout: KVLayout, *, model_ty
         _gate_turboquant_head_dim(layout.k_dim, model_type=model_type, width_name="key width")
     if layout.v_dim is not None:
         _gate_turboquant_head_dim(layout.v_dim, model_type=model_type, width_name="value width")
-
-
-def _check_head_dim(method: KVCacheMethod, layout: KVLayout, head_dim: int | None) -> int | None:
-    """The width ``method.check`` should gate: the cached width a TurboQuant method's kernels get.
-
-    On a modelled MLA layout that is V for V-only and K for uniform (both already passed
-    :func:`_gate_turboquant_layout`), never ``hidden // heads``. Otherwise ``head_dim`` unchanged.
-    """
-    if isinstance(method, TurboQuantVOnlyKVMethod) and layout.v_dim is not None:
-        return layout.v_dim
-    if isinstance(method, TurboQuantKVMethod) and layout.k_dim is not None:
-        return layout.k_dim
-    return head_dim
 
 
 def turboquant_bytes_per_token(

@@ -33,9 +33,11 @@ from mlx_quant_fidelity.runners.compare import (
     MAX_WORKER_TIMEOUT_S,
     compare_kv_fidelity,
     compare_weight_fidelity,
+    config_kv_layout_modelled,
     filter_configs_by_kv_budget,
     generate_sweep_configs,
     kv_geometry_from_config,
+    kv_v_dim_from_config,
     split_target,
 )
 
@@ -389,13 +391,22 @@ def main(argv: list[str] | None = None) -> int:
             if args.sweep:
                 config_json = read_model_config(args.model, args.model_revision)
                 n_layers, n_kv_heads, head_dim = kv_geometry_from_config(config_json)
+                if not config_kv_layout_modelled(config_json):
+                    print(
+                        f"error: model_type {config_json.get('model_type')!r} caches keys and "
+                        "values at widths this tool does not model, so --sweep cannot size its "
+                        "grid; pass --configs explicitly",
+                        file=sys.stderr,
+                    )
+                    return 2
                 if head_dim is None:
                     print(
                         "error: cannot derive head_dim from config.json; pass --configs explicitly",
                         file=sys.stderr,
                     )
                     return 2
-                grid, sweep_skipped = generate_sweep_configs(head_dim)
+                v_dim = kv_v_dim_from_config(config_json)
+                grid, sweep_skipped = generate_sweep_configs(head_dim, v_dim=v_dim)
                 if args.max_kv_bytes_per_token is not None:
                     if n_layers is None or n_kv_heads is None:
                         print(
@@ -410,6 +421,7 @@ def main(argv: list[str] | None = None) -> int:
                         n_kv_heads=n_kv_heads,
                         head_dim=head_dim,
                         max_kv_bytes_per_token=args.max_kv_bytes_per_token,
+                        v_dim=v_dim,
                     )
                 else:
                     kept, budget_skipped = grid, []

@@ -1000,3 +1000,53 @@ def test_comparison_target_result_failed_and_skipped_constructors() -> None:
     assert skipped.error_type is None
     assert skipped.message is None
     assert skipped.report is None
+
+
+def _kv_uncosted(label: str, *, reason: str = "cost unavailable") -> ComparisonTargetResult:
+    """A scored kv row with no cost: the stock-with-control report, ranked on 0.0812."""
+    return ComparisonTargetResult(
+        label=label,
+        status="ok",
+        report=_kv_report_stock_with_control(),
+        point=None,
+        excluded_reason=reason,
+        error_type=None,
+        message=None,
+        ranked_kl=0.0812,
+        ranked_verdict="marginal",
+        ranked_footing="quantizer_only",
+    )
+
+
+def _kv_with(*results: ComparisonTargetResult) -> ComparisonReport:
+    return dataclasses.replace(
+        _kv_comparison_report(quantize_start=0, quantize_mode="stress"), results=results
+    )
+
+
+def test_kv_excluded_scored_row_keeps_its_ranked_measurements() -> None:
+    """Bug: a model whose cache layout gets no cost prints a table with zero rows and no
+    measurements. The numbers are the ranked ones (0.0812, control flip 0.0050, marginal),
+    not the bundled 0.1500 / 0.0200 / bad; a failed row keeps its error line."""
+    md = render_comparison_markdown(
+        _kv_with(_kv_uncosted("4:64"), ComparisonTargetResult.failed("2:32", "OSError", "boom"))
+    )
+    lines = md.splitlines()
+    assert "- `4:64` — cost unavailable (KL mean 0.0812, flip 0.0050, verdict marginal)" in lines
+    assert "- `2:32` — OSError: boom" in lines
+
+
+def test_kv_excluded_scored_row_takes_its_reason_from_the_row() -> None:
+    """Bug: the renderer writes the literal "cost unavailable" instead of the row's reason."""
+    md = render_comparison_markdown(_kv_with(_kv_uncosted("8:64", reason="no cost model")))
+    assert (
+        "- `8:64` — no cost model (KL mean 0.0812, flip 0.0050, verdict marginal)"
+        in md.splitlines()
+    )
+
+
+def test_weight_excluded_scored_row_keeps_its_measurements() -> None:
+    """Weight twin: `q4-nobytes` scored KL 0.08, flip 0.02, good, but has no cost."""
+    lines = render_comparison_markdown(_report()).splitlines()
+    assert "- `q4-nobytes` — cost unavailable (KL mean 0.0800, flip 0.0200, verdict good)" in lines
+    assert "- `q2` — ModelMismatchError: vocab_size mismatch" in lines

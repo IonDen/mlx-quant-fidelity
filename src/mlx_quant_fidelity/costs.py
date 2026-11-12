@@ -78,11 +78,13 @@ def kv_layout(model_type: object, field: Callable[[str], object]) -> KVLayout:
     return KVLayout(k_dim=None, v_dim=None, modelled=not has_mla_field)
 
 
-def v_dim_kwarg(v_dim: int | None) -> dict[str, int]:
-    """``{"v_dim": v_dim}`` when the value width is known, else ``{}``.
+def v_dim_kwarg(v_dim: int | None, head_dim: int | None) -> dict[str, int]:
+    """``{"v_dim": v_dim}`` when the value width is known and differs from ``head_dim``, else ``{}``.
+
+    ``head_dim`` is the key width in effect at the call site (None when unknown).
 
     Call sites spread this into a method's cost, working-set or gate call, so a method written
     against the older signature (no ``v_dim``) keeps working on every model whose K and V widths
     are equal.
     """
-    return {} if v_dim is None else {"v_dim": v_dim}
+    return {} if v_dim is None or v_dim == head_dim else {"v_dim": v_dim}

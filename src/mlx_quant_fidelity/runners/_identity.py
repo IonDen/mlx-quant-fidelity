@@ -14,7 +14,9 @@ from pathlib import Path
 # that mode's old partials are rejected. The two modes' partials are independent.
 # KV bumped to 6: a partial written before the TurboQuant MLA gate could hold a number measured at
 # a width the gate never saw. It must be scored again, so that it passes the gate.
-KV_PARTIAL_SCHEMA_VERSION = 6
+# KV bumped to 7: the cost now counts the K and V widths separately (K 192 / V 128 on
+# deepseek_v2), so a partial costed with V at K's width must be scored again, not ranked.
+KV_PARTIAL_SCHEMA_VERSION = 7
 WEIGHT_PARTIAL_SCHEMA_VERSION = 3  # bumped: identity now carries mlx/mlx-lm versions
 
 # The footing every `compare kv` row is ranked on, regardless of a method's native footing.

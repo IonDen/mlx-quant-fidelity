@@ -2775,3 +2775,239 @@ def test_compare_kv_schema_5_turboquant_partial_no_longer_replays(monkeypatch, t
     assert row.error_type == "CacheNotQuantizableError"
     assert "192" in row.message
     assert "turboquant:4" not in report.frontier
+
+
+# ---------------------------------------------------------------------------
+# K and V widths on the loaded path: memory gate, analytic note, unmodelled layouts
+# ---------------------------------------------------------------------------
+
+# DeepSeek-V2-Lite's args, with the layer count the memory gate reads.
+_V2_GATE_ARGS = {**_V2_ARGS, "num_hidden_layers": 27}
+_NOT_COVERED_V3 = (
+    "this model's cache layout ('deepseek_v3') is not covered by the analytic cost, so no cost "
+    "is computed; measured_kv_bytes_per_token is the stored figure."
+)
+
+
+def test_kv_head_dim_is_the_key_width_on_deepseek_v2():
+    """Bug: _kv_head_dim keeps hidden // heads = 2048 // 16 = 128 on deepseek_v2, so the memory
+    gate and the loaded-path cost count K at 128 instead of the cached 128 + 64 = 192."""
+    assert _kv_head_dim(_ModelWithArgs(_Args(**_V2_ARGS))) == 192
+
+
+def test_kv_head_dim_keeps_hidden_over_heads_on_an_unmodelled_layout():
+    """Bug: an unmodelled layout gets None from _kv_head_dim, so the memory gate loses its KV
+    figures (it degrades to 0) on exactly the models whose cache it cannot state."""
+    assert _kv_head_dim(_ModelWithArgs(_Args(**{**_V2_ARGS, "model_type": "deepseek_v3"}))) == 128
+
+
+@pytest.mark.parametrize(
+    ("quantize_start", "expected"),
+    [(0, 181_370_880), (1, 322_928_640)],
+    ids=["stress", "deployment"],
+)
+def test_gate_extra_bytes_counts_k_and_v_at_their_widths(quantize_start, expected):
+    """Bug: the fp16 reference cache is sized at 2·K (or the stored cache at V = K), so a K 192 /
+    V 128 model is gated on the wrong figure. By hand, 27·16 = 432:
+    fp16 cache 432·(192+128)·2 B·512 = 141_557_760; stock 4:64 stores 432·320·0.5625 = 77760
+    B/token, ·512 = 39_813_120. Stress holds one fp16 cache, deployment two."""
+    ws, ctl, caches = kvmod._gate_extra_bytes(
+        StockKVMethod(bits=4, group_size=64),
+        None,
+        window=512,
+        args=_Args(**_V2_GATE_ARGS),
+        head_dim=192,
+        v_dim=128,
+        quantize_start=quantize_start,
+    )
+    assert (ws, ctl, caches) == (0, 0, expected)
+
+
+def test_gate_extra_bytes_counts_both_widths_in_the_control_lane():
+    """Bug: the control method is sized without v_dim, so V is counted at 192. Affine 4/4 g64:
+    stored 432·320·0.5625·512 = 39_813_120 plus working set 432·512·320·2 = 141_557_760."""
+    _, ctl, _ = kvmod._gate_extra_bytes(
+        StockKVMethod(bits=4, group_size=64),
+        AffineKVMethod(k_bits=4, v_bits=4),
+        window=512,
+        args=_Args(**_V2_GATE_ARGS),
+        head_dim=192,
+        v_dim=128,
+    )
+    assert ctl == 181_370_880
+
+
+class _WidthAwareMethod(FakeKVMethod):
+    """FakeKVMethod with the ``v_dim`` keyword. Its analytic figure is 36 B per 320 cached
+    elements per layer, so on the two fake layers it equals the measured 72 B/token only when it
+    is asked for K 192 and V 128 (K + V = 320); ``analytic`` overrides it with a fixed figure."""
+
+    def __init__(self, *, analytic=None):
+        super().__init__()
+        self._analytic = analytic
+
+    def check(self, *, head_dim, model_type, v_dim=None):
+        self.calls.append("check")
+        return []
+
+    def bytes_per_token(self, *, n_layers, n_kv_heads, head_dim, v_dim=None):
+        if self._analytic is not None:
+            return self._analytic
+        return n_layers * (head_dim + (head_dim if v_dim is None else v_dim)) * 36 // 320
+
+    def working_set_bytes(self, *, window, n_layers, n_kv_heads, head_dim, dtype_bytes, v_dim=None):
+        return 0
+
+
+def _mla_method_model(model_type):
+    """FakeMethodModel carrying DeepSeek-V2-Lite's MLA args under ``model_type``."""
+    model = FakeMethodModel(kv_heads=2)
+    for name in ("qk_nope_head_dim", "qk_rope_head_dim", "v_head_dim", "kv_lora_rank"):
+        setattr(model.args, name, _V2_ARGS[name])
+    model.args.model_type = model_type
+    model.args.head_dim = None
+    model.args.hidden_size = 2048
+    model.args.num_attention_heads = 16
+    return model
+
+
+def test_analytic_note_silent_when_formula_matches_on_k_ne_v(monkeypatch):
+    """Bug: the seam asks for the analytic figure at hidden // heads or without v_dim (V counted
+    at K's width), so a method whose formula is right on K 192 / V 128 is reported as differing.
+    Asked correctly it gives 2·320·36/320 = 72, the measured figure."""
+    _patch_prompt_cache(monkeypatch)
+    report = score_kv_config(
+        _mla_method_model("deepseek_v2"),
+        _kv_corpus(1, 4),
+        model_id="org/v2",
+        method=_WidthAwareMethod(),
+    )
+    assert report.measured_kv_bytes_per_token == 72
+    assert not any("differs from the analytic" in w for w in report.warnings)
+
+
+def test_analytic_note_names_width_and_dtype(monkeypatch):
+    """Bug: the note still blames only the scale/bias dtype, though a K or V width the config
+    does not state is the other cause it cannot tell apart."""
+    _patch_prompt_cache(monkeypatch)
+    report = score_kv_config(
+        _mla_method_model("deepseek_v2"),
+        _kv_corpus(1, 4),
+        model_id="org/v2",
+        method=_WidthAwareMethod(analytic=200),
+    )
+    assert (
+        "measured KV bytes/token 72 differs from the analytic 200 for method 'fake' (ranking uses "
+        "the analytic figure; a K or V width the model's config does not state, or a scale/bias "
+        "dtype other than fp16/bf16, is the usual cause)."
+    ) in report.warnings
+
+
+def test_latent_layout_reports_no_cost_note_and_no_working_set(monkeypatch):
+    """Bug: a deepseek_v3 latent cache is costed at hidden // heads = 128, so the report blames a
+    dtype for a gap its own formula made and states a working set for widths it cannot know."""
+    _patch_prompt_cache(monkeypatch)
+    report = score_kv_config(
+        _mla_method_model("deepseek_v3"), _kv_corpus(1, 4), model_id="org/v3", method=FakeKVMethod()
+    )
+    assert report.measured_kv_bytes_per_token == 72
+    assert not any("differs" in w for w in report.warnings)
+    assert [w for w in report.warnings if "not covered" in w] == [_NOT_COVERED_V3]
+    assert report.working_set_bytes_per_token is None
+
+
+def test_latent_layout_without_a_measured_figure_has_no_not_covered_note(monkeypatch):
+    """Bug: the not-covered note is added whenever the layout is unmodelled, though a run that
+    measured nothing has no stored figure for it to point at."""
+    _patch_prompt_cache(monkeypatch)
+    report = score_kv_config(
+        _mla_method_model("deepseek_v3"),
+        _kv_corpus(1, 4),
+        model_id="org/v3",
+        method=_NoOffsetMethod(),
+    )
+    assert report.measured_kv_bytes_per_token is None
+    assert not any("not covered" in w for w in report.warnings)
+
+
+def test_stock_on_a_latent_layout_does_not_gate_hidden_over_heads(monkeypatch):
+    """Bug: `check` gates hidden // heads = 128 on a latent cache, a width the cache does not
+    hold, and reports the group size as verified. It must say the width is unverified."""
+    _patch_kv_caches_divergent(monkeypatch)
+    model = _FakeDivergentModel()
+    for name, value in _V2_ARGS.items():
+        setattr(model.args, name, value)
+    model.args.model_type = "deepseek_v3"
+    model.args.head_dim = None
+    report = score_kv_config(
+        model, _kv_corpus(2), model_id="org/m", method=StockKVMethod(bits=4, group_size=64)
+    )
+    assert any("compatibility unverified for 'deepseek_v3'" in w for w in report.warnings)
+
+
+def test_old_signature_method_runs_on_symmetric_model(monkeypatch):
+    """Bug: the seam always passes v_dim (even v_dim=None or v_dim=head_dim), so a third-party
+    method written against the older signature raises TypeError on a K == V model."""
+    _patch_prompt_cache(monkeypatch)
+    report = score_kv_config(
+        FakeMethodModel(kv_heads=2), _kv_corpus(1, 4), model_id="org/m", method=FakeKVMethod()
+    )
+    assert report.kv_method == "fake"
+    assert report.working_set_bytes_per_token == 0
+    assert any("differs from the analytic 200" in w for w in report.warnings)
+
+
+def test_old_signature_method_runs_on_an_expanded_type_with_equal_widths(monkeypatch):
+    """Bug: on deepseek_v2 with K = 128 + 64 = 192 and V = 192, the check call or the report's
+    cost and working-set calls hand v_dim=192 to a method with the old signature (the key width
+    is not compared, so K == V reads as a split layout), and the run dies with TypeError.
+    By hand: the fake's analytic figure is 100 B · 2 layers = 200 against the measured 72."""
+    _patch_prompt_cache(monkeypatch)
+    model = _mla_method_model("deepseek_v2")
+    model.args.v_head_dim = 192
+    report = score_kv_config(model, _kv_corpus(1, 4), model_id="org/v2", method=FakeKVMethod())
+    assert report.kv_method == "fake"
+    assert report.measured_kv_bytes_per_token == 72
+    assert report.working_set_bytes_per_token == 0
+    assert any("differs from the analytic 200" in w for w in report.warnings)
+
+
+def test_score_gate_counts_the_value_width_on_deepseek_v2(monkeypatch):
+    """Bug: score_kv_config hands the memory gate no value width, so V is counted at K's 192 and
+    a run that fits is refused. Window 4 pads to one 256-token block; 27 layers · 16 KV heads =
+    432. K 192 / V 128: fp16 cache 432·320·2 B·256 = 70_778_880, plus stock 4:64's stored
+    77760 B/token · 4 = 311_040, is 71_089_920. V at 192: 432·384·2·256 = 84_934_656 plus
+    93312 · 4 = 373_248 is 85_307_904. The working set below leaves 78_000_000 B past the 2 GiB
+    headroom, between the two (the paired logits at vocab 4 are 7·3·4·4 = 336 B)."""
+    _pin_caps(monkeypatch)
+    monkeypatch.setattr(kvmod, "_max_working_set_bytes", lambda: 2 * 1024**3 + 78_000_000)
+    _patch_kv_caches_divergent(monkeypatch)
+    model = _FakeDivergentModel()
+    for name, value in _V2_GATE_ARGS.items():
+        setattr(model.args, name, value)
+    model.args.head_dim = None
+    report = score_kv_config(
+        model, _kv_corpus(2), model_id="org/v2", method=StockKVMethod(bits=4, group_size=64)
+    )
+    assert report.kv_method == "stock"
+
+
+class _WidthWorkingSetMethod(_WidthAwareMethod):
+    """A working set of one element per cached K and V column per token: ``window·(K + V)``."""
+
+    def working_set_bytes(self, *, window, n_layers, n_kv_heads, head_dim, dtype_bytes, v_dim=None):
+        return window * (head_dim + (head_dim if v_dim is None else v_dim))
+
+
+def test_report_working_set_counts_the_value_width_on_deepseek_v2(monkeypatch):
+    """Bug: the report asks the method for its working set without v_dim, so V is counted at
+    K's 192 and working_set_bytes_per_token is 192 + 192 = 384 instead of 192 + 128 = 320 (on
+    the committed affine:8:4 row that would publish 331.8 KB instead of 276.5 KB)."""
+    _patch_prompt_cache(monkeypatch)
+    report = score_kv_config(
+        _mla_method_model("deepseek_v2"),
+        _kv_corpus(1, 4),
+        model_id="org/v2",
+        method=_WidthWorkingSetMethod(),
+    )
+    assert report.working_set_bytes_per_token == 320

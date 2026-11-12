@@ -1,6 +1,9 @@
+from types import SimpleNamespace
+
 import pytest
 
 from mlx_quant_fidelity.costs import KVLayout, kv_bytes_per_token, kv_layout, v_dim_kwarg
+from mlx_quant_fidelity.probes import kv as kvmod
 
 
 def test_kv_bytes_per_token_hand_value():
@@ -159,11 +162,52 @@ def test_kv_bytes_explicit_equal_v_dim_matches_the_default():
     )
 
 
-def test_v_dim_kwarg_passes_v_dim_only_when_known():
-    """Bug: None is forwarded as v_dim=None (breaks a third-party method with the old signature
-    on a K == V model), or a known width is dropped."""
-    assert v_dim_kwarg(None) == {}
-    assert v_dim_kwarg(128) == {"v_dim": 128}
+def test_v_dim_kwarg_passes_v_dim_only_when_it_differs_from_k():
+    """Bug: None is forwarded as v_dim=None, a V equal to K is forwarded (an old-signature
+    method then fails on a K == V model, against the documented promise), or a V that differs
+    from K, or a V next to an unknown K, is dropped."""
+    assert v_dim_kwarg(None, 128) == {}
+    assert v_dim_kwarg(128, 128) == {}
+    assert v_dim_kwarg(128, 192) == {"v_dim": 128}
+    assert v_dim_kwarg(128, None) == {"v_dim": 128}
+
+
+class _OldSignatureMethod:
+    """A method written against the pre-0.12.0 signature: no ``v_dim`` parameter anywhere."""
+
+    def bytes_per_token(self, *, n_layers: int, n_kv_heads: int, head_dim: int) -> int:
+        return 100
+
+    def working_set_bytes(
+        self, *, window: int, dtype_bytes: int, n_layers: int, n_kv_heads: int, head_dim: int
+    ) -> int:
+        return 7
+
+
+def test_old_signature_method_gets_no_v_dim_on_an_expanded_type_with_equal_widths():
+    """Bug: a deepseek_v2 config with K = 128 + 64 = 192 and V = 192 hands v_dim=192 to a method
+    with the old signature, which raises TypeError in the memory gate. By hand: the fp16
+    reference cache is 2 layers · 4 heads · (192 + 192) · 2 B · 256 = 1_572_864, plus the
+    method's 100 B/token · 256 = 25_600; working set 7."""
+    fields = {
+        "num_hidden_layers": 2,
+        "num_key_value_heads": 4,
+        "qk_nope_head_dim": 128,
+        "qk_rope_head_dim": 64,
+        "v_head_dim": 192,
+        "kv_lora_rank": 512,
+    }
+    layout = kv_layout("deepseek_v2", fields.get)
+    assert layout == KVLayout(k_dim=192, v_dim=192, modelled=True)
+    ws, ctl, caches = kvmod._gate_extra_bytes(
+        _OldSignatureMethod(),  # type: ignore[arg-type]
+        None,
+        window=256,
+        args=SimpleNamespace(model_type="deepseek_v2", **fields),
+        head_dim=layout.k_dim,
+        v_dim=layout.v_dim,
+    )
+    assert (ws, ctl, caches) == (7, 0, 1_598_464)
 
 
 def test_kv_layout_minicpm3_is_not_modelled():

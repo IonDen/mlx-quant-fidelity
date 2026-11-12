@@ -1512,9 +1512,27 @@ def test_stock_check_refuses_a_packed_width_mismatch_on_the_key_width():
 
 
 def test_stock_check_refuses_a_packed_width_mismatch_on_the_value_width():
-    """Bug: the packed-width gate tests K only. K 64 at 6 bits is clean; V 128: 25 vs 24."""
-    with pytest.raises(CacheNotQuantizableError, match="packed-width"):
+    """Bug: the packed-width gate tests K only. K 64 at 6 bits is clean; V 128: 25 vs 24.
+
+    Bug (remedy): the offered bits are checked on K only, so 6 is offered again though V 128
+    cannot take it. By hand over (2, 3, 4, 6, 8): K 64 packs cleanly at all five, V 128 at all
+    but 6 (128 // 5 = 25 vs 128·6 // 32 = 24), so the remedy is 2/3/4/8."""
+    with pytest.raises(CacheNotQuantizableError, match="packed-width") as excinfo:
         StockKVMethod(bits=6, group_size=64).check(head_dim=64, v_dim=128, model_type="x")
+    assert "use bits 2/3/4/8 or" in str(excinfo.value)
+
+
+def test_stock_packed_width_remedy_offers_only_bits_both_widths_take():
+    """Bug (remedy): the offered bits are checked on the failing width alone, so 3 is offered
+    though V 192 cannot take it. By hand over (2, 3, 4, 6, 8): 6 fails at K 128 (128 // 5 = 25
+    vs 128·6 // 32 = 24), 3 fails at V 192 (192 // 10 = 19 vs 192·3 // 32 = 18), and 2, 4, 8
+    pack cleanly at both, so the remedy is 2/4/8."""
+    with pytest.raises(CacheNotQuantizableError) as excinfo:
+        StockKVMethod(bits=6, group_size=64).check(head_dim=128, v_dim=192, model_type="x")
+    assert str(excinfo.value) == (
+        "kv_bits=6 cannot append to a fresh QuantizedKVCache at key width=128 on this mlx-lm "
+        "version (packed-width truncation bug); use bits 2/4/8 or a group-compatible head_dim."
+    )
 
 
 def test_stock_check_accepts_deepseek_v2_widths_at_4_64():

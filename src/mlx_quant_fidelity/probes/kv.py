@@ -19,7 +19,7 @@ from mlx_quant_fidelity._memory_caps import (
     install_memory_caps,
 )
 from mlx_quant_fidelity.corpora.provenance import scored_provenance
-from mlx_quant_fidelity.costs import KVLayout, kv_layout
+from mlx_quant_fidelity.costs import KVLayout, kv_layout, v_dim_kwarg
 from mlx_quant_fidelity.errors import (
     CacheNotQuantizableError,
     CompareConfigError,
@@ -44,7 +44,6 @@ from mlx_quant_fidelity.probes.kv_methods import (
     ControlLaneMethod,
     PartialCoverageMethod,
     StockKVMethod,
-    _check_head_dim,
     _gate_turboquant_layout,
     check_before_load,
 )
@@ -252,7 +251,13 @@ def _kv_head_dim(model: object) -> int | None:
     ``ModelArgs.head_dim`` is frequently None (llama populates the real value as an
     Attention-layer local, not on args), so the hidden//heads fallback is the primary
     path. Field names are llama-family-specific; unusual archs return None.
+
+    On a layout whose cached K width is known (see :func:`_kv_layout`) that width is returned.
+    A layout the resolver cannot state keeps the figure above, so the memory gate keeps a number.
     """
+    k_dim = _kv_layout(model).k_dim
+    if k_dim is not None:
+        return k_dim
     args = getattr(model, "args", None)
     head_dim = _model_arg(args, "head_dim")
     if isinstance(head_dim, int):
@@ -393,6 +398,7 @@ def _gate_extra_bytes(
     args: object,
     head_dim: int | None,
     quantize_start: int = 0,
+    v_dim: int | None = None,
 ) -> tuple[int, int, int]:
     """(method working-set, control-cache, KV-cache) bytes for the pre-load memory gate.
 
@@ -405,6 +411,9 @@ def _gate_extra_bytes(
     Geometry is model.args-derived and computed BEFORE any cache construction (the gate's whole
     point is running before cache/model allocations). Each figure degrades to 0 (the 0.6.0
     estimate) when any one piece of geometry is unknown, rather than guessing.
+
+    ``head_dim`` is the cached key width and ``v_dim`` the value width; ``v_dim=None`` means
+    V = K, and only a known ``v_dim`` is passed on to the methods.
     """
     n_layers = _model_arg(args, "num_hidden_layers")
     n_kv = _model_arg(args, "num_key_value_heads") or _model_arg(args, "num_attention_heads")
@@ -415,22 +424,19 @@ def _gate_extra_bytes(
         and head_dim is not None
     ):
         return 0, 0, 0
-    method_ws_bytes = method.working_set_bytes(
-        window=window, n_layers=n_layers, n_kv_heads=n_kv, head_dim=head_dim, dtype_bytes=2
-    )
-    kv_fp = 2 * n_layers * n_kv * head_dim * 2 * (-(-window // _KV_STEP) * _KV_STEP)
+    widths = v_dim_kwarg(v_dim, head_dim)
+    geometry = {"n_layers": n_layers, "n_kv_heads": n_kv, "head_dim": head_dim, **widths}
+    method_ws_bytes = method.working_set_bytes(window=window, dtype_bytes=2, **geometry)
+    v_width = head_dim if v_dim is None else v_dim
+    kv_fp = n_layers * n_kv * (head_dim + v_width) * 2 * (-(-window // _KV_STEP) * _KV_STEP)
     cache_bytes = kv_fp * (2 if quantize_start > 0 else 1)
     with contextlib.suppress(CacheNotQuantizableError):
-        cache_bytes += (
-            method.bytes_per_token(n_layers=n_layers, n_kv_heads=n_kv, head_dim=head_dim) * window
-        )
+        cache_bytes += method.bytes_per_token(**geometry) * window
     control_bytes = 0
     if control_m is not None:
         control_bytes = control_m.bytes_per_token(
-            n_layers=n_layers, n_kv_heads=n_kv, head_dim=head_dim
-        ) * window + control_m.working_set_bytes(
-            window=window, n_layers=n_layers, n_kv_heads=n_kv, head_dim=head_dim, dtype_bytes=2
-        )
+            **geometry
+        ) * window + control_m.working_set_bytes(window=window, dtype_bytes=2, **geometry)
     return method_ws_bytes, control_bytes, cache_bytes
 
 
@@ -743,8 +749,15 @@ def score_kv_config(
     # nothing, so the kernel-panic budget gate below still precedes any cache construction.
     layout = _kv_layout(model)
     _gate_turboquant_layout(method, layout, model_type=model_type)
+    # `check` gets the cached widths: K (head_dim, which is the key width on a modelled MLA
+    # layout) and V when it is known. On a layout the resolver cannot state it gets no width, so
+    # the methods say the width is unverified instead of gating hidden // heads.
     probe_warnings.extend(
-        method.check(head_dim=_check_head_dim(method, layout, head_dim), model_type=model_type)
+        method.check(
+            head_dim=head_dim if layout.modelled else None,
+            model_type=model_type,
+            **v_dim_kwarg(layout.v_dim, head_dim if layout.modelled else None),
+        )
     )
     window = getattr(corpus.provenance, "chunk_length", None)
     _require_teacher_forced_positions(
@@ -767,6 +780,7 @@ def score_kv_config(
         args=args,
         head_dim=head_dim,
         quantize_start=quantize_start,
+        v_dim=layout.v_dim,
     )
     budget_warning = _preflight_logits_budget(
         window,
@@ -928,21 +942,39 @@ def score_kv_config(
     # quantized, while measured_bpt is the real mixed cache (a few packed layers + many
     # full-precision ones), so the two never match and the dtype attribution would be wrong.
     # partial_coverage.note() already explains the mixed footprint.
+    # A layout the resolver cannot state has no analytic figure to compare with, and no working
+    # set: the measured figure is the only stored one, and the note says so.
+    widths = v_dim_kwarg(layout.v_dim, head_dim)
+    if partial_coverage is None and measured_bpt is not None and not layout.modelled:
+        probe_warnings.append(
+            f"this model's cache layout ({model_type!r}) is not covered by the analytic cost, so "
+            "no cost is computed; measured_kv_bytes_per_token is the stored figure."
+        )
     if (
-        partial_coverage is None
+        layout.modelled
+        and partial_coverage is None
         and measured_bpt is not None
         and head_dim is not None
         and isinstance(n_kv, int)
     ):
-        analytic = method.bytes_per_token(n_layers=n_layers, n_kv_heads=n_kv, head_dim=head_dim)
+        analytic = method.bytes_per_token(
+            n_layers=n_layers, n_kv_heads=n_kv, head_dim=head_dim, **widths
+        )
         if analytic != measured_bpt:
             probe_warnings.append(
                 f"measured KV bytes/token {measured_bpt} differs from the analytic {analytic} for "
-                f"method {method.name!r} (ranking uses the analytic figure; a scale/bias dtype other "
-                "than fp16/bf16 is the usual cause)."
+                f"method {method.name!r} (ranking uses the analytic figure; a K or V width the "
+                "model's config does not state, or a scale/bias dtype other than fp16/bf16, is the "
+                "usual cause)."
             )
     working_set_bytes_per_token: int | None = None
-    if isinstance(window, int) and window > 0 and head_dim is not None and isinstance(n_kv, int):
+    if (
+        layout.modelled
+        and isinstance(window, int)
+        and window > 0
+        and head_dim is not None
+        and isinstance(n_kv, int)
+    ):
         working_set_bytes_per_token = (
             method.working_set_bytes(
                 window=window,
@@ -950,6 +982,7 @@ def score_kv_config(
                 n_kv_heads=n_kv,
                 head_dim=head_dim,
                 dtype_bytes=2,
+                **widths,
             )
             // window
         )

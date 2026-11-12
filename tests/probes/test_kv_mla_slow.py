@@ -64,5 +64,13 @@ def test_mla_expanded_kv_runs_stock_probe_end_to_end(hub_offline):
     assert report.kl.mean > 0.01
     # A non-zero flip rate is expected (committed 0.224 at 100 chunks); only its range is checked.
     assert 0.0 <= report.flip_rate <= 1.0
-    # committed peak 10.80 GB; reds if the run stops fitting the device's working set
+    # 10.59-10.63 GB (MLX peak, 2026-11-13 sample); reds if the run stops fitting the device's
+    # working set
     assert report.peak_memory_bytes < int(mx.device_info()["max_recommended_working_set_size"])
+    # The stored bytes are what the K 192 / V 128 formula gives (27 layers · 16 KV heads ·
+    # (192 + 128) · (0.5 + 4/64) = 77760). Reds if the layout resolver misreads the real
+    # ModelArgs, so the probe costs, notes or refuses this model on the wrong widths. A literal,
+    # so a wrong cost formula cannot move the expected figure with it.
+    assert report.measured_kv_bytes_per_token == 77760
+    assert not any("differs from the analytic" in w for w in report.warnings)
+    assert not any("not covered" in w for w in report.warnings)

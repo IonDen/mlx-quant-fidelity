@@ -676,6 +676,14 @@ def render_comparison_markdown(report: ComparisonReport) -> str:
         lines += ["", "**Excluded (not ranked):**"]
         for r in excluded:
             why = r.excluded_reason or f"{r.error_type}: {r.message}"
+            if r.status == "ok" and r.report is not None:
+                # Scored but not ranked (no cost): keep the numbers the ranked table would show.
+                if is_kv:
+                    kl_mean, _, flip = _kv_row_kl_and_flip(r.report, r.ranked_kl)
+                    verdict = r.ranked_verdict if r.ranked_verdict is not None else r.report.verdict
+                else:
+                    kl_mean, flip, verdict = r.report.kl.mean, r.report.flip_rate, r.report.verdict
+                why += f" (KL mean {kl_mean:.4f}, flip {flip:.4f}, verdict {verdict})"
             lines.append(f"- `{r.label}` — {why}")
     lines += [""]
     if report.budget_pick is not None:

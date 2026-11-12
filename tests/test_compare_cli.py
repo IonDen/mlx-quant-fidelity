@@ -490,3 +490,87 @@ def test_compare_weights_oversized_worker_timeout_is_a_usage_error(monkeypatch, 
 
 def test_worker_timeout_at_the_bound_is_accepted():
     assert cli._non_negative_seconds("2000000") == 2_000_000.0
+
+
+# DeepSeek-V2-Lite's config.json at a33a8ad: K = 128 + 64 = 192, V = 128, no head_dim key.
+_V2_CONFIG_JSON = {
+    "model_type": "deepseek_v2",
+    "hidden_size": 2048,
+    "num_attention_heads": 16,
+    "num_key_value_heads": 16,
+    "num_hidden_layers": 27,
+    "qk_nope_head_dim": 128,
+    "qk_rope_head_dim": 64,
+    "v_head_dim": 128,
+    "kv_lora_rank": 512,
+}
+
+
+def _sweep_on(monkeypatch, config, *extra):
+    captured = {}
+
+    def fake_compare(model, configs, **kw):
+        captured["args"] = (configs, kw)
+        return _fake_comparison("kv")
+
+    monkeypatch.setattr(cli, "compare_kv_fidelity", fake_compare)
+    monkeypatch.setattr(cli, "read_model_config", lambda model_id, revision=None: config)
+    rc = main(["compare", "kv", "m", "--sweep", *extra])
+    return rc, captured.get("args")
+
+
+def test_cli_sweep_uses_both_widths_from_config(monkeypatch):
+    """Bug: the sweep grid comes from hidden // heads = 128, which keeps group 128 and bits 3
+    and 6 that the cached K 192 cannot take."""
+    rc, (configs, kw) = _sweep_on(monkeypatch, _V2_CONFIG_JSON)
+    assert rc == 0
+    assert {c.label for c in configs} == {"2:32", "2:64", "4:32", "4:64", "8:32", "8:64"}
+    assert {label for label, _ in kw["skipped_configs"]} == {"3:32", "3:64", "6:32", "6:64"}
+
+
+def test_cli_sweep_budget_uses_both_widths_from_config(monkeypatch):
+    """Bug: the budget costs V at K's width (4:64 becomes 432·384·0.5625 = 93312 and is dropped)
+    or K at 128. With L·H = 27·16 = 432 and K + V = 192 + 128 = 320, at 80000 B/token:
+    2:32 = 432·320·(0.25 + 4/32) = 51840, 2:64 = 43200 and 4:64 = 432·320·0.5625 = 77760 fit;
+    4:32 = 432·320·(0.5 + 4/32) = 86400 does not."""
+    rc, (configs, kw) = _sweep_on(monkeypatch, _V2_CONFIG_JSON, "--max-kv-bytes-per-token", "80000")
+    assert rc == 0
+    assert {c.label for c in configs} == {"2:32", "2:64", "4:64"}
+    assert dict(kw["skipped_configs"])["4:32"] == (
+        "86400 B/token exceeds the --max-kv-bytes-per-token budget of 80000"
+    )
+
+
+def test_cli_sweep_latent_model_exits_2(monkeypatch, capsys):
+    """Bug: a deepseek_v3 latent cache is swept at hidden // heads = 128, a width it does not
+    hold, or the refusal says head_dim cannot be derived for a config that states it."""
+    rc, captured = _sweep_on(monkeypatch, {**_V2_CONFIG_JSON, "model_type": "deepseek_v3"})
+    assert rc == 2
+    assert captured is None
+    assert capsys.readouterr().err.strip() == (
+        "error: model_type 'deepseek_v3' caches keys and values at widths this tool does not "
+        "model, so --sweep cannot size its grid; pass --configs explicitly"
+    )
+
+
+def test_cli_sweep_config_without_geometry_exits_2(monkeypatch, capsys):
+    """Bug: a plain config that lacks hidden_size and head_dim is swept anyway, or gets the
+    unmodelled-layout message although it carries no MLA field."""
+    config = {"model_type": "llama", "num_hidden_layers": 16, "num_key_value_heads": 8}
+    rc, captured = _sweep_on(monkeypatch, config)
+    assert rc == 2
+    assert captured is None
+    assert capsys.readouterr().err.strip() == (
+        "error: cannot derive head_dim from config.json; pass --configs explicitly"
+    )
+
+
+def test_cli_sweep_gates_the_value_width_from_config(monkeypatch):
+    """Bug: the CLI passes only K to the sweep. On V2-Lite K 192 alone already gives the right
+    grid, so this config makes V decide: K 32 + 32 = 64 packs cleanly at every bit width, V 192
+    does not at bits 3 (192 // 10 = 19 vs 192·3 // 32 = 18) or 6 (38 vs 36)."""
+    config = {**_V2_CONFIG_JSON, "qk_nope_head_dim": 32, "qk_rope_head_dim": 32, "v_head_dim": 192}
+    rc, (configs, kw) = _sweep_on(monkeypatch, config)
+    assert rc == 0
+    assert {c.label for c in configs} == {"2:32", "2:64", "4:32", "4:64", "8:32", "8:64"}
+    assert {label for label, _ in kw["skipped_configs"]} == {"3:32", "3:64", "6:32", "6:64"}
