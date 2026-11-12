@@ -33,7 +33,7 @@
       "label": "8:64",
       "message": null,
       "point": {
-        "cost_bytes": 117504,
+        "cost_bytes": 146880,
         "label": "8:64",
         "quality": 0.005542094610261212
       },
@@ -150,16 +150,14 @@
         "model_revision": "a33a8ad64477b9ca7a65b6dc1d8c06c997f87216",
         "n_chunks": 100,
         "n_positions": 51100,
-        "peak_memory_bytes": 10837977202,
+        "peak_memory_bytes": 10628927886,
         "perplexity_delta": 0.014844410636259298,
         "perplexity_quant": 11.708602295474128,
         "perplexity_ref": 11.693757884837868,
         "quantize_mode": "stress",
         "quantize_start": 0,
         "verdict": "marginal",
-        "warnings": [
-          "measured KV bytes/token 146880 differs from the analytic 117504 for method 'stock' (ranking uses the analytic figure; a scale/bias dtype other than fp16/bf16 is the usual cause)."
-        ],
+        "warnings": [],
         "working_set_bytes_per_token": 0
       },
       "status": "ok"
@@ -170,7 +168,7 @@
       "label": "4:64",
       "message": null,
       "point": {
-        "cost_bytes": 62208,
+        "cost_bytes": 77760,
         "label": "4:64",
         "quality": 0.2760486951216631
       },
@@ -287,16 +285,14 @@
         "model_revision": "a33a8ad64477b9ca7a65b6dc1d8c06c997f87216",
         "n_chunks": 100,
         "n_positions": 51100,
-        "peak_memory_bytes": 10698011544,
+        "peak_memory_bytes": 10593538446,
         "perplexity_delta": 1.0846597504681075,
         "perplexity_quant": 12.778417635305976,
         "perplexity_ref": 11.693757884837868,
         "quantize_mode": "stress",
         "quantize_start": 0,
         "verdict": "bad",
-        "warnings": [
-          "measured KV bytes/token 77760 differs from the analytic 62208 for method 'stock' (ranking uses the analytic figure; a scale/bias dtype other than fp16/bf16 is the usual cause)."
-        ],
+        "warnings": [],
         "working_set_bytes_per_token": 0
       },
       "status": "ok"
@@ -307,7 +303,7 @@
       "label": "affine:8:4",
       "message": null,
       "point": {
-        "cost_bytes": 89856,
+        "cost_bytes": 119232,
         "label": "affine:8:4",
         "quality": 0.019903200202564413
       },
@@ -424,7 +420,7 @@
         "model_revision": "a33a8ad64477b9ca7a65b6dc1d8c06c997f87216",
         "n_chunks": 100,
         "n_positions": 51100,
-        "peak_memory_bytes": 10718880419,
+        "peak_memory_bytes": 10614781309,
         "perplexity_delta": 0.007889938382977135,
         "perplexity_quant": 11.701647823220846,
         "perplexity_ref": 11.693757884837868,
@@ -432,10 +428,9 @@
         "quantize_start": 0,
         "verdict": "bad",
         "warnings": [
-          "measured KV bytes/token 119232 differs from the analytic 89856 for method 'affine' (ranking uses the analytic figure; a scale/bias dtype other than fp16/bf16 is the usual cause).",
           "affine: per-tensor asymmetric bits have no shipped runtime \u2014 upstream mlx-lm's QuantizedKVCache is symmetric; the only known implementation is an idle mlx-lm fork. The probe dequantizes on fetch and rides standard SDPA, so this drift is the quantizer round-trip only, for a hypothetical deployment."
         ],
-        "working_set_bytes_per_token": 221184
+        "working_set_bytes_per_token": 276480
       },
       "status": "ok"
     }

@@ -4,6 +4,7 @@
 
 ## Released
 
+- **0.12.0** — Fix. The KV cost counts keys and values at their own widths, so DeepSeek-V2-Lite's cost equals the bytes its cache stores, and a model whose cache layout the tool cannot state from its config gets no cost. Costs do not change for models whose key and value widths are equal.
 - **0.11.2** — Fix. On MLA models the TurboQuant methods are checked against the widths the model really caches: `turboquant` is refused on `deepseek_v2`, `youtu_llm` and unmodelled MLA layouts, and `turboquant-vonly` is gated on the value width. Nothing changes for models whose config has no MLA fields.
 - **0.11.1** — Packaging. The README badge states the Python 3.11 floor, and Python 3.14 is now tested in CI and listed as supported. Nothing in measurement, reports or the API changes.
 - **0.11.0** — Wider real-repo coverage. A second weight ladder (five Qwen3-4B-Instruct-2507 repos against their bf16 reference), a KV comparison on DeepSeek-V2-Lite-Chat, and a methodology section on MLA models. A model whose attention cannot run on the chosen KV cache is refused before scoring, a tokenizer's own code is governed by `--allow-custom-code` (the refusal comes after the weights have downloaded and loaded), a shadowing TurboQuant install is refused before it is imported, and the weight probe's memory pre-flight sizes a model from its shard index.

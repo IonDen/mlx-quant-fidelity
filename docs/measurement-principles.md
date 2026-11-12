@@ -137,13 +137,13 @@ For the expanded layout, on `mlx-community/DeepSeek-V2-Lite-Chat-4bit-mlx` (stre
 
 | method | cost | KL mean | KL p99 | flip | bundled KL | verdict |
 |---|---|---|---|---|---|---|
-| `4:64` | 62.2 KB | 0.2760 | 2.4097 | 0.2237 | 0.2763 | bad |
-| `affine:8:4` | 89.9 KB | 0.0199 | 0.2136 | 0.0606 | — | bad |
-| `8:64` | 117.5 KB | 0.0055 | 0.0618 | 0.0304 | 0.0055 | marginal |
+| `4:64` | 77.8 KB | 0.2760 | 2.4097 | 0.2237 | 0.2763 | bad |
+| `affine:8:4` | 119.2 KB | 0.0199 | 0.2136 | 0.0606 | — | bad |
+| `8:64` | 146.9 KB | 0.0055 | 0.0618 | 0.0304 | 0.0055 | marginal |
 
 All three are on the frontier. The committed report is `_artifacts/samples/compare/kv-deepseek-v2-lite-methods.md`.
 
-The cost column is the analytic figure, which assumes keys and values are the same width. Here they are not (192 against 128), so it under-states what the cache stores, and that width difference accounts for the whole gap in all three rows. The bytes per token measured on the stored cache are 77.8 KB for `4:64`, 119.2 KB for `affine:8:4` and 146.9 KB for `8:64`. The ranking still uses the analytic figure for this model, and a later release will correct it. The rows tell you what quantizing the expanded keys and values costs on this model and corpus. They say nothing about a model that caches a latent.
+The cost column counts keys at 192 dimensions and values at 128, each at its own width. In all three rows it equals the bytes per token measured on the stored cache. The tool reads the two widths from the model type and config fields, and it knows them for `deepseek_v2` and `youtu_llm`. A model whose config has MLA fields under any other model type, such as DeepSeek-V3, Kimi or MiniCPM3, gets no cost, because the tool cannot state its widths from the config. A configuration scored on such a model is not ranked and is not on the frontier. The Markdown output lists it under "Excluded (not ranked)" with its KL mean, flip rate and verdict, in a line such as ``- `affine:8:4` — cost unavailable (KL mean 0.0812, flip 0.0050, verdict marginal)``. Its full report is in `--format json`, and its measured bytes per token is the stored figure. The rows above tell you what quantizing the expanded keys and values costs on this model and corpus. They say nothing about a model that caches a latent.
 
 On `deepseek_v3` the stock quantized cache does not run. Its attention expects plain arrays back from the cache, and a quantized cache hands back tuples of packed arrays and scales instead. Attention fails on the first forward with an `AttributeError` in the `deepseek_v3` attention path of mlx-lm 0.31.3 (measured on `mlx-community/Moonlight-16B-A3B-Instruct-4-bit`). The probe therefore refuses a model whose attention cannot run on the chosen cache before it scores anything. The message names the model type and suggests `affine:<k>:<v>`, which stores the latent quantized but hands attention full-precision arrays. TurboQuant is refused on a latent layout too: the tool does not model its widths, so it refuses rather than guess.
 

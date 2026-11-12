@@ -198,9 +198,11 @@ def _kv_rows(stem):
 
 
 def test_cost_formula_equals_committed_stored_bytes_on_v2_lite():
-    """Reds unless each method's formula reproduces the bytes the real run stored. Offline proof
-    of the acceptance criterion: compares against measured_kv_bytes_per_token, not cost_bytes.
-    Bug: V is costed at K's width (the old rule gave 117504 / 62208 / 89856)."""
+    """Reds unless each method's formula reproduces the bytes the real run stored. Checks offline
+    that the analytic cost of each committed row equals its measured_kv_bytes_per_token (the
+    stored bytes), not its cost_bytes (the formula's own output).
+    Bug: K and V are costed at one shared width, hidden // heads = 128 (the old rule gave
+    117504 / 62208 / 89856)."""
     rows = _kv_rows("kv-deepseek-v2-lite-methods")
     # DeepSeek-V2-Lite: 27 layers, 16 KV heads, K = 128 + 64 = 192, V = 128 (config.json a33a8ad)
     for method, _cost, measured in rows:
@@ -223,3 +225,34 @@ def test_symmetric_samples_keep_their_cost(sample, geo):
     for method, cost_bytes, measured in rows:
         assert method.bytes_per_token(**geo) == cost_bytes == measured, method.label
     assert len(rows) >= 3
+
+
+def test_v2_lite_sample_cost_equals_stored_bytes():
+    """Reds on a stale or half-patched V2-Lite sample: a cost_bytes still counting K and V at one
+    shared width, hidden // heads = 128 (the old sample had 117504 / 62208 / 89856), which
+    undercounts the 192-wide keys, or the analytic-mismatch note surviving
+    in the JSON warnings or as a Markdown note. The formula test above reads only the measured
+    bytes, so it stays green when the committed cost column is stale."""
+    stem = "kv-deepseek-v2-lite-methods"
+    rows = _kv_rows(stem)
+    for method, cost_bytes, measured in rows:
+        assert cost_bytes == measured, method.label
+    assert len(rows) == 3
+    data = json.loads((SAMPLES / "compare" / f"{stem}.json").read_text())
+    warnings = [w for row in data["results"] for w in (row.get("report") or {}).get("warnings", [])]
+    stale = [w for w in warnings if "differs from the analytic" in w or "not covered" in w]
+    assert stale == []
+    md_lines = (SAMPLES / "compare" / f"{stem}.md").read_text().splitlines()
+    assert [line for line in md_lines if line.startswith("> Note: measured KV bytes")] == []
+
+
+def test_measurement_principles_table_matches_v2_lite_sample():
+    """Reds if the V2-Lite table in docs/measurement-principles.md drifts from the committed
+    sample: a target's cost cell differs (e.g. the old 62.2 KB for 4:64) or a row goes missing."""
+    doc = (SAMPLES.parents[1] / "docs" / "measurement-principles.md").read_text()
+    sample = (SAMPLES / "compare" / "kv-deepseek-v2-lite-methods.md").read_text()
+    target_rows = [line for line in sample.splitlines() if line.startswith("| `")]
+    assert len(target_rows) >= 3
+    for row in target_rows:
+        target, cost = (cell.strip() for cell in row.split("|")[1:3])
+        assert f"| {target} | {cost} |" in doc, row

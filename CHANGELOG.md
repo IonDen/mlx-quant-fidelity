@@ -3,6 +3,29 @@
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.0] - 2026-11-13
+
+The KV cost now counts keys and values at their own widths. On models whose keys and values are the same width, such as Llama, Qwen and Gemma, the costs do not change. On DeepSeek-V2-Lite the cost used to fall below what the cache stores, and it now equals it. A model whose cache layout the tool cannot state from its config gets no cost, because the tool cannot know its widths.
+
+### Fixed
+
+- The cost per token is `n_layers · n_kv_heads · (k_dim + v_dim) · (bits/8 + 4/group_size)`. `k_dim` and `v_dim` are the same `head_dim` except on a model whose cache stores expanded keys and values at different widths. For `deepseek_v2` and `youtu_llm` the tool reads them from the config: keys are `qk_nope_head_dim + qk_rope_head_dim`, values are `v_head_dim`, which is 192 and 128 on DeepSeek-V2-Lite. There the cost per token is now 77.8 KB for `4:64`, 119.2 KB for `affine:8:4` and 146.9 KB for `8:64`, equal to the bytes measured on the stored cache.
+- `--max-kv-bytes-per-token` uses the same two widths, so the budget filter no longer keeps a configuration whose real cost is over the budget. The memory pre-flight uses them on `deepseek_v2`. On `youtu_llm` it cannot size the KV cache and leaves it out of the estimate, as 0.11.2 did. On a model the tool does not model, it still sizes the KV cache at hidden size divided by head count, as 0.11.2 did.
+
+### Changed
+
+- A model gets no cost when its config has multi-head latent attention (MLA) fields and its `model_type` is anything other than `deepseek_v2` or `youtu_llm`. Tested examples are `deepseek_v3`, `deepseek_v32`, `kimi_vl`, `kimi_k25`, `kimi_linear`, `kimi_k2`, `minicpm3` and `mimo_v2_flash`. The tool cannot state their widths from the config.
+- On `youtu_llm`, only the paths that size from the config use the two widths: the `--sweep` grid and the `--max-kv-bytes-per-token` filter. After the load the tool cannot read a `youtu_llm` model's geometry, so `compare kv` shows its configurations as "cost unavailable", excluded and not ranked, as for the models above. No `youtu_llm` model was run; the widths come from mlx-lm 0.31.3's model source.
+- In `compare kv`, a configuration that was scored on such a model but has no cost is listed in Markdown output under "Excluded (not ranked)", with its KL mean, flip rate and verdict, in a line such as ``- `affine:8:4` — cost unavailable (KL mean 0.0812, flip 0.0050, verdict marginal)``. It is not ranked and not on the frontier. Its full report is in `--format json`.
+- `compare kv --sweep` on such a model exits with code 2 and says that the model type caches keys and values at widths the tool does not model.
+- The report's measured bytes per token is the stored figure. For such a model the stock method and `affine` no longer check group size and bit width against hidden size divided by head count, which is not the width it caches. The report warns that head_dim and group-size compatibility is unverified for that model type, and MLX reports any mismatch at first use.
+- The stock method now checks both widths for its packed storage. On DeepSeek-V2-Lite it refuses group size 128, which does not divide 192. It also refuses 3-bit and 6-bit: at a 192-wide head, mlx-lm's quantized cache sizes its packed storage differently from `mx.quantize`, so the first append would fail.
+- `affine` checks only that the group size divides both widths, because it quantizes with `mx.quantize` directly.
+- The `--sweep` grid leaves out group sizes that do not divide both widths and lists each skipped bit width with its reason.
+- `check`, `bytes_per_token` and `working_set_bytes` on a third-party `KVCacheMethod` take an optional `v_dim` keyword, the value width; `None` means the same as `head_dim`. A method that does not accept it keeps working on every model whose key and value widths are equal, including a `deepseek_v2` config whose key and value widths happen to be equal. On a model where they differ, its row in `compare kv` is recorded as failed, with a message that names `v_dim`. Outside `compare kv`, `measure_kv_fidelity` raises `TypeError` for such a method on that model.
+- The `KVCacheMethod` protocol now declares the `v_dim` keyword, so a static type checker reports a method class without it as not matching the protocol.
+- Partial results saved by `compare kv` in earlier versions are scored again once, on the next run.
+
 ## [0.11.2] - 2026-11-08
 
 A bug-fix release. On models with multi-head latent attention (MLA), the TurboQuant methods are now checked against the widths the model really caches. Models whose config has no MLA fields, such as Llama, Qwen and Gemma, behave as before. Costs and memory figures do not change.
@@ -10,7 +33,7 @@ A bug-fix release. On models with multi-head latent attention (MLA), the TurboQu
 ### Fixed
 
 - On MLA models, the TurboQuant width check looked at the hidden size divided by the head count, which is not the width these models put in the KV cache. TurboQuant-MLX's fused kernels need a power-of-two width up to 256, so the check could pass while the kernels received a width they do not handle. This comes from reading the kernel source; no wrong result was observed in a run.
-- `turboquant` is now refused on `deepseek_v2` and `youtu_llm`, which cache keys of width qk_nope + qk_rope (192 on DeepSeek-V2-Lite; the `youtu_llm` widths come from mlx-lm 0.31.3's model source, and no `youtu_llm` model was run), and on any model whose config has MLA fields in a layout the tool does not model, such as the compressed-latent caches of DeepSeek-V3 and Kimi. `turboquant-vonly` checks the value width instead: it is allowed on `deepseek_v2` (128) and refused on an unmodelled layout. The refusal comes after the model loads and before any TurboQuant cache is built or any of its kernels runs. It is the same refusal error (`CacheNotQuantizableError`) that the other width checks raise. Its message names the width when it is known, and otherwise says the widths cannot be read from the config.
+- `turboquant` is now refused on `deepseek_v2` and `youtu_llm`, which cache keys of width qk_nope + qk_rope (192 on DeepSeek-V2-Lite; the `youtu_llm` widths come from mlx-lm 0.31.3's model source, and no `youtu_llm` model was run), and on any model whose config has MLA fields in a layout the tool does not model, such as the compressed-latent caches of DeepSeek-V3 and Kimi. `turboquant-vonly` checks the value width instead: it is allowed on `deepseek_v2` (128) and refused on an unmodelled layout. The refusal comes after the model loads and before any TurboQuant cache is built or any of its kernels runs. It is the same refusal error (`CacheNotQuantizableError`) that the other width checks raise. Its message names the width on `deepseek_v2`; on `youtu_llm` it reports `head_dim=None`, and on an unmodelled layout it says the widths cannot be read from the config.
 - When a model's attention cannot run on the stock quantized cache, the refusal used to suggest `affine:<k>:<v>` or `turboquant`. It now suggests only `affine:<k>:<v>`, because the tool does not model TurboQuant's widths on those layouts.
 - Partial results saved by `compare kv` in earlier versions are scored again on the next run instead of being reused, so an old TurboQuant row on an MLA model cannot reappear in a ranking. This costs one recomputation.
 
