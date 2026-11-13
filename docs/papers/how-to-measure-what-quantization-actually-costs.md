@@ -15,19 +15,22 @@ This memo is the methods companion to a survey of
 [low-bit KV caches on MLX](https://github.com/IonDen/mlx-quant-fidelity/blob/main/docs/papers/low-bit-kv-caches-on-mlx-what-exists-and-what-is-missing.md).
 That memo covers what exists and what it costs; this one covers how the costs were measured and
 why the harness looks the way it does. The mechanics of the shipped tool are documented in
-[measurement principles](https://github.com/IonDen/mlx-quant-fidelity/blob/main/docs/measurement-principles.md)
-and [ranking principles](https://github.com/IonDen/mlx-quant-fidelity/blob/main/docs/ranking-principles.md);
+[measurement principles](https://github.com/IonDen/mlx-quant-fidelity/blob/v0.4.0/docs/measurement-principles.md)
+and [ranking principles](https://github.com/IonDen/mlx-quant-fidelity/blob/v0.4.0/docs/ranking-principles.md);
 this memo builds on that tour rather than repeating it. Its subject is the failure catalogue: for each design
 choice, the concrete way a naive harness fails and the committed evidence that the corresponding
 guard earns its place.
 
 The memo is documentary. Every reported measurement result comes from a committed, linkable report in the
-[`mlx-quant-fidelity`](https://github.com/IonDen/mlx-quant-fidelity) repository at v0.4.0;
+[`mlx-quant-fidelity`](https://github.com/IonDen/mlx-quant-fidelity) repository at v0.4.0,
+except where a figure from the re-measured samples at v0.12.1 is named beside it;
 nothing was rerun for this write-up. The reports record the software versions (mlx 0.31.2,
-mlx-lm 0.31.3); the hardware (an M1 Max with 32 GB unified memory) is stated by the author
-rather than captured in the report files. Links into this repository's source and evidence are
-pinned to the public v0.4.0 tag. Product documentation and companion memos point at their home
-on each repository's `main` branch.
+mlx-lm 0.31.3). The hardware (an M1 Max with 32 GB unified memory) is stated by the author for
+the v0.4.0 reports, which do not record it. The per-run v0.12.1 reports record it; comparison
+reports do not. Links into this repository's source, evidence and product documentation are
+pinned to the public v0.4.0 tag, or to v0.12.1 for the later figures and for the documents a
+sentence quotes at that tag. Companion memos and the figure point at their home on each
+repository's `main` branch.
 
 None of the individual ingredients is novel — teacher-forced scoring and
 KL-divergence-against-a-reference are established practice in
@@ -49,8 +52,12 @@ unstable across prompts and useless for comparing configurations.
 In the other direction it under-reports, silently. A popular variant of the generation test
 checks whether greedy decode reproduces the reference's text exactly. That oracle is binary per
 position and says nothing about margin: the argmax token can stay identical while the
-probability mass underneath it moves substantially. A configuration can pass a greedy-equality
-check on one prompt and still be measurably degraded at almost every position.
+probability mass underneath it moves substantially. In the committed
+[Llama-3.2-1B 4-bit KV run](https://github.com/IonDen/mlx-quant-fidelity/blob/v0.4.0/_artifacts/samples/llama-3.2-1b-4bit-kv4.md),
+**20.48%** of positions change their top token, and the median position's KL is
+**0.0969** nats. At least half of the positions moved by 0.0969 nats or more and only 20.48%
+flipped, so at least 29.5% of all positions kept their top token while moving at least that
+far. A check that compares top tokens registers none of them.
 
 Teacher-forced paired scoring avoids both failures
 ([`_score_chunk`, probes/kv.py](https://github.com/IonDen/mlx-quant-fidelity/blob/v0.4.0/src/mlx_quant_fidelity/probes/kv.py#L93)):
@@ -66,12 +73,10 @@ different attention path described in section 6.
 ## 2. Reduce as you go, or the harness cannot run at all
 
 Comparing full distributions position by position has a memory problem. One position over a
-128k-token vocabulary is half a megabyte in fp32. The WikiText-2 test split is on the order of
-245,000 positions, so holding the corpus's distributions for analysis is roughly **125 GB** —
-about four times the 32 GB machine the committed reports were produced on. Even the capped runs
-in this repository (100 chunks, 51,100 scored positions) would need about 26 GB for one model's
-distributions at Llama-3.2's 128,256-token vocabulary, on a machine that also holds a 7B
-model's weights; Qwen2.5's 151,936-token vocabulary pushes the same run past 31 GB. "Store the logits, then
+128k-token vocabulary is half a megabyte in fp32. The capped runs in this repository
+(100 chunks, 51,100 scored positions) would need about 26 GB for one model's distributions at
+Llama-3.2's 128,256-token vocabulary, on the 32 GB machine the committed reports were produced
+on, which also has to hold a 7B model's weights; Qwen2.5's 151,936-token vocabulary pushes the same run past 31 GB. "Store the logits, then
 analyze" is not a design option; it decides whether the harness can run at all.
 
 Two working answers exist. llama.cpp saves the reference logits to disk once and streams the
@@ -84,9 +89,10 @@ scalars — KL divergence, a top-token flip flag, the target token's negative lo
 On MLX the streaming discipline has a second, framework-specific job. MLX is lazily evaluated:
 appending un-evaluated arrays to a Python list keeps every vocab-wide intermediate alive in one
 growing computation graph, which reproduces the 26 GB problem in lazy form. What actually bounds memory is the per-chunk sequence: `mx.eval` on the chunk's scalars, then
-dropping the per-chunk caches, then `mx.clear_cache()`. The committed reports carry the receipts: the Qwen2.5-7B KV runs peak at **6.35 GB**,
-and the largest committed measurement — a 7B two-model weight comparison — peaks at
-**14.40 GB**. The tool also installs device-derived MLX wired and memory caps before any model
+dropping the per-chunk caches, then `mx.clear_cache()`. The committed v0.4.0 reports carry the receipts: the Qwen2.5-7B KV runs peak at **6.35 GB**,
+and the largest v0.4.0 sample peak, a 7B two-model weight comparison, is **14.40 GB**; the
+[same weights report at v0.12.1](https://github.com/IonDen/mlx-quant-fidelity/blob/v0.12.1/_artifacts/samples/weights/qwen2.5-7b-4bit-vs-8bit.md)
+records 14.56 GB. The tool also installs device-derived MLX wired and memory caps before any model
 load, at the CLI entry point and inside each Python-API probe. These caps reduce memory pressure;
 they are not a hard process-local allocation ceiling. The weight probe adds a separate byte
 preflight because two live models can exceed the device working set despite the caps.
@@ -120,9 +126,11 @@ approaches zero for an event supported by the reference.
 The second shortcut is reporting only the mean. Averages are where quantization damage hides.
 The committed
 [Qwen2.5-7B 8-bit KV report](https://github.com/IonDen/mlx-quant-fidelity/blob/v0.4.0/_artifacts/samples/qwen2.5-7b-4bit-kv8.md)
-has a mean KL of **0.0094** nats — comfortably "near-lossless" — while its p99 is **0.14** and
-its worst position reaches **13.1** nats. A mean-only report would call that run clean; the
-tail says a small fraction of positions are being hit hard. The report does not classify those
+has a mean KL of **0.0094** nats, under the 0.01 mean ceiling of the "near-lossless" `good`
+tier, while its p99 is **0.14** and
+its worst position reaches **13.1** nats. The report's own verdict is `marginal`: the p99 and
+the 3.17% flip rate both exceed the `good` ceilings (0.10 nats and 1%). A mean-only report
+would call that run clean; the tail says a small fraction of positions are being hit hard. The report does not classify those
 positions, so their downstream importance remains unknown. Every report therefore carries mean,
 median, p99, and max, and the verdict machinery (section 8) refuses to grade on the mean alone.
 
@@ -167,9 +175,10 @@ The shipped design refuses this outcome at three layers:
   principle covers configuration dead-ends: a deployment boundary longer than every corpus chunk means
   zero positions were ever quantized, and the run raises `QuantizeStartError` instead of
   averaging over nothing.
-- **The test suite proves the metrics can detect damage.** The committed oracle tests
+- **Opt-in oracle tests show the metrics can detect damage.** The committed oracle tests
   ([tests/probes/test_kv_oracles.py](https://github.com/IonDen/mlx-quant-fidelity/blob/v0.4.0/tests/probes/test_kv_oracles.py))
-  pin both directions: a full-precision-vs-full-precision paired run must produce *exactly*
+  are opt-in slow tests that load a real model; they are skipped by default and are not part
+  of the default suite or CI. They pin both directions: a full-precision-vs-full-precision paired run must produce *exactly*
   zero KL, a deliberately corrupted cache injected as the "quantized" path must push KL above a
   floor, and the same corruption applied to both paths must return the measurement to exactly
   zero. These tests show that the metric responds to a known perturbation and returns zero for
@@ -221,18 +230,30 @@ The `compare` command ranks configurations on a two-axis Pareto frontier: mean K
 against memory cost
 ([`dominates`, ranking.py](https://github.com/IonDen/mlx-quant-fidelity/blob/v0.4.0/src/mlx_quant_fidelity/ranking.py#L21)).
 For KV configurations the cost axis is bytes per token,
-`2 · n_layers · n_kv_heads · head_dim · (bits/8 + 4/group_size)`, where the `4/group_size` term
+`2 · n_layers · n_kv_heads · head_dim · (bits/8 + 4/group_size)` for models whose keys and
+values have the same width; the general form in the
+[ranking principles at v0.12.1](https://github.com/IonDen/mlx-quant-fidelity/blob/v0.12.1/docs/ranking-principles.md#the-cost-axis)
+is `n_layers · n_kv_heads · (k_dim + v_dim) · (bits/8 + 4/group_size)`. The `4/group_size` term
 is the per-group fp16 scale and bias. That overhead term is not pedantry: group size is a real
 quality lever, so two configurations at the same bit width sit at different costs, and a
 ranking that ignored the overhead would misrank them. The committed
 [Qwen2.5-0.5B KV comparison](https://github.com/IonDen/mlx-quant-fidelity/blob/v0.4.0/_artifacts/samples/compare/kv-qwen2.5-0.5b.md)
 shows the lever priced out: halving the group size from 64 to 32 at 4-bit roughly halves the
-mean KL (**2.56 → 1.34** nats) for **11%** more cache bytes (4.5 → 5.0 bits per element by the
-formula above). Against the table's 8-bit configuration (group 64), the halving narrows the
-gap from **84×** to **44×**. All three configurations sit on the frontier (none is
-strictly worse on both axes). In this one Qwen2.5-0.5B comparison, covering 4,088 positions
-across eight chunks and three configurations, bit width moved mean KL much more than halving
-the group size. Other models, corpora, and configuration grids may behave differently.
+mean KL for **11%** more cache bytes by the formula above (4.5 → 5.0 bits per element; the
+table rounds the costs to 3.5 KB → 3.8 KB). The two committed versions of this comparison
+differ in more than one way. The v0.4.0 sample scores 8 chunks (4,088 positions) per
+configuration, model revision not recorded; there the mean KL goes **2.56 → 1.34** nats
+(**84× → 44×** the table's 8-bit, group-64 configuration). The
+[comparison as committed at v0.12.1](https://github.com/IonDen/mlx-quant-fidelity/blob/v0.12.1/_artifacts/samples/compare/kv-qwen2.5-0.5b.md)
+scores 100 chunks (51,100 positions) per configuration, model and dataset revisions recorded,
+and carries two columns. Its bundled KL, the same footing as the v0.4.0 figures (section 6),
+goes **2.0531 → 1.0966**; the quantizer-only KL that the table is "ranked on" goes
+**2.0549 → 1.0898** (**62× → 33×**). The tool's own release differs between the two runs as
+well, while mlx 0.31.2 and mlx-lm 0.31.3 are the same in both. These records do not isolate
+which change moved the numbers, and this memo attributes the gap to none of them. All three
+configurations sit on the frontier in both (none is strictly worse on both axes). In both
+versions of this Qwen2.5-0.5B comparison, bit width moved mean KL much more than halving the
+group size. Other models, corpora, and configuration grids may behave differently.
 
 Two honesty rules keep the ranking from overclaiming. Domination is decided on mean KL only —
 the tail is deliberately not a ranking axis, so a configuration with a good mean and an ugly
@@ -257,8 +278,10 @@ the mean ceiling and fails both the p99 and flip ceilings. Grading on mean KL al
 called both runs `good`.
 
 The threshold *values* deserve a plainer statement than tools usually give: they are policy,
-not measurement. The KV tiers were chosen by judgment at the tool's first release —
-deliberately conservative — and have not changed since. The weight tiers were anchored to the
+not measurement. The KV tiers were chosen by judgment at the first release and have not
+changed since; the
+[v0.12.1 threshold policy](https://github.com/IonDen/mlx-quant-fidelity/blob/v0.12.1/docs/threshold-policy.md#kv-cache-tiers)
+calls them "calibrated" but names no data behind them. The weight tiers were anchored to the
 tool's own early sample runs (8-bit landing `good`, 4-bit `marginal` on short prose), which is
 circular in the way any small-sample anchoring is. Human-readable weight reports and badges
 label the verdict **provisional**; raw JSON exposes the verdict value without that annotation,
@@ -297,14 +320,18 @@ that is what benchmark harnesses like
 this corpus; whether either model is any good at a task is out of scope by design.
 
 Deployment-mode numbers are a per-chunk proxy, not a long-form average. The committed
-[deployment sample](https://github.com/IonDen/mlx-quant-fidelity/blob/v0.4.0/_artifacts/samples/kv-deployment.md)
-(Llama-3.2-1B, 4-bit, boundary at 256) covers **1,020** positions against the stress reports'
-**51,100** — direction-consistent with stress mode, but 50× smaller and not a matched
+[deployment sample at v0.4.0](https://github.com/IonDen/mlx-quant-fidelity/blob/v0.4.0/_artifacts/samples/kv-deployment.md)
+(Llama-3.2-1B, 4-bit, boundary at 256) scores **1,020** positions, four chunks of 255
+post-boundary positions, against the stress reports' **51,100**: 50× fewer. Since v0.5.0 the
+same sample ([at v0.12.1](https://github.com/IonDen/mlx-quant-fidelity/blob/v0.12.1/_artifacts/samples/kv-deployment.md))
+scores **25,500** positions across 100 chunks, so the gap to the 51,100-position stress run is
+about 2×. Both are direction-consistent with stress mode, and neither is a matched
 comparison. Deployment mode also adds an ingredient to the measured bundle that stress mode
 lacks: the probe re-enters the model at the conversion boundary, so the split forward itself —
 not only the attention-path swap — is part of what it measures. Real deployments convert at
-mlx-lm's CLI default boundary of 5,000 tokens (the Python API defaults to 0) inside much longer
-contexts than a 512-token window can represent.
+mlx-lm's CLI default boundary of 5,000 tokens inside much longer contexts than a 512-token
+window can represent. The Python API default was 0 at mlx-lm v0.31.3 and is 5,000 at
+[v0.32.2](https://github.com/ml-explore/mlx-lm/blob/v0.32.2/mlx_lm/generate.py#L326).
 
 ## 10. Lessons
 
@@ -314,7 +341,7 @@ a fixed corpus controls the input tokens and trajectory at every position.
 
 **A harness that can pass by doing nothing eventually will.** The silent no-op paths in
 upstream tooling are real, so the guard has to be structural: probe capability by calling it,
-raise on exact zero, and keep tests that prove the metric rises when the input is damaged.
+raise on exact zero, and keep tests that show the metric rises when the input is damaged.
 
 **The mean is where damage hides.** Full-vocabulary KL with no epsilon, reported with its tail.
 A run can sit more than twenty times under the mean ceiling and still change one top token in
@@ -345,14 +372,17 @@ not a law of nature. The tool's job is to make both auditable.
   [`tests/probes/test_kv_oracles.py`](https://github.com/IonDen/mlx-quant-fidelity/blob/v0.4.0/tests/probes/test_kv_oracles.py).
 - Committed evidence:
   [sample fidelity reports](https://github.com/IonDen/mlx-quant-fidelity/tree/v0.4.0/_artifacts/samples)
-  (stress and deployment KV runs, weight runs, comparisons).
+  (stress and deployment KV runs, weight runs, comparisons), and the
+  [re-measured samples at v0.12.1](https://github.com/IonDen/mlx-quant-fidelity/tree/v0.12.1/_artifacts/samples).
 - Public methodology docs this memo deliberately does not restate:
-  [measurement principles](https://github.com/IonDen/mlx-quant-fidelity/blob/main/docs/measurement-principles.md),
-  [ranking principles](https://github.com/IonDen/mlx-quant-fidelity/blob/main/docs/ranking-principles.md),
-  [threshold policy](https://github.com/IonDen/mlx-quant-fidelity/blob/main/docs/threshold-policy.md).
+  [measurement principles](https://github.com/IonDen/mlx-quant-fidelity/blob/v0.4.0/docs/measurement-principles.md),
+  [ranking principles](https://github.com/IonDen/mlx-quant-fidelity/blob/v0.4.0/docs/ranking-principles.md),
+  [threshold policy](https://github.com/IonDen/mlx-quant-fidelity/blob/v0.4.0/docs/threshold-policy.md).
 - mlx-lm at the v0.31.3 tag:
   [`generate.py` (silent-skip cache conversion)](https://github.com/ml-explore/mlx-lm/blob/v0.31.3/mlx_lm/generate.py#L299),
-  [`models/base.py` (two-matmul quantized attention)](https://github.com/ml-explore/mlx-lm/blob/v0.31.3/mlx_lm/models/base.py#L64).
+  [`models/base.py` (two-matmul quantized attention)](https://github.com/ml-explore/mlx-lm/blob/v0.31.3/mlx_lm/models/base.py#L64);
+  at the v0.32.2 tag:
+  [`generate.py` (`quantized_kv_start` default)](https://github.com/ml-explore/mlx-lm/blob/v0.32.2/mlx_lm/generate.py#L326).
 - Prior art: [llama.cpp `llama-perplexity` (`--kl-divergence-base`)](https://github.com/ggml-org/llama.cpp/blob/master/tools/perplexity/README.md);
   [*Accuracy Is Not All You Need*, arXiv:2407.09141](https://arxiv.org/abs/2407.09141);
   [lm-evaluation-harness](https://github.com/EleutherAI/lm-evaluation-harness).
@@ -362,4 +392,4 @@ not a law of nature. The tool's job is to make both auditable.
 
 ---
 
-*Prepared 2026-07-25. Last updated 2026-08-15. Denis Ineshin.*
+*Prepared 2026-07-25. Last updated 2026-11-13. Denis Ineshin.*
