@@ -4,6 +4,7 @@
 
 ## Released
 
+- **0.12.1** — Fix. A TurboQuant method that does not fit the model's cache layout, and a tokenizer that needs its own code, are refused before the weights download instead of after. `youtu_llm` gets its cost and memory check, where 0.12.0 showed "cost unavailable"; `baichuan_m1` and `plamo2` are still refused by every method, and their refusal messages no longer say "unknown". A connection that drops while `config.json` downloads, or a deeply nested `config.json`, end with the tool's own error and exit code 2. Costs on other models do not change.
 - **0.12.0** — Fix. The KV cost counts keys and values at their own widths, so DeepSeek-V2-Lite's cost equals the bytes its cache stores, and a model whose cache layout the tool cannot state from its config gets no cost. Costs do not change for models whose key and value widths are equal.
 - **0.11.2** — Fix. On MLA models the TurboQuant methods are checked against the widths the model really caches: `turboquant` is refused on `deepseek_v2`, `youtu_llm` and unmodelled MLA layouts, and `turboquant-vonly` is gated on the value width. Nothing changes for models whose config has no MLA fields.
 - **0.11.1** — Packaging. The README badge states the Python 3.11 floor, and Python 3.14 is now tested in CI and listed as supported. Nothing in measurement, reports or the API changes.
