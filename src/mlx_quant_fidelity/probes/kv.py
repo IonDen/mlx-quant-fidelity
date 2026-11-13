@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import contextlib
+import copy
 import dataclasses
 import importlib.metadata
+import types
 from typing import TYPE_CHECKING, cast
 
 import mlx.core as mx
 import numpy as np
 from mlx.utils import tree_flatten
+from mlx_lm.models.base import BaseModelArgs
 from mlx_lm.models.cache import make_prompt_cache
 
 from mlx_quant_fidelity._memory_caps import (
@@ -44,6 +47,8 @@ from mlx_quant_fidelity.probes.kv_methods import (
     ControlLaneMethod,
     PartialCoverageMethod,
     StockKVMethod,
+    TurboQuantKVMethod,
+    TurboQuantVOnlyKVMethod,
     _gate_turboquant_layout,
     check_before_load,
 )
@@ -53,7 +58,7 @@ from mlx_quant_fidelity.probes.kv_methods import (
 from mlx_quant_fidelity.report import FidelityReport
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Mapping, Sequence
 
     from mlx_quant_fidelity.corpora.provenance import Corpus, CorpusProvenance
     from mlx_quant_fidelity.metrics import DepthBucketSummary, ScalarSummary
@@ -245,12 +250,27 @@ def _preflight_logits_budget(
     return None
 
 
+def _loaded_args(model: object) -> object | None:
+    """The ``ModelArgs`` of a loaded mlx-lm model: ``model.args``, else ``model.config``.
+
+    Most mlx-lm models keep their args as ``args``; a few (youtu_llm, plamo2 and baichuan_m1
+    in mlx-lm 0.31.3) keep them as ``config``. A ``config`` that is not mlx-lm's
+    ``BaseModelArgs`` is not read.
+    """
+    args: object = getattr(model, "args", None)
+    if args is not None:
+        return args
+    config: object = getattr(model, "config", None)
+    return config if isinstance(config, BaseModelArgs) else None
+
+
 def _kv_head_dim(model: object) -> int | None:
     """Best-effort per-head KV dim for the group-size gate. None if not derivable.
 
     ``ModelArgs.head_dim`` is frequently None (llama populates the real value as an
     Attention-layer local, not on args), so the hidden//heads fallback is the primary
-    path. Field names are llama-family-specific; unusual archs return None.
+    path. ``hidden_size_per_head`` (plamo2) comes between the two. Field names are
+    llama-family-specific; unusual archs return None.
 
     On a layout whose cached K width is known (see :func:`_kv_layout`) that width is returned.
     A layout the resolver cannot state keeps the figure above, so the memory gate keeps a number.
@@ -258,10 +278,13 @@ def _kv_head_dim(model: object) -> int | None:
     k_dim = _kv_layout(model).k_dim
     if k_dim is not None:
         return k_dim
-    args = getattr(model, "args", None)
+    args = _loaded_args(model)
     head_dim = _model_arg(args, "head_dim")
     if isinstance(head_dim, int):
         return head_dim
+    per_head = _model_arg(args, "hidden_size_per_head")  # plamo2's name for the cached width
+    if isinstance(per_head, int):
+        return per_head
     hidden = _model_arg(args, "hidden_size")
     heads = _model_arg(args, "num_attention_heads")
     if isinstance(hidden, int) and isinstance(heads, int):
@@ -271,8 +294,53 @@ def _kv_head_dim(model: object) -> int | None:
 
 def _kv_layout(model: object) -> KVLayout:
     """The cached K and V widths of a loaded model, read through ``_model_arg``."""
-    args = getattr(model, "args", None)
+    args = _loaded_args(model)
     return kv_layout(getattr(args, "model_type", None), lambda name: _model_arg(args, name))
+
+
+def _preload_model_args(config: Mapping[str, object]) -> object | None:
+    """The ``ModelArgs`` mlx-lm's ``load_model`` will build from ``config``; None if unsure.
+
+    Same class lookup (``MODEL_REMAPPING`` included) and the same ``from_dict`` on the same
+    dict, so a field ``from_dict`` drops or defaults is dropped or defaulted here too. A config
+    naming its own ``model_file``, or any failure on the way (unknown model type, import error,
+    a renamed mlx-lm helper, a ``from_dict`` error), gives None and leaves the call to the load.
+    Importing an mlx-lm model module builds no model and allocates no weights.
+    """
+    if config.get("model_file") is not None:
+        return None
+    try:
+        from mlx_lm import utils as mlx_lm_utils
+
+        # Mirrors mlx_lm.utils.load_model (0.31.3): `get_model_classes(config=config)` (the
+        # private `_get_classes` by default) picks the ModelArgs class, then
+        # `model_args_class.from_dict(config)` builds the args. A deep copy keeps a lookup or
+        # from_dict that edits a nested dict away from the caller's config.
+        params = copy.deepcopy(dict(config))
+        _model_cls, args_cls = mlx_lm_utils._get_classes(config=params)
+        return args_cls.from_dict(params)  # type: ignore[no-any-return]
+    except (Exception, SystemExit):  # never refuse on a guess: the post-load gate decides
+        return None
+
+
+def _gate_layout_before_load(method: KVCacheMethod, config: Mapping[str, object]) -> None:
+    """Run the post-load TurboQuant layout gate on the args ``config`` will load as.
+
+    Raises the same CacheNotQuantizableError, with the same message, that
+    :func:`score_kv_config` raises after the load. Anything else lets the run go on to the load.
+    Other methods are never refused here, so no model module is imported for them.
+    """
+    if not isinstance(method, TurboQuantKVMethod | TurboQuantVOnlyKVMethod):
+        return
+    args = _preload_model_args(config)
+    if args is None:
+        return
+    model_type = str(getattr(args, "model_type", "unknown"))
+    try:
+        layout = _kv_layout(types.SimpleNamespace(args=args))
+    except Exception:  # an args object the reader cannot handle: leave it to the load
+        return
+    _gate_turboquant_layout(method, layout, model_type=model_type)
 
 
 def _score_chunk(
@@ -408,9 +476,10 @@ def _gate_extra_bytes(
     (``quantize_start > 0``), one more fp16 cache for the full-precision prefix held before
     conversion. A method that cannot size its cache contributes 0 for the stored term.
 
-    Geometry is model.args-derived and computed BEFORE any cache construction (the gate's whole
-    point is running before cache/model allocations). Each figure degrades to 0 (the 0.6.0
-    estimate) when any one piece of geometry is unknown, rather than guessing.
+    Geometry comes from the ModelArgs that :func:`_loaded_args` returns and is computed BEFORE
+    any cache construction (the gate's whole point is running before cache/model allocations).
+    Each figure degrades to 0 (the 0.6.0 estimate) when any one piece of geometry is unknown,
+    rather than guessing.
 
     ``head_dim`` is the cached key width and ``v_dim`` the value width; ``v_dim=None`` means
     V = K, and only a known ``v_dim`` is passed on to the methods.
@@ -742,7 +811,7 @@ def score_kv_config(
     method = _resolve_method(method, kv_bits, kv_group_size)
     control_m = _control_method_for(method, control)
     probe_warnings: list[str] = []
-    args = getattr(model, "args", None)
+    args = _loaded_args(model)
     model_type = str(getattr(args, "model_type", "unknown"))
     head_dim = _kv_head_dim(model)
     # Pure pre-flight first (keeps the 0.5.x warnings order: head_dim, then budget). It allocates
@@ -763,10 +832,11 @@ def score_kv_config(
     _require_teacher_forced_positions(
         corpus.chunks[:max_chunks] if max_chunks is not None else corpus.chunks
     )
-    # Gate geometry is model.args-derived and computed BEFORE any cache construction (the gate's
-    # whole point is running before cache/model allocations — see make_prompt_cache below, which
-    # this precedes). Each of method_ws_bytes/control_bytes degrades to 0 (the 0.6.0 estimate)
-    # when any one piece of geometry is unknown, rather than guessing.
+    # Gate geometry comes from the ModelArgs that _loaded_args returns and is computed BEFORE any
+    # cache construction (the gate's whole point is running before cache/model allocations — see
+    # make_prompt_cache below, which this precedes). Each of method_ws_bytes/control_bytes
+    # degrades to 0 (the 0.6.0 estimate) when any one piece of geometry is unknown, rather than
+    # guessing.
     gate_vocab = _model_arg(args, "vocab_size")
     resident = model_resident_bytes(model)
     if resident == 0 and callable(getattr(model, "parameters", None)):
@@ -1115,6 +1185,9 @@ def measure_kv_fidelity(
     check_before_load(method)
     _control_method_for(method, control)
     checked = preload_check(model_id, model_revision, allow_custom_code=allow_custom_code)
+    # A TurboQuant method the layout gate refuses for this config is refused now, before the
+    # weights are fetched; the post-load gate in score_kv_config stays the authority.
+    _gate_layout_before_load(method, checked.config)
     caps_note = caps_warning(install_memory_caps())  # install must precede model load
     # Load exactly the commit that was checked, not a re-resolved branch head.
     # lazy=True: mlx-lm's eager load evaluates every parameter before returning, which would
