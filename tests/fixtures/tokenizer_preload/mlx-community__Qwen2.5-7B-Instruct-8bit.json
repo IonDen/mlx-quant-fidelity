@@ -1,0 +1,16 @@
+{
+  "_source": {
+    "repo": "mlx-community/Qwen2.5-7B-Instruct-8bit",
+    "revision": "df11cb390bd674c24a9ddedf19f05bc09f6e0148",
+    "sha256": {
+      "config.json": "69409096bd0bf18511012871a47b618debfd38f911ec2d2f7c272834e3906100",
+      "tokenizer_config.json": "f7c61e32b7a17d19bf8e7037dcb74079a833e53ea9801f24008cac68458f03b7"
+    }
+  },
+  "config.json": {
+    "model_type": "qwen2"
+  },
+  "tokenizer_config.json": {
+    "tokenizer_class": "Qwen2Tokenizer"
+  }
+}

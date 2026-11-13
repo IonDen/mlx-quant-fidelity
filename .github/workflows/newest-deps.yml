@@ -1,0 +1,33 @@
+name: Newest deps
+# Re-runs the pre-load decisions (the remote-code tokenizer refusal and the TurboQuant layout
+# gate) against the newest transformers and mlx-lm the pyproject ranges allow. Both decisions
+# read those packages' own registries and loaders, so a release that changes them shows up here
+# before the committed lock moves. The upgraded lock lives only in this job's checkout.
+on:
+  schedule:
+    - cron: "23 5 * * 1"  # Mondays 05:23 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  preload-decisions:
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+        with:
+          fetch-depth: 0  # hatch-vcs needs tags/history
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86  # v5.4.2
+        with:
+          version: "0.11.2"
+          python-version: "3.13"
+          enable-cache: false  # this job installs unreviewed releases; keep them out of the shared cache
+      - run: uv lock --upgrade-package transformers --upgrade-package mlx-lm
+      - run: uv sync --locked --group dev
+      - run: uv pip list | grep -E '^(transformers|mlx-lm) '
+      - run: uv run pytest -q tests/probes/test_preload_tokenizer.py tests/probes/test_kv_preload_layout.py tests/probes/test_loaded_args.py
+        env:
+          HF_HUB_OFFLINE: "1"

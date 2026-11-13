@@ -1,0 +1,16 @@
+{
+  "_source": {
+    "repo": "mlx-community/Qwen3-0.6B-6bit",
+    "revision": "45d962b21b1e813c3e9a7f3505391e72e8daba1e",
+    "sha256": {
+      "config.json": "8368f624e5ded0a125a780d616f05dba2813831f0c25c15daee802a370aac4eb",
+      "tokenizer_config.json": "253153d0738ceb4c668d2eff957714dd2bea0b56de772a9fdccd96cbf517e6a0"
+    }
+  },
+  "config.json": {
+    "model_type": "qwen3"
+  },
+  "tokenizer_config.json": {
+    "tokenizer_class": "Qwen2Tokenizer"
+  }
+}

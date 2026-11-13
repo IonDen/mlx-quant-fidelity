@@ -1,0 +1,16 @@
+{
+  "_source": {
+    "repo": "mlx-community/Qwen3-4B-Instruct-2507-4bit-DWQ-2510",
+    "revision": "c073725c8ac051eabad9d64f4dcd3019d1072559",
+    "sha256": {
+      "config.json": "387b98441ee36d609cb2657646fb8ab7cedaecbff1c83422e4d4a61b4f49e8a3",
+      "tokenizer_config.json": "4b5f2f80f84faefe8420e1616671adb1dd3d7e632038d34b1f0e3a1363a51059"
+    }
+  },
+  "config.json": {
+    "model_type": "qwen3"
+  },
+  "tokenizer_config.json": {
+    "tokenizer_class": "Qwen2Tokenizer"
+  }
+}

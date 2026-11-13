@@ -150,7 +150,10 @@ def _plan(args: argparse.Namespace) -> int:
         f"wall backstop {WALL_BACKSTOP_S:.0f} s -> exit 3"
     )
     print(f"  device:    {device_string()}")
-    print("  load:      preload_check(allow_custom_code=False) then mlx_lm.utils.load_model")
+    print(
+        "  load:      preload_check(allow_custom_code=False, check_tokenizer=False) then "
+        "mlx_lm.utils.load_model"
+    )
     print(f"  require:   model_type == {EXPECTED_MODEL_TYPE!r}")
     print("  (a) reference:  make_prompt_cache(model), fp32 logits")
     print(f"  (b) stock:      QuantizedKVCache(group_size={STOCK_GROUP_SIZE}, bits={STOCK_BITS})")
@@ -338,7 +341,9 @@ def _measure(args: argparse.Namespace, record: _Record, started: float) -> None:
     from mlx_quant_fidelity.probes._preload import preload_check
 
     try:
-        checked = preload_check(args.repo, args.revision, allow_custom_code=False)
+        checked = preload_check(
+            args.repo, args.revision, allow_custom_code=False, check_tokenizer=False
+        )
     except QuantFidelityError as exc:
         raise _RefusedError(f"{type(exc).__name__}: {exc}") from exc
     model_type = checked.config.get("model_type")

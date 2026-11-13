@@ -536,6 +536,7 @@ def test_measure_weight_refuses_custom_code_in_either_repo_before_load(monkeypat
         return {"model_file": "m.py"} if model == bad_repo else {"model_type": "llama"}
 
     monkeypatch.setattr(_preload, "_fetch_config", lambda m, r=None: (fake_read(m, r), None))
+    monkeypatch.setattr(_preload, "_fetch_tokenizer_config", lambda m, r=None: {})
 
     def boom(*a, **k):
         raise AssertionError("mlx_lm.load must not run")
@@ -564,6 +565,7 @@ def test_gate_runs_before_any_load(monkeypatch):
         },
     }
     monkeypatch.setattr(_preload, "_fetch_config", lambda m, r=None: (configs[m], None))
+    monkeypatch.setattr(_preload, "_fetch_tokenizer_config", lambda m, r=None: {})
 
     def boom(*a, **k):
         raise AssertionError("loaded")

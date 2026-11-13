@@ -1,0 +1,16 @@
+{
+  "_source": {
+    "repo": "mlx-community/Qwen3-4B-Instruct-2507-DDWQ",
+    "revision": "88033de44951ebedb96e0adb68cc037443aab93a",
+    "sha256": {
+      "config.json": "d34791eee725047d963633517487093d28e9e0845f48d4f0e89c46fe3ff732dd",
+      "tokenizer_config.json": "2f8396a75e4ef94389a2738b55a4d4aea47ca444f320c39f92f71c9c0a9c6ee8"
+    }
+  },
+  "config.json": {
+    "model_type": "qwen3"
+  },
+  "tokenizer_config.json": {
+    "tokenizer_class": "Qwen2Tokenizer"
+  }
+}
