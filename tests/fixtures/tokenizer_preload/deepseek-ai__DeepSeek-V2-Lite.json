@@ -1,0 +1,21 @@
+{
+  "_source": {
+    "repo": "deepseek-ai/DeepSeek-V2-Lite",
+    "revision": "604d5664dddd88a0433dbae533b7fe9472482de0",
+    "sha256": {
+      "config.json": "f346286b0f1c8b044252fd54cb4fa78b9fab6472a6e8bebb9edfe03d414ea03d",
+      "tokenizer_config.json": "31181eaf79394ea26728d95ecb54fe7c8413e6f56085dbabc8b0818134380ec8"
+    }
+  },
+  "config.json": {
+    "auto_map": {
+      "AutoConfig": "configuration_deepseek.DeepseekV2Config",
+      "AutoModel": "modeling_deepseek.DeepseekV2Model",
+      "AutoModelForCausalLM": "modeling_deepseek.DeepseekV2ForCausalLM"
+    },
+    "model_type": "deepseek_v2"
+  },
+  "tokenizer_config.json": {
+    "tokenizer_class": "LlamaTokenizerFast"
+  }
+}

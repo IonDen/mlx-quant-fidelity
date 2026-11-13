@@ -1,0 +1,16 @@
+{
+  "_source": {
+    "repo": "mlx-community/gemma-3-1b-it-4bit",
+    "revision": "2d44e83dc9e80843d22fb941d3d699a0b1351aa6",
+    "sha256": {
+      "config.json": "8a92da3198f0d46af9d13b81f70950d3a673ddc2b2569fc3ea0d029cc3f9bf9e",
+      "tokenizer_config.json": "bfe25c2735e395407beb78456ea9a6984a1f00d8c16fa04a8b75f2a614cf53e1"
+    }
+  },
+  "config.json": {
+    "model_type": "gemma3_text"
+  },
+  "tokenizer_config.json": {
+    "tokenizer_class": "GemmaTokenizer"
+  }
+}

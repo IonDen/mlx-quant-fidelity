@@ -10,10 +10,12 @@ from mlx_quant_fidelity.runners import compare as cmp
 
 @pytest.fixture(autouse=True)
 def _reference_config_readable(monkeypatch):
-    """The reference pre-check reads config.json; keep it offline (tests override to fail)."""
+    """The reference pre-check reads config.json and tokenizer_config.json; keep both offline
+    (tests override to fail)."""
     from mlx_quant_fidelity.probes import _preload
 
     monkeypatch.setattr(_preload, "_fetch_config", lambda m, r=None: ({}, None))
+    monkeypatch.setattr(_preload, "_fetch_tokenizer_config", lambda m, r=None: {})
 
 
 def _ok_envelope(label, kl_mean, cost):

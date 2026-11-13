@@ -1,0 +1,21 @@
+{
+  "_source": {
+    "repo": "mlx-community/DeepSeek-V2-Lite-Chat-4bit-mlx",
+    "revision": "a33a8ad64477b9ca7a65b6dc1d8c06c997f87216",
+    "sha256": {
+      "config.json": "67134636123453e474a5b72d611be6130f59f8fc7478aac7927cbe6f9cd44d71",
+      "tokenizer_config.json": "19d3d1a17c46e2921e6e3f9a81824fb997c11a80a0280a76f4dc106da5fb6705"
+    }
+  },
+  "config.json": {
+    "auto_map": {
+      "AutoConfig": "configuration_deepseek.DeepseekV2Config",
+      "AutoModel": "modeling_deepseek.DeepseekV2Model",
+      "AutoModelForCausalLM": "modeling_deepseek.DeepseekV2ForCausalLM"
+    },
+    "model_type": "deepseek_v2"
+  },
+  "tokenizer_config.json": {
+    "tokenizer_class": "LlamaTokenizer"
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "_source": {
+    "repo": "mlx-community/Llama-3.2-1B-Instruct-bf16",
+    "revision": "863c846a9ac6fad4e49e1743d52984dff262e953",
+    "sha256": {
+      "config.json": "8d40f9098d80a1510565233591a58ccf4dadba6a94934c1a514bf95201621efa",
+      "tokenizer_config.json": "9823dcfdc1121869029da45192238e85cf44f0b232a6d9dc20e4fe6f4242a14e"
+    }
+  },
+  "config.json": {
+    "model_type": "llama"
+  },
+  "tokenizer_config.json": {
+    "tokenizer_class": "PreTrainedTokenizerFast"
+  }
+}

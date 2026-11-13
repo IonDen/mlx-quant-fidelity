@@ -1,0 +1,27 @@
+{
+  "_source": {
+    "repo": "mlx-community/Moonlight-16B-A3B-Instruct-4-bit",
+    "revision": "8503ff1a2065f57fc9dc8fb95fabd864849c0744",
+    "sha256": {
+      "config.json": "6f8817e79a6f01cbe3b6ef105b4d97b3e7c6a87a53f0adf7d453a15d7fea9af6",
+      "tokenizer_config.json": "22a1d10261103de64fe4a045c338a91bbbf46a11b3afb3e7251bf377abdd4c24"
+    }
+  },
+  "config.json": {
+    "auto_map": {
+      "AutoConfig": "configuration_deepseek.DeepseekV3Config",
+      "AutoModel": "modeling_deepseek.DeepseekV3Model",
+      "AutoModelForCausalLM": "modeling_deepseek.DeepseekV3ForCausalLM"
+    },
+    "model_type": "deepseek_v3"
+  },
+  "tokenizer_config.json": {
+    "auto_map": {
+      "AutoTokenizer": [
+        "tokenization_moonshot.TikTokenTokenizer",
+        null
+      ]
+    },
+    "tokenizer_class": "TikTokenTokenizer"
+  }
+}
