@@ -391,7 +391,7 @@ class StockKVMethod:
         widths = [(w, name) for w, name in _gated_widths(head_dim, v_dim) if w is not None]
         if head_dim is None:
             warnings.append(
-                f"head_dim/kv_group_size compatibility unverified for '{model_type}'; "
+                f"head_dim/kv_group_size compatibility unverified for {model_type!r}; "
                 "relying on MLX to surface a mismatch at first use."
             )
         for width, width_name in widths:
@@ -683,7 +683,7 @@ def _gate_turboquant_head_dim(
         or head_dim & (head_dim - 1)
         or head_dim > _TURBOQUANT_MAX_HEAD_DIM
     ):
-        model_clause = f" model '{model_type}' has" if model_type is not None else " got"
+        model_clause = f" model {model_type!r} has" if model_type is not None else " got"
         raise CacheNotQuantizableError(
             f"TurboQuant-MLX kernels require a known power-of-two head_dim <= "
             f"{_TURBOQUANT_MAX_HEAD_DIM};{model_clause} {width_name}={head_dim}. This is a "
@@ -703,7 +703,7 @@ def _gate_turboquant_layout(method: KVCacheMethod, layout: KVLayout, *, model_ty
     if not layout.modelled:
         raise CacheNotQuantizableError(
             f"TurboQuant-MLX kernels require a known power-of-two head_dim <= "
-            f"{_TURBOQUANT_MAX_HEAD_DIM}; model '{model_type}' has a KV cache whose widths cannot "
+            f"{_TURBOQUANT_MAX_HEAD_DIM}; model {model_type!r} has a KV cache whose widths cannot "
             "be read from its config. This is a limitation of the port's kernels, not of the "
             "model."
         )
@@ -1407,7 +1407,7 @@ class AffineKVMethod:
                 )
         if head_dim is None:
             return [
-                f"head_dim/group_size compatibility unverified for '{model_type}'; "
+                f"head_dim/group_size compatibility unverified for {model_type!r}; "
                 "relying on MLX to surface a mismatch at first use."
             ]
         return []

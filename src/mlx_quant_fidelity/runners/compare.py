@@ -26,8 +26,10 @@ from mlx_quant_fidelity.probes._paired import ProgressFn
 from mlx_quant_fidelity.probes._preload import load_checked, preload_check
 from mlx_quant_fidelity.probes.kv import (
     MAX_CHUNK_LENGTH,
+    _gate_layout_before_load,
     _kv_head_dim,
     _kv_layout,
+    _loaded_args,
     _model_arg,
     score_kv_config,
 )
@@ -786,7 +788,7 @@ def _kv_dims(model: object) -> tuple[int | None, int | None, int | None]:
     """Return (n_layers, n_kv_heads, head_dim) from a loaded model; any may be None."""
     from mlx_lm.models.cache import make_prompt_cache
 
-    args = getattr(model, "args", None)
+    args = _loaded_args(model)
     n_layers = len(make_prompt_cache(model))
     _nkv = _model_arg(args, "num_key_value_heads")
     _kv = _nkv if _nkv is not None else _model_arg(args, "num_attention_heads")
@@ -991,6 +993,22 @@ def compare_kv_fidelity(
 
     if pending:
         checked = preload_check(model_id, model_revision, allow_custom_code=allow_custom_code)
+        # A TurboQuant method the layout gate refuses for this config gets the failed row the
+        # post-load gate would write, now; when every method is refused the model is not loaded.
+        fit: list[KVCacheMethod] = []
+        for m in pending:
+            try:
+                _gate_layout_before_load(m, checked.config)
+            except CacheNotQuantizableError as exc:
+                write_json_atomic(
+                    out_dir / _kv_partial_filename(m),
+                    {"status": "failed", "error_type": type(exc).__name__, "message": str(exc)},
+                )
+            else:
+                fit.append(m)
+        pending = fit
+
+    if pending:
         caps_note = caps_warning(install_memory_caps())
         # Load exactly the commit that was checked, not a re-resolved branch head.
         model, tokenizer = _load_model(
