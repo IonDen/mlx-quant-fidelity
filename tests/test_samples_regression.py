@@ -3,6 +3,7 @@ exactly the additive schema keys (see NEW_KEYS), each at a backward-compatible d
 committed comparison samples re-render to their committed Markdown byte for byte."""
 
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -93,22 +94,75 @@ def test_badge_sample_matches_committed():
     )
 
 
+REPO = SAMPLES.parents[1]
+# The README is also the PyPI page, where a relative `docs/...` link does not resolve.
+DOCS_URL = "https://github.com/IonDen/mlx-quant-fidelity/blob/main/docs/"
+
+
+def _heading_slugs(markdown):
+    """The anchors GitHub gives the page's headings (outside code fences): lowercased,
+    punctuation other than `-` and `_` dropped, spaces turned into `-`."""
+    slugs, fenced = set(), False
+    for line in markdown.splitlines():
+        if line.startswith("```"):
+            fenced = not fenced
+        elif not fenced and (heading := re.match(r"#{1,6} +(.+?)\s*$", line)):
+            slugs.add(re.sub(r"[^\w\- ]", "", heading.group(1).lower()).replace(" ", "-"))
+    return slugs
+
+
 @pytest.mark.parametrize(
-    "sample",
+    ("sample", "page"),
     [
-        "compare/kv-llama-3.2-1b-methods.md",
-        "compare/weight-qwen3-0.6b-ladder.md",
-        "compare/weight-qwen3-4b-2507-ladder.md",
+        ("compare/kv-llama-3.2-1b-methods.md", "third-party-kv-cache.md"),
+        ("compare/weight-qwen3-0.6b-ladder.md", "weight-ladders.md"),
+        ("compare/weight-qwen3-4b-2507-ladder.md", "weight-ladders.md"),
     ],
+    ids=["kv-llama-3.2-1b-methods", "weight-qwen3-0.6b-ladder", "weight-qwen3-4b-2507-ladder"],
 )
-def test_readme_tables_match_committed_samples(sample):
-    """Reds if a README table drifts from the committed sample it claims to reproduce, and reds
-    if a sample loses its table (the loop would otherwise assert nothing)."""
-    readme = (SAMPLES.parents[1] / "README.md").read_text()
+def test_published_tables_match_committed_samples(sample, page):
+    """Each committed comparison table is published verbatim on its docs page, and the README
+    links that page. One bug per assertion:
+    - the sample loses its table (fewer than three `|` rows), so the row loop asserts nothing;
+    - the docs page is missing, so the published table is gone;
+    - a published row drifts from the committed sample (a cell edited by hand, a row dropped);
+    - the README stops linking the page, so a reader of the README never reaches the table;
+    - a README link to the page is relative (`](docs/<page>`), which breaks on the PyPI page;
+    - a link's `#anchor` names no heading on the page (a renamed or misspelt section)."""
     rows = [line for line in (SAMPLES / sample).read_text().splitlines() if line.startswith("|")]
     assert len(rows) >= 3  # header, separator, at least one target row
+    page_path = REPO / "docs" / page
+    assert page_path.is_file(), f"docs/{page} does not exist"
+    published = page_path.read_text()
     for row in rows:
-        assert row in readme, row
+        assert row in published, row
+    readme = (REPO / "README.md").read_text()
+    targets = re.findall(rf"\]\(([^)\s]*docs/{re.escape(page)}[^)\s]*)\)", readme)
+    assert targets, f"README.md has no Markdown link to docs/{page}"
+    absolute = re.compile(rf"{re.escape(DOCS_URL + page)}(?:#([\w-]+))?")
+    for target in targets:
+        match = absolute.fullmatch(target)
+        assert match, f"README link {target} is not the absolute form {DOCS_URL}{page}"
+        anchor = match.group(1)
+        assert anchor is None or anchor in _heading_slugs(published), f"no heading for {target}"
+
+
+README_FIGURE = re.compile(r"\b\d\.\d{4}\b")
+
+
+def test_every_readme_figure_occurs_in_a_committed_sample():
+    """Every four-decimal figure the README states (the samples print four decimals) occurs in at
+    least one committed rendered sample. Bug: a figure in README prose drifts from its record
+    (e.g. 0.0825 -> 0.0625 for `turboquant:4`) and nothing goes red. Pooled over all samples, so a
+    drift onto a figure some other sample prints (0.0040 -> 0.0004) is not caught."""
+    stated = set(README_FIGURE.findall((REPO / "README.md").read_text()))
+    assert len(stated) >= 10  # the scan reaches the README's prose figures
+    recorded = {
+        figure
+        for path in SAMPLES.rglob("*.md")
+        for figure in README_FIGURE.findall(path.read_text())
+    }
+    assert sorted(stated - recorded) == []
 
 
 WEIGHT_JSON = sorted((SAMPLES / "weights").glob("*.json"))

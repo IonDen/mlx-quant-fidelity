@@ -8,15 +8,21 @@
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://pypi.org/project/mlx-quant-fidelity/)
 [![License: Apache-2.0](https://img.shields.io/pypi/l/mlx-quant-fidelity.svg)](https://github.com/IonDen/mlx-quant-fidelity/blob/main/LICENSE)
 
-You install a 4-bit model. It loads, it answers, the prose reads fine. Nothing in the logs suggests otherwise.
+A quantized model (its numbers stored in fewer bits) still loads and answers, but its answers may have changed, and nothing tells you by how much. `mlx-quant-fidelity` measures that change for MLX models on Apple Silicon.
 
-On Qwen2.5-7B with a 4-bit KV cache active from the first token, 99% of next-token choices come out different from the same model running a full-precision cache. Quantizing from token zero is the harshest way to measure, and it is not what you get by default: mlx-lm's own generate command leaves the cache unquantized until token 5000. Nothing about installing that model, or setting that flag, surfaces a number like 99%. A quantization failure does not announce itself, and file size tells you nothing about it.
+You need this if you run or publish quantized MLX models and want to pick a bit width by measured quality.
 
-`mlx-quant-fidelity` runs the same text through your model twice, once quantized and once not, and reports how far apart the two ended up: KL divergence, top-token flip rate, perplexity delta. It covers both **KV-cache quantization** and **weight quantization**.
+Use it to:
 
-The CUDA and GGUF world has had this for years — llama.cpp's `--kl-divergence-base`, EleutherAI's `lm-evaluation-harness`. MLX had nothing, and neither of those covers the KV-cache and attention angle.
+- Compare a quantized KV cache (what the model remembers of the text) with a full-precision one.
+- Compare a quantized model's weights with a higher-precision copy.
+- Get KL divergence (how far apart the two predictions are), flip rate (how often the top token changes), perplexity change and a verdict.
+- Find the quantization with the best quality for its memory, and the KV-cache settings that fit a per-token limit you set.
+- Print a badge for a model's Hugging Face page (its model card).
 
-## Try it in one command
+## Try it
+
+It needs Apple Silicon and Python 3.11+.
 
 ```bash
 pip install mlx-quant-fidelity
@@ -42,26 +48,23 @@ Measured on **wikitext-2-raw/test**, 51100 positions across 100 chunks of length
 ...
 ```
 
-That model at 8-bit KV clears the good tier on this corpus. Apple Silicon, Python 3.11+.
+That model at 8-bit KV gets a good verdict on this corpus. Each chunk scores 511 positions, one fewer than its 512 tokens. The first run downloads about 1.8 GB (1.7 GiB) of weights plus the corpus.
 
 ### Common options
 
-- `--kv-bits` / `--kv-group-size` — the KV configuration to score, default `4` / `64`. The `4:32,4:64` shorthand in `compare kv --configs` is `bits:group_size`.
-- `--kv-method` — `stock` (default) reads `--kv-bits`/`--kv-group-size` directly. `turboquant`, `turboquant-vonly`, and `affine` also take a colon-delimited spec string in place of a bare name: `turboquant:bits[:seed]`, `turboquant-vonly:v_bits[:seed]` (K stays fp16; only V quantizes), and `affine:k_bits:v_bits[:group_size]` (an independent per-side K/V bit width no shipped cache runs — see [docs/measurement-principles.md](docs/measurement-principles.md#measuring-a-third-party-cache)). `compare kv --configs` mixes any of these into one list, e.g. `8:64,turboquant:4,affine:8:4`. `--kv-seed` sets the TurboQuant rotation seed (default 42, must be ≥ 1) for the flag-based `--kv-method turboquant` and `--kv-method turboquant-vonly` forms.
-- `--control` — stock only. Runs a third, quantizer-only forward (dequantize on fetch, standard SDPA, the same bits and group size) alongside the deployed path, so a stock report carries both numbers. `compare kv` always ranks every method on the quantizer-only number and runs this control lane for stock automatically — see [docs/ranking-principles.md](docs/ranking-principles.md#ranking-footing-quantizer-only-every-method-always).
-- `--max-chunks N` — score only the first N corpus chunks. Every number in this README uses `--max-chunks 100`; leave it off and the run covers the whole WikiText-2 test split.
-- `--chunk-length N` — the scoring window, default 512, hard ceiling 4096.
-- `--quantize-start N` — `0` for stress mode, the default; any N above 0 for deployment mode.
-- `--format json|md|badge` — `md` by default. `json` is the machine-readable form the reports under [`_artifacts/samples/`](_artifacts/samples) are written in, and `badge` works on `weights` as well as `kv`. The two `compare` subcommands take `json` and `md` only.
-- `repo@revision` on `weights` and `compare weights` pins a Hugging Face revision inline; an inline pin wins over `--quant-revision` / `--reference-revision`. `kv` and `compare kv` keep `--model-revision`.
-- `--allow-custom-code` — let a repo whose `config.json` names a `model_file` run that file. mlx-lm executes it on load, so the tool refuses such a repo unless you pass this flag. Only use it for repos you trust.
-- `--worker-timeout SECONDS` — `compare weights` only: the wall-clock limit for each target's worker, default 21600 (six hours; `0` turns it off). A worker that runs over it becomes a failed row; raise the limit for full-corpus runs on large models.
+- `--kv-bits` / `--kv-group-size`: the KV configuration to score, default `4` / `64`.
+- `--max-chunks N`: score only the first N corpus chunks. The figures in this README use `--max-chunks 100` unless the text says otherwise; leave it off and the run covers the whole WikiText-2 test split.
+- `--chunk-length N`: the scoring window, default 512, hard ceiling 4096.
+- `--quantize-start N`: `0` for stress mode, the default; any N above 0 for deployment mode.
+- `--allow-custom-code`: let a repo whose `config.json` names a `model_file` run that file. mlx-lm executes it on load, so the tool refuses such a repo unless you pass this flag. Use it only for repos you trust.
 
-Both cost something to run. The quickstart pulls roughly 1.8 GB of weights plus the corpus on first use, and a wider window costs memory rather than time: the 4096-token run further down peaks at 13.53 GiB, so it will not fit a 16 GB machine. [docs/measurement-principles.md](docs/measurement-principles.md#drift-by-position-depth) lists the measured peak for every window length and explains the pre-flight that refuses one too large for your device.
+The other options (`--kv-method`, `--control`, `--format`, pinned revisions, `--worker-timeout`) are in [docs/cli-reference.md](https://github.com/IonDen/mlx-quant-fidelity/blob/main/docs/cli-reference.md#common-options). The `compare` options (`--configs`, `--sweep`, `--max-kv-bytes-per-token`, `--max-kld`, `--min-tier`) are described under [Comparing quantizations by quality per byte](#comparing-quantizations-by-quality-per-byte) and in [docs/ranking-principles.md](https://github.com/IonDen/mlx-quant-fidelity/blob/main/docs/ranking-principles.md).
+
+A wider window costs memory rather than time. The 4096-token run on Llama-3.2-1B at 4-bit KV (below) peaks at 13.53 GiB, so it will not fit a 16 GB machine. [docs/measurement-principles.md](https://github.com/IonDen/mlx-quant-fidelity/blob/main/docs/measurement-principles.md#drift-by-position-depth) lists the measured peak for every window length and explains the pre-flight that refuses a window too large for your device.
 
 ## Does this apply to you?
 
-Precision gets lost in two places — on disk and in the running cache — and each needs its own command.
+Precision is lost in two places, in the weights on disk and in the running cache, and each has its own command.
 
 ![Diagram: a running quantized model loses precision in two places. Weights on disk were quantized once, before download, and are measured by `mlx-quant-fidelity weights`, which scores a quantized repo against a higher-precision repo. The KV cache is quantized continuously at run time as the cache grows with every token, and is measured by `mlx-quant-fidelity kv`, which scores a full-precision cache against a quantized one. Both feed `mlx-quant-fidelity compare`, which ranks configurations by quality per byte](https://raw.githubusercontent.com/IonDen/mlx-quant-fidelity/main/docs/assets/diagrams/coverage-map.svg)
 
@@ -75,10 +78,10 @@ mlx-quant-fidelity weights mlx-community/Llama-3.2-3B-Instruct-4bit --reference 
 **"I need this model to fit in my RAM and I don't know which setting to cut."**
 
 ```bash
-mlx-quant-fidelity compare kv <model> --sweep --max-kv-bytes-per-token 200
+mlx-quant-fidelity compare kv mlx-community/Llama-3.2-1B-Instruct-4bit --sweep --max-kv-bytes-per-token 10000
 ```
 
-Builds the whole bits-by-group-size grid from the model's `config.json`, drops anything over your memory budget, and ranks what's left by quality per byte. Building the grid downloads that file and nothing else.
+The budget is in bytes per token across all layers. Building the bits-by-group-size grid reads only the model's `config.json`; the command then drops anything over your budget, downloads the model and ranks the rest by quality per byte.
 
 **"I publish quantized models and I want to show they're good."**
 
@@ -86,7 +89,7 @@ Builds the whole bits-by-group-size grid from the model's `config.json`, drops a
 mlx-quant-fidelity kv <model> --kv-bits 8 --format badge
 ```
 
-Prints one shields.io line for your model card. Green, yellow, or red, with the bit width, corpus, chunk length, and mode baked into the message, so two badges from the same model at different configurations are distinguishable at a glance.
+This prints one shields.io line for your model card.
 
 ## A fidelity badge for your model card
 
@@ -96,17 +99,17 @@ Prints one shields.io line for your model card. Green, yellow, or red, with the 
 ![KV fidelity](https://img.shields.io/badge/KV_fidelity-good_%C2%B7_8--bit_%C2%B7_wikitext--2--raw%2F512_%C2%B7_stress-brightgreen)
 ```
 
-Green for `good`, yellow for `marginal`, red for `bad`. Threshold values and the color map are in [docs/threshold-policy.md](docs/threshold-policy.md). A hybrid model measured on only some of its layers carries `partial 4/26 layers` in the badge message, so the badge can't be read as covering the whole cache.
+Green for `good`, yellow for `marginal`, red for `bad`. The bit width, corpus, chunk length and mode are in the message, so two badges for the same model at different settings look different. Threshold values and the color map are in [docs/threshold-policy.md](https://github.com/IonDen/mlx-quant-fidelity/blob/main/docs/threshold-policy.md). A hybrid model measured on only some of its layers carries `partial 4/26 layers` in the badge message, so the badge can't be read as covering the whole cache.
 
 ## How much do KV-cache and weight quantization cost?
 
-![Chart with two panels showing mean KL divergence on a logarithmic axis, lower being better. Green, amber and red bands mark the good, marginal and bad mean-KLD thresholds. A bar's length is its mean KL divergence alone, while a bar's color is its overall verdict, which also weighs the p99 tail and the top-token flip rate, so a bar's color and the band it lands in do not always agree. Left panel, KV-cache quantization, six bars, bands at 0.01 and 0.10. At 4 bits, Llama-3.2-1B at 0.148 and Qwen2.5-7B at 9.36 are both in the red band and colored red, while Llama-3.2-3B at 0.051 falls inside the amber band but is colored red anyway, because its flip rate of 0.11 is past the marginal ceiling of 0.05. At 8 bits all three bars are short and land in the green band below 0.01, but only one of them is green: Llama-3.2-3B at 0.0002 is a good verdict, Llama-3.2-1B at 0.00043 is amber for a marginal verdict on a flip rate of 0.013 against the good ceiling of 0.01, and Qwen2.5-7B at 0.0094 is amber on both a p99 of 0.14 against a ceiling of 0.10 and a flip rate of 0.032 against a ceiling of 0.01. The Qwen bar also reaches almost to the 0.01 band boundary rather than sitting deep inside it. Right panel, weight quantization, five bars, bands at 0.01 and 0.20, where color and band agree throughout. All three 4-bit bars are amber for a marginal verdict and sit inside the amber band: Llama-3.2-1B at 0.158, Llama-3.2-3B at 0.085, and Qwen2.5-7B at 0.109, the last measured against an 8-bit reference rather than bf16. Both 8-bit bars are green for a good verdict in the green band: Llama-3.2-1B at 0.0010 and Llama-3.2-3B at 0.00091](https://raw.githubusercontent.com/IonDen/mlx-quant-fidelity/main/docs/assets/charts/fidelity-cliff.svg)
+![Chart of mean KL divergence on a logarithmic axis, lower being better, for KV-cache quantization (left panel, six bars) and weight quantization (right panel, five bars). The 8-bit bars are short for every model; the 4-bit KV bars are long, with Qwen2.5-7B at 9.36. A bar's length is its mean KL divergence alone, and its color is the overall verdict](https://raw.githubusercontent.com/IonDen/mlx-quant-fidelity/main/docs/assets/charts/fidelity-cliff.svg)
 
 Eight-bit costs little everywhere we measured it. Four-bit is a real trade, and on one checkpoint it collapses.
 
-Bar length is mean KL divergence and nothing else. Bar color is the overall verdict, which also weighs the p99 tail and the top-token flip rate, so two of the three 8-bit KV bars sit in the green band and are still amber, and the 4-bit Llama-3.2-3B bar is red inside the amber band. [docs/threshold-policy.md](docs/threshold-policy.md) lists the ceilings. The right panel gets its own section further down.
+Bar length is mean KL divergence alone. Bar color is the overall verdict, which also weighs the p99 tail and the top-token flip rate, so a short bar can still be amber, and the 4-bit Llama-3.2-3B bar is red inside the amber band. [docs/threshold-policy.md](https://github.com/IonDen/mlx-quant-fidelity/blob/main/docs/threshold-policy.md) lists the ceilings. The right panel gets its own section below.
 
-KV cache, M1 Max, WikiText-2 test (100 chunks of 512 tokens), stress mode (quantize from token 0). Reproduce any row with `mlx-quant-fidelity kv <model> --kv-bits <bits> --max-chunks 100`; the full committed reports are under [`_artifacts/samples/`](_artifacts/samples).
+KV cache, M1 Max, WikiText-2 test (100 chunks of 512 tokens), stress mode (quantize from token 0). Reproduce any row with `mlx-quant-fidelity kv <model> --kv-bits <bits> --max-chunks 100`; the full committed reports are under [`_artifacts/samples/`](https://github.com/IonDen/mlx-quant-fidelity/blob/main/_artifacts/samples).
 
 | Model | KV bits | KL mean (nats) | flip rate | verdict |
 |---|---|---|---|---|
@@ -117,37 +120,17 @@ KV cache, M1 Max, WikiText-2 test (100 chunks of 512 tokens), stress mode (quant
 | Qwen2.5-7B | 4 | 9.36 | 0.99 | bad |
 | Qwen2.5-7B | 8 | 0.009 | 0.032 | marginal |
 
-8-bit KV costs little on all three models, though only Llama-3.2-3B clears the good tier outright. 4-bit is another matter, and Qwen2.5-7B at 4-bit in stress mode falls apart: nearly every token flips. This measurement establishes a checkpoint-specific failure, not its cause. mlx-lm's own generate command leaves the cache unquantized until token 5000, so those positions are computed while attention uses a full-precision cache. At the boundary, however, mlx-lm converts the entire stored prefix too. The Python API defaults differently: pass `kv_bits` to `mlx_lm.generate` and quantization starts at token 0 unless you also set `quantized_kv_start`. Run the tool first and you see the fidelity risk before deployment.
+8-bit KV costs little on all three models, though only Llama-3.2-3B gets a good verdict. At 4 bits, Qwen2.5-7B in stress mode falls apart: its flip rate is 0.99, so nearly every top token changes. The measurement shows the failure on this checkpoint, not its cause.
+
+Stress mode is harsher than mlx-lm's default generate command. In mlx-lm 0.31.3, the `mlx_lm.generate` command with `--kv-bits` keeps the first 5,000 tokens in full precision by default (`--quantized-kv-start`), then converts the whole stored prefix at the boundary. The Python function `generate_step` defaults `quantized_kv_start` to 0, so quantization starts at token 0 there. Running this tool first shows the fidelity risk before you deploy.
 
 ## Does drift change with position depth?
 
-Every stress-mode report already breaks mean and p99 KLD down by position depth within a chunk. `--chunk-length 4096` widens the window so those buckets span more positions.
-
-```bash
-mlx-quant-fidelity kv mlx-community/Llama-3.2-1B-Instruct-4bit \
-  --kv-bits 4 --chunk-length 4096 --max-chunks 12
-```
-
-Llama-3.2-1B at 4-bit KV, M1 Max, WikiText-2 test (12 chunks of 4096 tokens, the same ~50k-token corpus coverage as the 512-token samples above):
-
-| positions | KL mean | KL p99 |
-|---|---|---|
-| 0-510 | 0.1485 | 0.9470 |
-| 511-1022 | 0.1455 | 0.8659 |
-| 1023-1534 | 0.1534 | 0.9329 |
-| 1535-2046 | 0.1479 | 0.9568 |
-| 2047-2558 | 0.1439 | 0.9048 |
-| 2559-3070 | 0.1572 | 0.9835 |
-| 3071-3582 | 0.1537 | 0.9757 |
-| 3583-4094 | 0.1554 | 1.0237 |
-
-On this model and corpus, drift at position 4000 looks about the same as drift at position 60 — quantization cost isn't building up across the window at these lengths. That's a narrower claim than it might sound: 4096 tokens is short next to the context lengths where other work has found KV-quantization drift growing with depth. [docs/measurement-principles.md](docs/measurement-principles.md#drift-by-position-depth) covers the measured memory cost of longer windows and why the comparison to longer-context findings elsewhere isn't apples to apples. The full report, including the 8-bit KV counterpart, is under [`_artifacts/samples/`](_artifacts/samples) (`llama-3.2-1b-4bit-kv4-cl4096.md`, `llama-3.2-1b-4bit-kv8-cl4096.md`).
+On Llama-3.2-1B at 4-bit KV, M1 Max, WikiText-2 test (`--chunk-length 4096 --max-chunks 12`, so 12 chunks of 4096 tokens), drift at position 4000 looks about the same as drift at position 60. Quantization cost does not build up across the window at these lengths. That is a narrow claim: 4096 tokens is short next to the context lengths where other work has found KV-quantization drift growing with depth. The eight-row table, the memory cost of longer windows and the comparison with longer-context findings are in [docs/measurement-principles.md](https://github.com/IonDen/mlx-quant-fidelity/blob/main/docs/measurement-principles.md#drift-by-position-depth).
 
 ## How much does weight quantization cost?
 
-Same corpus and recipe, but the comparison is now a quantized model repo against a higher-precision reference repo. Reproduce any row with `mlx-quant-fidelity weights <quant> --reference <reference> --max-chunks 100`; the committed reports are under [`_artifacts/samples/weights/`](_artifacts/samples/weights).
-
-These five rows were captured with the 0.5.0 report format and are kept as recorded, so they predate the measured-geometry column in the comparison below.
+Same corpus and recipe, but the comparison is now a quantized model repo against a higher-precision reference repo. Reproduce any row with `mlx-quant-fidelity weights <quant> --reference <reference> --max-chunks 100`; the committed reports are under [`_artifacts/samples/weights/`](https://github.com/IonDen/mlx-quant-fidelity/blob/main/_artifacts/samples/weights). These five rows were recorded with the 0.5.0 report format and are kept as recorded.
 
 | Model | quant | reference | KL mean (nats) | flip rate | perplexity Δ | verdict |
 |---|---|---|---|---|---|---|
@@ -157,71 +140,19 @@ These five rows were captured with the 0.5.0 report format and are kept as recor
 | Llama-3.2-3B | 8-bit | bf16 | 0.0009 | 0.021 | 0.00 | good |
 | Qwen2.5-7B | 4-bit | 8-bit | 0.109 | 0.16 | +0.9 | marginal |
 
-8-bit weights are near-lossless: about 2% of top tokens flip and perplexity barely moves. Across these five rows, 4-bit flips 15 to 21% of top tokens and perplexity climbs by 0.9 to 3.5 points, worst on the smallest model here. The Qwen row compares 4-bit against 8-bit rather than bf16, so its drift is relative to an already-quantized reference, not full precision; the report records that the reference is 8-bit and says so in plain text. The verdict tiers are provisional, anchored to these q8 and q4 reference points on short prose rather than to downstream task accuracy.
-
-Unlike the KV probe, both runs use standard attention, so the drift is the deployed quantized model's weight-quant cost with no quantized-attention kernel folded in. It does still include the quantized-matmul kernel's numerics, which is exactly what you run when you load the model.
+8-bit weights are near-lossless: about 2% of top tokens flip and perplexity barely moves. Across the three 4-bit rows, 4-bit flips 15 to 21% of top tokens and perplexity climbs by 0.9 to 3.5 perplexity units, worst on the smallest model here. The Qwen row compares 4-bit against 8-bit rather than bf16, so its drift is relative to an already-quantized reference, not full precision. The verdict tiers are provisional, anchored to these q8 and q4 reference points on short prose rather than to downstream task accuracy.
 
 ### One model, five quantizations
 
-Qwen3-0.6B has a bf16 reference on the Hub and five quantized repos beside it, three of them at 4 bits. `compare weights` scores all five against that one reference:
-
-| target | cost | KL mean | KL p99 | flip | bits/wt | verdict | frontier |
-|---|---|---|---|---|---|---|---|
-| `mlx-community/Qwen3-0.6B-4bit-DWQ` | 335.5 MB | 0.3539 | 1.4570 | 0.2289 | 4.50 | bad | ✓ |
-| `mlx-community/Qwen3-0.6B-4bit` | 335.5 MB | 0.2538 | 1.5364 | 0.2586 | 4.50 | bad | ✓ |
-| `mlx-community/Qwen3-0.6B-4bit-AWQ` | 345.2 MB | 0.1608 | 1.1002 | 0.2117 | 4.63 | marginal | ✓ |
-| `mlx-community/Qwen3-0.6B-6bit` | 484.4 MB | 0.0213 | 0.1324 | 0.0781 | 6.50 | marginal | ✓ |
-| `mlx-community/Qwen3-0.6B-8bit` | 633.4 MB | 0.0040 | 0.0198 | 0.0331 | 8.50 | good | ✓ |
-
-```bash
-mlx-quant-fidelity compare weights \
-  mlx-community/Qwen3-0.6B-4bit@73e3e38d981303bc594367cd910ea6eb48349da8 \
-  mlx-community/Qwen3-0.6B-4bit-DWQ@e630d870397d5a2d95fe0c9075c6f499fc0fc5c8 \
-  mlx-community/Qwen3-0.6B-4bit-AWQ@3c064b3401d4a7d355262a1d518faa823a4d8f11 \
-  mlx-community/Qwen3-0.6B-6bit@45d962b21b1e813c3e9a7f3505391e72e8daba1e \
-  mlx-community/Qwen3-0.6B-8bit@11de96878523501bcaa86104e3c186de07ff9068 \
-  --reference mlx-community/Qwen3-0.6B-bf16@42096995f6402fde107068cf530136fe64b604f8 \
-  --max-chunks 100
-```
-
-Apple M1 Max, WikiText-2 test, 100 chunks of 512 tokens, peaking at 3.60 GiB across the five runs. The committed report is [`_artifacts/samples/compare/weight-qwen3-0.6b-ladder.md`](_artifacts/samples/compare/weight-qwen3-0.6b-ladder.md).
-
-The plain `-4bit` repo and the `-4bit-DWQ` repo are the same size to within 36 bytes, and the metrics disagree about which of them is better. The `-4bit-DWQ` repo has the higher mean KL on this model and this corpus, 0.3539 against 0.2538, and the lower flip rate and p99 tail, with a smaller perplexity delta: +3.59 against +4.51. Ranking scores quality on mean KL alone, so on that axis the `-4bit-DWQ` repo is the worse of the two, and neither row is dominated: the `-4bit-DWQ` row stays on the frontier only on its 36-byte cost edge.
-
-Of the three 4-bit repos, `-4bit-AWQ` is the best on every quality column and on perplexity delta (+3.23), and it stores 4.63 [bits per weight](docs/measurement-principles.md#what-the-weight-report-can-and-cannot-say-about-the-method) rather than 4.50; its geometry has one module at group 32 where the other 196 use 64. Above 4 bits the drift falls away quickly: 6-bit is marginal and 8-bit good on this model and this corpus. The report does not know which of these repos was produced with learned scales or activation-aware scaling — mlx-lm records only the geometry — so the rows are labeled by repo, not by method.
+Qwen3-0.6B has a bf16 reference on the Hub. `compare weights` scores five of its quantized repos against it (Apple M1 Max, WikiText-2 test, 100 chunks of 512 tokens, peak 3.60 GiB across the five runs). The 8-bit repo is the only one rated good (mean KL 0.0040), the 6-bit repo is marginal (0.0213), and the 4-bit repos run from 0.1608 (`-4bit-AWQ`, marginal) to 0.3539 (`-4bit-DWQ`, bad). The plain `-4bit` and `-4bit-DWQ` repos are the same size to within 36 bytes, and `-4bit-DWQ` has the higher mean KL here, 0.3539 against 0.2538, though it has the lower flip rate, p99 tail and perplexity change. The full table, the command with its pinned revisions and the reading are in [docs/weight-ladders.md](https://github.com/IonDen/mlx-quant-fidelity/blob/main/docs/weight-ladders.md#one-model-five-quantizations).
 
 ### The same ladder at 4B
 
-Qwen3-4B-Instruct-2507 has a bf16 reference and five quantized repos beside it, scored the same way:
-
-| target | cost | KL mean | KL p99 | flip | bits/wt | verdict | frontier |
-|---|---|---|---|---|---|---|---|
-| `mlx-community/Qwen3-4B-Instruct-2507-4bit` | 2.26 GB | 0.1106 | 0.7045 | 0.1717 | 4.50 | marginal | ✗ dominated by `mlx-community/Qwen3-4B-Instruct-2507-4bit-DWQ-2510` |
-| `mlx-community/Qwen3-4B-Instruct-2507-4bit-DWQ-2510` | 2.26 GB | 0.0638 | 0.5719 | 0.1181 | 4.50 | marginal | ✓ |
-| `mlx-community/Qwen3-4B-Instruct-2507-DDWQ` | 2.51 GB | 0.0401 | 0.3425 | 0.0920 | 5.00 | marginal | ✓ |
-| `mlx-community/Qwen3-4B-Instruct-2507-5.0bpw-dynamic` | 2.52 GB | 0.0478 | 0.3558 | 0.1021 | 5.00 | marginal | ✗ dominated by `mlx-community/Qwen3-4B-Instruct-2507-DDWQ` |
-| `mlx-community/Qwen3-4B-Instruct-2507-8bit` | 4.27 GB | 0.0017 | 0.0102 | 0.0209 | 8.50 | good | ✓ |
-
-```bash
-mlx-quant-fidelity compare weights \
-  mlx-community/Qwen3-4B-Instruct-2507-4bit@50d427756c6b1b2fe0c0a10f67fbda1fc8e82c1b \
-  mlx-community/Qwen3-4B-Instruct-2507-4bit-DWQ-2510@c073725c8ac051eabad9d64f4dcd3019d1072559 \
-  mlx-community/Qwen3-4B-Instruct-2507-DDWQ@88033de44951ebedb96e0adb68cc037443aab93a \
-  mlx-community/Qwen3-4B-Instruct-2507-5.0bpw-dynamic@6bd1669a2ed4f8f47a7a1fa6038c14fb2bbea608 \
-  mlx-community/Qwen3-4B-Instruct-2507-8bit@0e42af58449718de7931ee04f28191fbe6c43a56 \
-  --reference mlx-community/Qwen3-4B-Instruct-2507-bf16@f9e77d4283734966e9cd641bf35547f0cff5d427 \
-  --max-chunks 100
-```
-
-Apple M1 Max, WikiText-2 test, 100 chunks of 512 tokens, peaking at 13.50 GiB across the five runs. The committed report is [`_artifacts/samples/compare/weight-qwen3-4b-2507-ladder.md`](_artifacts/samples/compare/weight-qwen3-4b-2507-ladder.md).
-
-The two uniform 4-bit repos are the same size, and here the `-4bit-DWQ-2510` repo has the lower drift: mean KL 0.0638 against 0.1106 for `-4bit`, with a lower flip rate (0.1181 against 0.1717) and p99 tail. The `-4bit` row is dominated by it. At 0.6B the same pair came out the other way round.
-
-The `-DDWQ` and `-5.0bpw-dynamic` repos are mixed-precision, so they are reported by measured geometry, not by a method name: the `-DDWQ` repo holds 165 modules at 4 bits and 88 at 6 bits, the `-5.0bpw-dynamic` repo 109 at 4 bits and 144 at 5 bits, and both come to 5.00 bits per weight. At that size the `-DDWQ` repo has the lower mean KL (0.0401 against 0.0478) and is also slightly smaller (2.51 GB against 2.52 GB), so the `-5.0bpw-dynamic` repo is dominated by it. The frontier is the `-4bit-DWQ-2510`, `-DDWQ` and `-8bit` repos. The 8-bit repo is the only one rated good, at a mean KL of 0.0017. As with the 0.6B ladder, the report records geometry only, so repo names are the repos' own claims and not something the tool checked.
+Qwen3-4B-Instruct-2507 has a bf16 reference and five quantized repos, scored the same way (peak 13.50 GiB across the five runs). Again only the 8-bit repo is rated good (mean KL 0.0017). Here `-4bit-DWQ-2510` has lower drift than the plain `-4bit` repo, 0.0638 against 0.1106, the other way round from 0.6B. The table and command are in [docs/weight-ladders.md](https://github.com/IonDen/mlx-quant-fidelity/blob/main/docs/weight-ladders.md#the-same-ladder-at-4b).
 
 ## Comparing quantizations by quality per byte
 
-`compare` ranks a set of quantizations on a memory-normalized Pareto frontier: quality (mean KL divergence) on one axis, memory cost on the other. It identifies any configuration that another option on the list matches or beats on both axes and beats on at least one — those are dominated and you would never choose them.
+`compare` ranks a set of quantizations on a memory-normalized Pareto frontier: quality (mean KL divergence) on one axis, memory cost on the other. A configuration that another option matches or beats on both axes, and beats on at least one, is dominated, and you would never choose it.
 
 ![Diagram explaining domination: configuration A is no worse than B on quality, its mean KL divergence being no higher, and no worse on cost, its cache bytes per token being no higher. B wins on neither axis while A beats it on at least one, so B is dominated and no memory budget would make it the right pick. Ranking reports domination so options can be discarded outright instead of weighed by hand](https://raw.githubusercontent.com/IonDen/mlx-quant-fidelity/main/docs/assets/diagrams/pareto-domination.svg)
 
@@ -233,20 +164,14 @@ mlx-quant-fidelity compare weights q4 q6 q8 --reference fp16
 mlx-quant-fidelity compare kv <model> --configs 4:32,4:64,8:64
 
 # or auto-generate the grid from the model's config.json instead of listing configs by hand
-mlx-quant-fidelity compare kv <model> --sweep --max-kv-bytes-per-token 200
+mlx-quant-fidelity compare kv mlx-community/Llama-3.2-1B-Instruct-4bit --sweep --max-kv-bytes-per-token 10000
 ```
 
-Add `--max-kld 0.05` to get the cheapest configuration whose mean KLD stays under a threshold, or `--min-tier good` to get the cheapest one that passes the good-tier verdict. `--sweep` builds the (bits × group-size) grid from the model's config alone, no weight download needed, and drops any combination that would crash the upstream KV cache implementation; `--max-kv-bytes-per-token` narrows that grid to configurations under a memory budget. Either way, skipped configurations are listed in the report rather than silently dropped. [docs/ranking-principles.md](docs/ranking-principles.md) explains how each axis is computed, what Pareto domination means in practice, and where the ranking has limits.
+Add `--max-kld 0.05` to get the cheapest configuration whose mean KL stays under a threshold, or `--min-tier good` for the cheapest one with a good verdict. `--sweep` builds the (bits × group-size) grid from the model's config alone, with no weight download, and `--max-kv-bytes-per-token` keeps only configurations under a memory budget, counted in bytes per token across all layers; skipped configurations are listed in the report. [docs/ranking-principles.md](https://github.com/IonDen/mlx-quant-fidelity/blob/main/docs/ranking-principles.md) explains how each axis is computed and where the ranking has limits.
 
 ### Measuring a third-party KV cache (TurboQuant-MLX)
 
-The KV probe is not tied to mlx-lm's cache. `--kv-method turboquant` measures the
-[TurboQuant-MLX](https://github.com/arozanov/turboquant-mlx) uniform-bit cache on the same
-paired, teacher-forced, full-vocabulary yardstick, and `compare kv` ranks it against the stock
-configurations memory-normalized. Install the pinned port first — the PyPI package named
-`turboquant-mlx` is unrelated. The tool checks the install record before importing the port and accepts
-only an https git install of this repository (a different commit is measured with a note in the
-report); a PyPI, editable, SSH or fork install is refused on purpose:
+`--kv-method turboquant` measures the [TurboQuant-MLX](https://github.com/arozanov/turboquant-mlx) uniform-bit cache on the same yardstick, and `compare kv` ranks it against the stock configurations. Install the pinned port first; the PyPI package named `turboquant-mlx` is unrelated. The tool checks the install record before importing the port and accepts only an https git install of this repository (a different commit is measured with a note in the report); a PyPI, editable, SSH or fork install is refused on purpose:
 
 ```bash
 pip install "turboquant-mlx @ git+https://github.com/arozanov/turboquant-mlx@6e928d715595dee9f6b6cc3968baa44e1f408d28"
@@ -255,44 +180,11 @@ mlx-quant-fidelity compare kv mlx-community/Llama-3.2-1B-Instruct-4bit --configs
 
 With uv, `uv sync --group turboquant` installs the same pin.
 
-```
-# Quant comparison (kv) vs `mlx-community/Llama-3.2-1B-Instruct-4bit`
-
-| target | cost | KL mean | KL p99 | flip | bundled KL | resident +/token | verdict | frontier |
-|---|---|---|---|---|---|---|---|---|
-| `turboquant:3` | 8.2 KB | 0.4229 | 2.3559 | 0.3259 | — | 65.5 KB | bad | ✓ |
-| `4:64` | 9.2 KB | 0.1485 | 0.9571 | 0.2056 | 0.1477 | 0 B | bad | ✗ dominated by `turboquant:4` |
-| `turboquant:4` | 9.2 KB | 0.0825 | 0.5663 | 0.1582 | — | 65.5 KB | bad | ✓ |
-| `affine:8:2` | 11.3 KB | 0.2180 | 1.3105 | 0.2391 | — | 32.8 KB | bad | ✗ dominated by `turboquant:4` |
-| `affine:8:4` | 13.3 KB | 0.0120 | 0.0818 | 0.0628 | — | 32.8 KB | bad | ✓ |
-| `8:64` | 17.4 KB | 0.0004 | 0.0028 | 0.0121 | 0.0004 | 0 B | marginal | ✓ |
-| `turboquant-vonly:3` | 36.9 KB | 0.0297 | 0.2025 | 0.0974 | — | 32.8 KB | bad | ✗ dominated by `affine:8:4` |
-| `turboquant-vonly:4` | 37.4 KB | 0.0078 | 0.0520 | 0.0508 | — | 32.8 KB | bad | ✗ dominated by `8:64` |
-```
-
-Read this table with two things in mind. The `KL mean` column is quantizer-only for every row:
-`turboquant`, `turboquant-vonly`, and `affine` dequantize on fetch and ride standard SDPA by
-construction, and `4:64`/`8:64` ran a `--control` forward alongside their deployed path so stock
-ranks on the same footing. Stock's own deployed-path number — mlx-lm's two-quantized-matmul
-attention — is the `bundled KL` column instead; on this sample it barely differs from the
-quantizer-only column (0.1477 vs 0.1485 for `4:64`) — the two numbers land within about half a
-percent of each other at this configuration and scale, not evidence that the kernel's own
-contribution is small or zero in general (see
-[docs/measurement-principles.md](docs/measurement-principles.md#decomposing-bundled-and-quantizer-only-drift)).
-And the `cost` column is stored bytes, not the memory a method's fetch path needs while it runs:
-`turboquant` and its V-only variant keep full-precision dequantization buffers beyond what they
-store, shown in `resident +/token` — `turboquant-vonly`'s pinned port even stores an unused fp16
-copy of V, so its stored bytes exceed a plain fp16 cache's even though V itself compresses (see
-[docs/ranking-principles.md](docs/ranking-principles.md#stored-bytes-vs-resident-memory)). The
-uniform-bit cache and its V-only variant are measured at the port's default seed; its asymmetric
-and layer-adaptive configurations are not, and its `make_adaptive_cache` silently ignores the
-documented `k_bits`/`v_bits` parameters at the pinned commit. `affine:k:v` measures an independent
-per-side bit width that no shipped cache runs. Sample captured on Apple M1 Max, 32 GB, revision
-`08231374…`, 100 chunks of 512 tokens, stress mode.
+On Llama-3.2-1B (M1 Max, WikiText-2 test, 100 chunks of 512 tokens, stress mode), `turboquant:4` has a mean KL of 0.0825 against 0.1485 for stock `4:64` at the same stored cost of 9.2 KB per token, so `4:64` is dominated; both are rated bad. Stored cost leaves out working memory: `turboquant:4` also holds about 65.5 KB per token of full-precision working buffers while it runs, and stock holds none. Every row's mean KL is quantizer-only. The full table, how to read its `cost` and `resident +/token` columns, and what the pinned port leaves unmeasured are in [docs/third-party-kv-cache.md](https://github.com/IonDen/mlx-quant-fidelity/blob/main/docs/third-party-kv-cache.md#measuring-a-third-party-kv-cache-turboquant-mlx).
 
 ## How it works: teacher-forced paired scoring
 
-Teacher-forced scoring, not generation. For each fixed-length corpus chunk the model runs twice on the *same* tokens — once with a full-precision KV cache, once with a quantized one — and the two next-token distributions are compared position by position. Generation would let the runs diverge in their own inputs the moment quantization changed a sampled token, turning the measurement into trajectory drift instead of cache cost. Logits collapse to per-position scalars inside the chunk loop and are released before the next chunk, so a long corpus never holds full distributions in memory.
+Teacher-forced scoring, not generation. For each fixed-length corpus chunk the model runs twice on the *same* tokens, once with a full-precision KV cache and once with a quantized one, and the two next-token distributions are compared position by position. Generation would let the runs diverge in their own inputs the moment quantization changed a sampled token, so the measurement would show trajectory drift instead of cache cost. Logits collapse to per-position scalars inside the chunk loop and are released before the next chunk, so a long corpus never holds full distributions in memory.
 
 ![Diagram of the paired teacher-forced scoring loop: a fixed corpus chunk feeds a reference run with a full-precision KV cache and a quantized run with a quantized KV cache; both produce vocabulary-wide fp32 logits that are reduced inside the loop to per-position scalars for KL divergence, top-token flip and target negative log-likelihood; the scalars are evaluated, the per-chunk caches are dropped and the cache pool cleared, and the loop advances, so no vocabulary-wide tensor outlives its chunk](https://raw.githubusercontent.com/IonDen/mlx-quant-fidelity/main/docs/papers/diagrams/paired-scoring-chunk-loop.svg)
 
@@ -300,19 +192,18 @@ Every report records which of two modes produced it.
 
 ![Diagram comparing the two measurement modes. In stress mode with quantize-start 0, the default, every position runs against a quantized cache from the very first token, and every position is scored. In deployment mode with quantize-start 5000, positions 0 through 4999 are computed against a full-precision cache; at position 5000 the entire stored cache converts to quantized and no full-precision prefix is kept; positions 5000 and beyond run against the quantized cache, and only the post-boundary positions are scored](https://raw.githubusercontent.com/IonDen/mlx-quant-fidelity/main/docs/assets/diagrams/stress-vs-deployment.svg)
 
-Stress mode (`--quantize-start 0`, the default) quantizes from token 0 — the harsh, apples-to-apples quantizer test. Deployment mode (`--quantize-start N`) computes the first N positions with a full-precision cache, then converts the entire stored cache and scores only the post-boundary region. That matches mlx-lm's `--quantized-kv-start` conversion behavior, which does not preserve a full-precision prefix in storage. [docs/measurement-principles.md](docs/measurement-principles.md) explains why deployment and stress drift need a matched comparison and why neither is a long-context deployment average.
+Stress mode (`--quantize-start 0`, the default) quantizes from token 0, the harsh, apples-to-apples quantizer test. Deployment mode (`--quantize-start N`) computes the first N positions with a full-precision cache, then converts the entire stored cache and scores only the post-boundary region. That matches mlx-lm's `--quantized-kv-start` conversion behavior, which does not preserve a full-precision prefix in storage. [docs/measurement-principles.md](https://github.com/IonDen/mlx-quant-fidelity/blob/main/docs/measurement-principles.md) explains why deployment and stress drift need a matched comparison and why neither is a long-context deployment average.
 
 A run that returns exactly zero drift raises instead of reporting a silent "perfect fidelity." That almost always means quantization never engaged, not that it was free.
 
-The weight probe works the same way with two models instead of two caches: a quantized repo and a reference repo, scored on the same corpus tokens. Both `config.json` files are read before either model loads: a mismatched pair (a different architecture or vocabulary, or a "quantized" repo whose config declares no quantization) is refused there. A memory pre-flight then sizes the two models, from the local cache or from Hub metadata for a repo you haven't downloaded yet, adds the per-chunk logits, and refuses a pair too large for the device rather than risking a kernel panic. When neither source gives a size, the run goes ahead and the report says the pre-flight was skipped.
-
-See [docs/measurement-principles.md](docs/measurement-principles.md) for the zero-probability policy, the exact-zero guard, and how perplexity delta relates to mean KLD.
+The weight probe works the same way with two models instead of two caches: a quantized repo and a reference repo, scored on the same corpus tokens. It refuses a mismatched or oversized pair before either model loads. The zero-probability policy, how perplexity delta relates to mean KL, and why the weight probe's drift still includes the quantized-matmul kernel's numerics are in [docs/measurement-principles.md](https://github.com/IonDen/mlx-quant-fidelity/blob/main/docs/measurement-principles.md).
 
 ## What a fidelity number can't tell you
 
-- A fidelity number is **corpus- and context-length-specific**. WikiText-2 at temperature 0 measures short-prose distributional drift; the paper this builds on, *Accuracy Is Not All You Need*, shows that under-predicts task-specific and long-context degradation. Every report records the corpus and the token count so the number is never read as a bare score.
-- Perplexity delta is reported for continuity with llama.cpp. It is related to but distinct from mean KLD — it scores the realized next token and can diverge from full-vocabulary drift — so it is not independent corroboration.
-- The KV probe's deployed-path drift bundles the quantizer's error with the quantized-attention kernel's numerics. That is the real end-to-end cost. `kv --control` (stock only) measures the quantizer alone alongside it, and `compare kv` always ranks on that quantizer-only number — see [docs/measurement-principles.md](docs/measurement-principles.md#decomposing-bundled-and-quantizer-only-drift).
+- A fidelity number is specific to its corpus and context length. WikiText-2 at temperature 0 measures short-prose distributional drift, and the paper this builds on, *Accuracy Is Not All You Need*, shows that such a score under-predicts task-specific and long-context degradation. Every report records the corpus and the token count so the number is never read as a bare score.
+- Perplexity delta is reported for continuity with llama.cpp. It is related to but distinct from mean KL: it scores the realized next token and can diverge from full-vocabulary drift, so it is not independent corroboration.
+- The KV probe's deployed-path drift bundles the quantizer's error with the quantized-attention kernel's numerics, which is the real end-to-end cost. `kv --control` (stock only) measures the quantizer alone, and `compare kv` ranks on that number; see [docs/measurement-principles.md](https://github.com/IonDen/mlx-quant-fidelity/blob/main/docs/measurement-principles.md#decomposing-bundled-and-quantizer-only-drift).
+- Models whose cache holds something other than plain keys and values need their own reading: [MLA models](https://github.com/IonDen/mlx-quant-fidelity/blob/main/docs/measurement-principles.md#mla-models-and-what-their-cache-stores) store a compressed latent, and [hybrid models](https://github.com/IonDen/mlx-quant-fidelity/blob/main/docs/measurement-principles.md#partial-coverage-of-hybrid-models) are measured on only some of their layers.
 
 ## Python API
 
@@ -359,41 +250,35 @@ print(report.kv_method, report.kl.mean, report.drift_footing)
 | 2 | a user error: a bad option, a missing or gated repo, no network, a refused configuration, or a refused measurement (a NaN metric, an exact-zero result) |
 | 3 | the memory watchdog stopped the run |
 
-Every command reads the model's `config.json` before loading any weights. mlx-lm runs the Python file a repo names under `model_file` when it loads the model, so a repo whose config names one is refused unless you pass `--allow-custom-code`, and the model is then loaded at exactly the commit whose `config.json` was checked. Invalid method parameters and a missing TurboQuant install are also caught at this point, before a download starts. A `turboquant_mlx` module that shadows the pinned port is refused before it is imported. A TurboQuant method that does not fit the model's cache layout, such as `turboquant` on `deepseek_v2`, is also refused in `kv` and `compare kv` after `config.json` is read and before the download.
+Every command reads the model's `config.json` before loading any weights. mlx-lm runs the Python file a repo names under `model_file` when it loads the model, so a repo whose config names one is refused unless you pass `--allow-custom-code`. Use the flag only for repos you trust. The model is then loaded at exactly the commit whose `config.json` was checked. Invalid method parameters, a missing TurboQuant install and a TurboQuant method that does not fit the model's cache layout are also caught here, before a download starts.
 
-`--allow-custom-code` also decides whether a tokenizer's own code may run. That refusal (exit code 2) comes before any weight download: the tool reads `config.json` and `tokenizer_config.json` first. This costs at most one extra small request, unless you pass the flag or point at a local directory. The check asks the installed transformers whether the tokenizer needs the repo's code, and it can answer on transformers 5.4.0 or later. On an older version the file is still downloaded, but the refusal comes at the model load, after the weights have downloaded and loaded and before any code from the repo has run. The same happens when the tokenizer cannot be classified.
+`--allow-custom-code` also covers a tokenizer that needs its own code. On transformers 5.4.0 or later the refusal (exit code 2) comes before any weight download. On an older version it comes at the model load, after the weights have downloaded and loaded and before any code from the repo has run. [docs/cli-reference.md](https://github.com/IonDen/mlx-quant-fidelity/blob/main/docs/cli-reference.md#tokenizer-code-check) has the rest.
 
 `compare` records a target it cannot read as a failed row and carries on with the rest. A shared reference it cannot read (`compare weights`), or an unreadable model (`compare kv`), is exit 2, since no row could be measured.
 
-Every entry point, the Python API included, caps MLX's wired memory and its buffer cache (4 GiB) before loading. The CLI also runs a watchdog that exits with code 3 once MLX's active plus cached memory passes the device's memory size less 4 GiB. That ceiling is only a backstop. The pre-flight gates described in [docs/measurement-principles.md](docs/measurement-principles.md#memory-guards) are what should refuse an oversized run before it starts. Long runs print progress to stderr; standard output carries only the report.
+Every entry point, the Python API included, caps MLX's wired memory and its buffer cache (4 GiB) before loading. The CLI also runs a watchdog that exits with code 3 once MLX's active plus cached memory passes the device's memory size less 4 GiB; the Python API starts no watchdog. That ceiling is only a backstop. The pre-flight gates described in [docs/measurement-principles.md](https://github.com/IonDen/mlx-quant-fidelity/blob/main/docs/measurement-principles.md#memory-guards) are what should refuse an oversized run before it starts. Long runs print progress to stderr; standard output carries only the report.
 
 ## Further reading
 
-- [Low-bit KV caches on MLX: what exists and what is missing](https://ineshin.space/papers/low-bit-kv-caches-on-mlx-what-exists-and-what-is-missing/) — surveys mlx-lm's shipped cache, the measured 8-bit and 4-bit fidelity cost, KIVI and KVQuant-style alternatives, and the remaining MLX layout and kernel gaps.
-- [How to measure what quantization actually costs](https://ineshin.space/papers/how-to-measure-what-quantization-actually-costs/) — the methods companion: teacher-forced paired scoring, streaming full-vocabulary KL on a 32 GB machine, the guards that keep a harness from passing by doing nothing, and where the verdict thresholds honestly come from.
-- [What an MLX quantized repository does and does not tell you](https://ineshin.space/papers/what-an-mlx-quantized-repository-does-and-does-not-tell-you/) — the plain and DWQ 4-bit Qwen3-0.6B repos have byte-identical configs, effective bits per weight run above the nominal width, and on that pair six fidelity metrics split two against four.
+- [Low-bit KV caches on MLX: what exists and what is missing](https://ineshin.space/papers/low-bit-kv-caches-on-mlx-what-exists-and-what-is-missing/): mlx-lm's shipped cache, the measured 8-bit and 4-bit cost, and the gaps that remain.
+- [How to measure what quantization actually costs](https://ineshin.space/papers/how-to-measure-what-quantization-actually-costs/): the method behind this tool.
+- [What an MLX quantized repository does and does not tell you](https://ineshin.space/papers/what-an-mlx-quantized-repository-does-and-does-not-tell-you/): the plain and DWQ 4-bit Qwen3-0.6B repos have byte-identical configs, yet their fidelity metrics disagree about which is better.
 - More writing at [ineshin.space](https://ineshin.space).
 
 ## Status
 
-0.12.1, released on PyPI as `mlx-quant-fidelity`, stops a run that cannot work from downloading the model first. A TurboQuant method that does not fit the model's cache layout, such as `turboquant` on `deepseek_v2`, is now refused in `kv` and `compare kv` after the tool reads `config.json`, which saves about 9 GB on DeepSeek-V2-Lite 4-bit. A repo whose tokenizer needs its own code is refused before the weights download unless you pass `--allow-custom-code`, in `kv`, `weights`, `compare kv` and `compare weights`. That check makes at most one extra small request, for `tokenizer_config.json`, and works on transformers 5.4.0 or later; on older versions the refusal stays at load. The error messages and exit codes of these refusals are the same. In Python, `preload_check` gains an optional `check_tokenizer` keyword, on by default.
+0.12.1, released on PyPI as `mlx-quant-fidelity`, is a bug-fix release. A run that cannot work, because a TurboQuant method does not fit the model or a tokenizer needs its own code, is now refused before the weights download (the tokenizer check needs transformers 5.4.0 or later). Every release is in [CHANGELOG.md](https://github.com/IonDen/mlx-quant-fidelity/blob/main/CHANGELOG.md), and what comes next is in [ROADMAP.md](https://github.com/IonDen/mlx-quant-fidelity/blob/main/ROADMAP.md).
 
-`youtu_llm` now gets a cost and a memory check after the load, where 0.12.0 showed "cost unavailable" in `compare kv`. Its cost counts keys 192 and values 128 wide. `turboquant` is still refused on it, and the message now names key width 192. `turboquant-vonly` is allowed. These figures come from mlx-lm's model source and are not measured against real cache bytes. `baichuan_m1` and `plamo2` get no cost: every method still refuses them, as in 0.12.0, but none of their refusal messages says "unknown" or `head_dim=None` any more, and the TurboQuant refusal now names the cache layer it cannot use. A connection that drops while `config.json` downloads, or a `config.json` nested too deeply to parse, now end with the tool's own error and exit code 2 instead of "internal error" and exit code 1.
-
-0.12.0 fixed the KV cost on models that store keys and values at different widths. The cost per token now counts each at its own width, and `--max-kv-bytes-per-token` uses the same two widths, as does the memory pre-flight on `deepseek_v2`. On DeepSeek-V2-Lite (keys 192 wide, values 128) the cost is 77.8 KB for `4:64`, 119.2 KB for `affine:8:4` and 146.9 KB for `8:64`, equal to the bytes measured on the stored cache; before, it fell below them. A model with multi-head latent attention (MLA) fields under any other `model_type` gets no cost, because the tool cannot state its widths from the config; `compare kv` lists such a configuration as excluded and unranked, and `compare kv --sweep` exits with code 2 on such a model. A third-party `KVCacheMethod` can accept an optional `v_dim` keyword, and one that does not fails only on a model whose widths differ. Models whose keys and values are the same width (Llama, Qwen, Gemma) keep their costs, and saved `compare kv` results are scored again once.
-
-0.11.1 was a packaging release: the Python 3.11 floor in the badge, and Python 3.14 tested in CI and listed as supported.
-
-0.11.0 was a coverage release: a second weight ladder on Qwen3-4B-Instruct-2507, a KV comparison on DeepSeek-V2-Lite-Chat, and a [methodology section on MLA models](docs/measurement-principles.md#mla-models-and-what-their-cache-stores). A model whose attention cannot run on the chosen cache is now refused before scoring, and a `turboquant_mlx` install that shadows the pinned port is refused before it is imported. `--allow-custom-code` also covers a tokenizer's own code, though in 0.11.0 that check fired only after the weights had downloaded and loaded (0.12.1 moves it before the download). The weight probe's memory pre-flight now sizes a model from its shard index. That only feeds the pre-flight: a partial snapshot that fits passes, and mlx-lm's load then completes the download. Threshold validation and the remaining attention coverage are on the [roadmap](ROADMAP.md).
+Questions and shared results go to [GitHub Discussions](https://github.com/IonDen/mlx-quant-fidelity/discussions), bugs to [Issues](https://github.com/IonDen/mlx-quant-fidelity/issues).
 
 ## License
 
-[Apache-2.0](LICENSE).
+[Apache-2.0](https://github.com/IonDen/mlx-quant-fidelity/blob/main/LICENSE).
 
 ## Sister projects
 
 Other MLX libraries for Apple Silicon:
 
-- [mlx-taef](https://github.com/IonDen/mlx-taef) — tiny autoencoders for fast diffusion-latent previews and low-memory decode (FLUX / SD).
-- [mlx-teacache](https://github.com/IonDen/mlx-teacache) — TeaCache residual caching to skip redundant FLUX denoising steps.
-- [mlx-model-doctor](https://github.com/IonDen/mlx-model-doctor) — validate an MLX / Hugging Face model repo before you load it (config, tokenizer, safetensors, memory).
+- [mlx-taef](https://github.com/IonDen/mlx-taef): tiny autoencoders for fast diffusion-latent previews and low-memory decode (FLUX / SD).
+- [mlx-teacache](https://github.com/IonDen/mlx-teacache): TeaCache residual caching to skip redundant FLUX denoising steps.
+- [mlx-model-doctor](https://github.com/IonDen/mlx-model-doctor): validate an MLX / Hugging Face model repo before you load it.
