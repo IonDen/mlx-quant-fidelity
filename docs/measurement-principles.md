@@ -105,6 +105,8 @@ What it does report is measured from the loaded model. `quant_geometry` lists ea
 
 `quant_bits_per_weight` is the effective precision: the loaded model's array bytes times eight, divided by its parameter count, using the same definition `mlx_lm.convert` prints — scale and bias storage included, unquantized parameters included. A uniform 4-bit, group-64 model comes out at 4.50 (4 bits plus two fp16 values per 64 weights). It is a per-parameter view of the model's size, not a second cost axis beside the on-disk bytes the ranking uses.
 
+Unlike the KV probe, both runs use standard attention, so the drift is the deployed quantized model's weight-quant cost with no quantized-attention kernel folded in. It does still include the quantized-matmul kernel's numerics, which is exactly what you run when you load the model.
+
 ## Stress vs deployment — what each number measures
 
 `--quantize-start N` computes the first N prediction positions while both runs use full-precision caches. At the boundary, the quantized run converts its entire stored cache, including the prefix, in one step. Later entries are quantized as they are written. The reported metrics exclude the first N positions because their logits were computed before conversion and match the reference.
@@ -191,6 +193,28 @@ Every stress-mode report over a fixed-window corpus also buckets its per-positio
 
 The table only appears in stress mode, and only when every scored chunk carries the same number of positions. Deployment mode's post-boundary region isn't a fixed width across configurations, and pooling an unequal-length corpus by position index would conflate depth with wherever a chunk happens to end. When the scored chunks don't match in length, the probe drops the table and adds a report warning that points back to this section instead of publishing a number that misrepresents depth.
 
+A measured example, run with `--chunk-length 4096` to widen the window:
+
+```bash
+mlx-quant-fidelity kv mlx-community/Llama-3.2-1B-Instruct-4bit \
+  --kv-bits 4 --chunk-length 4096 --max-chunks 12
+```
+
+Llama-3.2-1B at 4-bit KV, M1 Max, WikiText-2 test (12 chunks of 4096 tokens, the same ~50k-token corpus coverage as the 512-token samples):
+
+| positions | KL mean | KL p99 |
+|---|---|---|
+| 0-510 | 0.1485 | 0.9470 |
+| 511-1022 | 0.1455 | 0.8659 |
+| 1023-1534 | 0.1534 | 0.9329 |
+| 1535-2046 | 0.1479 | 0.9568 |
+| 2047-2558 | 0.1439 | 0.9048 |
+| 2559-3070 | 0.1572 | 0.9835 |
+| 3071-3582 | 0.1537 | 0.9757 |
+| 3583-4094 | 0.1554 | 1.0237 |
+
+On this model and corpus, drift at position 4000 looks about the same as drift at position 60: quantization cost isn't building up across the window at these lengths. The full report, including the 8-bit KV counterpart, is under [`_artifacts/samples/`](../_artifacts/samples) (`llama-3.2-1b-4bit-kv4-cl4096.md`, `llama-3.2-1b-4bit-kv8-cl4096.md`).
+
 Depth buckets get more informative as the window grows, so `kv` and `compare kv` take a `--chunk-length` option (default 512, capped at 4096). Paired fp32 logits for one chunk scale with window length times vocabulary size, so a longer window costs proportionally more memory — both runs hold a full logits tensor at once before it collapses to per-position scalars. Measured peaks on Llama-3.2-1B-4bit at kv4, group size 64 (Apple M1 Max, 32 GB; reproducer: `scripts/spike_long_window_memory.py`):
 
 | chunk length | peak memory | source |
@@ -229,7 +253,7 @@ The KV probe runs two checks before it builds a cache or runs a forward pass. Th
 
 Both checks need the vocabulary size and layer geometry. Some mlx-lm architectures keep these under a nested `text_config`; the probe reads them from there. If the vocabulary still can't be derived, a window above 512 tokens is refused, and at 512 or below the report carries a warning that the budget was unchecked.
 
-The weights probe holds two models at once, so its check runs before either loads. It reads both `config.json` files, sizes each repo from the local cache or, for a repo not downloaded yet, from its Hub file listing (the root `model*.safetensors` files mlx-lm loads), adds the per-chunk logits at the corpus window, and refuses the pair if weights, logits and 2 GiB of headroom exceed the device working set. When neither source gives a size, the run proceeds and the report says the pre-flight was skipped.
+The weights probe holds two models at once, so its check runs before either loads. It reads both `config.json` files before either model loads and refuses a mismatched pair there (a different architecture or vocabulary, or a "quantized" repo whose config declares no quantization). It then sizes each repo from the local cache or, for a repo not downloaded yet, from its Hub file listing (the root `model*.safetensors` files mlx-lm loads), adds the per-chunk logits at the corpus window, and refuses the pair if weights, logits and 2 GiB of headroom exceed the device working set. When neither source gives a size, the run proceeds and the report says the pre-flight was skipped.
 
 Two backstops sit behind those checks. Every entry point, the Python API included, caps MLX's buffer cache at 4 GiB, since freed buffers stay resident in that cache until it is trimmed. The CLI also runs a watchdog thread that polls MLX's active plus cached memory every 50 ms and exits with code 3 once the total passes the device's memory size less 4 GiB. `compare weights` runs each target in its own process, with the same watchdog and a wall-clock limit (`--worker-timeout`).
 

@@ -88,6 +88,8 @@ For `--min-tier`, the situation is different. Tier qualification uses the full v
 
 To pick a threshold: start by reading the comparison table. If all frontier targets have acceptable quality, take the cheapest one. To put a number on "acceptable," use `--max-kld` with a threshold from [docs/threshold-policy.md](threshold-policy.md) — for example, 0.01 nats is the mean-KLD ceiling a `good` verdict has to clear. The 8-bit weight measurements in the README land about ten times below it.
 
+To avoid listing KV configurations by hand, `compare kv --sweep` builds the (bits × group-size) grid from the model's `config.json` alone, with no weight download, and drops any combination that would crash the upstream KV cache implementation. `--max-kv-bytes-per-token` narrows that grid to configurations under a memory budget. Either way, skipped configurations are listed in the report rather than silently dropped.
+
 ## Interpretation and limits
 
 Fidelity numbers are corpus- and context-length-specific. The measurements use WikiText-2 short prose at temperature 0. The paper this work builds on, *Accuracy Is Not All You Need* (arXiv:2407.09141), documents that short-prose distributional drift under-predicts degradation on long-context tasks and code. Every report records the corpus and token count so the number is not read as a bare score without context.
